@@ -175,20 +175,24 @@ class FitDataset(AbstractFit):
     @property
     def grids(self) -> GridsInterface:
 
-        def subtracted_from(grid, offset):
+        """
+        Qiuhan Updated
+        """
+
+        def subtracted_and_rotated_from(grid, offset, angle):
             if grid is None:
                 return None
 
-            return grid.subtracted_from(offset=offset, xp=self._xp)
+            return grid.subtracted_and_rotated_from(offset=offset, angle=angle, xp=self._xp)
 
-        lp = subtracted_from(
-            grid=self.dataset.grids.lp, offset=self.dataset_model.grid_offset
+        lp = subtracted_and_rotated_from(
+            grid=self.dataset.grids.lp, offset=self.dataset_model.grid_offset, angle=self.dataset_model.grid_rotation_angle
         )
-        pixelization = subtracted_from(
-            grid=self.dataset.grids.pixelization, offset=self.dataset_model.grid_offset
+        pixelization = subtracted_and_rotated_from(
+            grid=self.dataset.grids.pixelization, offset=self.dataset_model.grid_offset, angle=self.dataset_model.grid_rotation_angle 
         )
-        blurring = subtracted_from(
-            grid=self.dataset.grids.blurring, offset=self.dataset_model.grid_offset
+        blurring = subtracted_and_rotated_from(
+            grid=self.dataset.grids.blurring, offset=self.dataset_model.grid_offset, angle=self.dataset_model.grid_rotation_angle
         )
 
         return GridsInterface(

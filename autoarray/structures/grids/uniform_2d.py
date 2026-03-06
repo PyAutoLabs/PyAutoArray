@@ -726,6 +726,72 @@ class Grid2D(Structure):
             over_sampled=self.over_sampled - xp.array(offset),
             over_sampler=self.over_sampler,
         )
+    
+    def subtracted_and_rotated_from(
+        self, offset: Tuple[float, float], angle: float, xp=np
+    ) -> Grid2D:
+        """
+        Returns a new Grid2D from this grid, where the (y,x) coordinates of this grid have an offset subtracted from
+        them and are then rotated by an input angle.
+
+        1) Subtract offset: (y', x') = (y - offset_y, x - offset_x)
+        2) Rotate: y'' = y' * cos(angle) - x' * sin(angle)
+                   x'' = y' * sin(angle) + x' * cos(angle)
+
+        Parameters
+        ----------
+        offset
+            The (y,x) offset which is subtracted from the grid.
+        angle
+            The angle (in radians) to rotate the grid.
+        """
+
+        mask = Mask2D(
+            mask=self.mask,
+            pixel_scales=self.pixel_scales,
+            origin=(self.origin[0] - offset[0], self.origin[1] - offset[1]),
+        )
+        # 1. Subtracted from
+        offset_array = xp.array(offset)
+
+        grid_subtracted = (self - offset_array).array
+        #rint(dir(grid_subtracted))
+        #grid_subtracted = xp.array(grid_subtracted)
+
+        over_sampled_subtracted = (self.over_sampled - offset_array).array
+        #over_sampled_subtracted = xp.array(over_sampled_subtracted)
+        
+        # 2. Rotate
+        angle_rad = xp.deg2rad(angle)
+        cos_angle = xp.cos(angle_rad)
+        sin_angle = xp.sin(angle_rad)
+
+        # Note: We manually extract columns and compute to avoid creating large rotation matrices
+        grid_y = grid_subtracted[:, 0]
+        grid_x = grid_subtracted[:, 1]
+
+        grid_rotated_y = grid_x * cos_angle - grid_y * sin_angle
+        grid_rotated_x = grid_x * sin_angle + grid_y * cos_angle
+        
+        grid_rotated = xp.stack((grid_rotated_y, grid_rotated_x), axis=-1)
+
+        # Also rotate the over_sampled grid
+        over_sub_y = over_sampled_subtracted[:, 0]
+        over_sub_x = over_sampled_subtracted[:, 1]
+
+        over_rotated_y = over_sub_x * cos_angle - over_sub_y * sin_angle
+        over_rotated_x = over_sub_x * sin_angle + over_sub_y * cos_angle
+
+        over_sampled_rotated = xp.stack((over_rotated_y, over_rotated_x), axis=-1)
+
+        return Grid2D(
+            values=grid_rotated,
+            mask=mask,
+            over_sample_size=self.over_sample_size,
+            over_sampled=Grid2DIrregular(over_sampled_rotated),
+            over_sampler=self.over_sampler,
+            xp=xp
+        )
 
     @property
     def slim(self) -> "Grid2D":

@@ -6,6 +6,7 @@ class DatasetModel:
         self,
         background_sky_level: float = 0.0,
         grid_offset: Tuple[float, float] = (0.0, 0.0),
+        grid_rotation_angle: float = 0.0,
     ):
         """
         Attributes which allow for parts of a dataset to be treated as a model, meaning they can be fitted
@@ -31,3 +32,4 @@ class DatasetModel:
         """
         self.background_sky_level = background_sky_level
         self.grid_offset = grid_offset
+        self.grid_rotation_angle = grid_rotation_angle
