@@ -92,15 +92,16 @@ class ImagingPlotterMeta(AbstractPlotter):
             )
 
         if psf:
-            self.mat_plot_2d.plot_array(
-                array=self.dataset.psf.kernel,
-                visuals_2d=self.visuals_2d,
-                auto_labels=AutoLabels(
-                    title=title_str or f"Point Spread Function",
-                    filename="psf",
-                    cb_unit="",
-                ),
-            )
+            if self.dataset.psf is not None:
+                self.mat_plot_2d.plot_array(
+                    array=self.dataset.psf.kernel,
+                    visuals_2d=self.visuals_2d,
+                    auto_labels=AutoLabels(
+                        title=title_str or f"Point Spread Function",
+                        filename="psf",
+                        cb_unit="",
+                    ),
+                )
 
         if signal_to_noise_map:
             self.mat_plot_2d.plot_array(

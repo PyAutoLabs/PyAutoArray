@@ -37,7 +37,7 @@ def test__pix_indexes_for_sub_slim_index__matches_util(grid_2d_sub_1_7x7):
         over_sample_size=1,
     )
 
-    mesh = aa.mesh.Delaunay()
+    mesh = aa.mesh.Delaunay(pixels=6)
 
     interpolator = mesh.interpolator_from(
         source_plane_data_grid=grid_2d_sub_1_7x7,

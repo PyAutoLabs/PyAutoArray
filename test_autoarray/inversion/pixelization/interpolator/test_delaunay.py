@@ -14,7 +14,7 @@ def test__scipy_delaunay__simplices(grid_2d_sub_1_7x7):
     )
 
     mesh_grid = aa.InterpolatorDelaunay(
-        mesh=aa.mesh.Delaunay(),
+        mesh=aa.mesh.Delaunay(pixels=6),
         mesh_grid=mesh_grid,
         data_grid=grid_2d_sub_1_7x7,
     )
@@ -34,7 +34,7 @@ def test__scipy_delaunay__split(grid_2d_sub_1_7x7):
     )
 
     mesh_grid = aa.InterpolatorDelaunay(
-        mesh=aa.mesh.Delaunay(),
+        mesh=aa.mesh.Delaunay(pixels=6),
         mesh_grid=mesh_grid,
         data_grid=grid_2d_sub_1_7x7,
     )

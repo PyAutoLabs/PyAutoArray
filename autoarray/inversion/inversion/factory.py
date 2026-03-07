@@ -24,7 +24,6 @@ from autoarray.inversion.inversion.imaging.sparse import (
     InversionImagingSparse,
 )
 from autoarray.settings import Settings
-from autoarray.preloads import Preloads
 from autoarray.structures.arrays.uniform_2d import Array2D
 
 
@@ -32,7 +31,6 @@ def inversion_from(
     dataset: Union[Imaging, Interferometer, DatasetInterface],
     linear_obj_list: List[LinearObj],
     settings: Settings = None,
-    preloads: Preloads = None,
     xp=np,
 ):
     """
@@ -68,7 +66,6 @@ def inversion_from(
             dataset=dataset,
             linear_obj_list=linear_obj_list,
             settings=settings,
-            preloads=preloads,
             xp=xp,
         )
 
@@ -81,7 +78,6 @@ def inversion_imaging_from(
     dataset,
     linear_obj_list: List[LinearObj],
     settings: Settings = None,
-    preloads: Preloads = None,
     xp=np,
 ):
     """
@@ -133,7 +129,6 @@ def inversion_imaging_from(
                 dataset=dataset,
                 linear_obj_list=linear_obj_list,
                 settings=settings,
-                preloads=preloads,
                 xp=xp,
             )
 
@@ -141,7 +136,6 @@ def inversion_imaging_from(
             dataset=dataset,
             linear_obj_list=linear_obj_list,
             settings=settings,
-            preloads=preloads,
             xp=xp,
         )
 
@@ -149,7 +143,6 @@ def inversion_imaging_from(
         dataset=dataset,
         linear_obj_list=linear_obj_list,
         settings=settings,
-        preloads=preloads,
         xp=xp,
     )
 

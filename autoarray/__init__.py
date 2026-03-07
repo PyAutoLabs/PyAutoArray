@@ -64,7 +64,6 @@ from .operators.over_sampling.decorator import over_sample
 from .operators.contour import Grid2DContour
 from .layout.layout import Layout1D
 from .layout.layout import Layout2D
-from .preloads import Preloads
 from .structures.arrays.uniform_1d import Array1D
 from .structures.arrays.uniform_2d import Array2D
 from .structures.arrays.rgb import Array2DRGB
@@ -101,4 +100,4 @@ from autoconf.fitsable import hdu_list_for_output_from
 
 conf.instance.register(__file__)
 
-__version__ = "2026.1.21.3"
+__version__ = "2026.2.26.4"

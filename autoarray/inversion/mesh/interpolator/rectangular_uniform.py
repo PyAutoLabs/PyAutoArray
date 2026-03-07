@@ -108,7 +108,6 @@ class InterpolatorRectangularUniform(AbstractInterpolator):
         data_grid,
         adapt_data: np.ndarray = None,
         mesh_weight_map: np.ndarray = None,
-        preloads=None,
         xp=np,
     ):
         """
@@ -143,7 +142,6 @@ class InterpolatorRectangularUniform(AbstractInterpolator):
             mesh_grid=mesh_grid,
             data_grid=data_grid,
             adapt_data=adapt_data,
-            preloads=preloads,
             xp=xp,
         )
         self.mesh_weight_map = mesh_weight_map
@@ -169,7 +167,7 @@ class InterpolatorRectangularUniform(AbstractInterpolator):
         mappings, weights = rectangular_mappings_weights_via_interpolation_from(
             shape_native=self.mesh.shape,
             mesh_grid=self.mesh_grid.array,
-            data_grid=self.data_grid.over_sampled,
+            data_grid=self.data_grid.over_sampled.array,
             xp=self._xp,
         )
 

@@ -15,31 +15,63 @@ class RectangularAdaptImage(RectangularAdaptDensity):
         weight_floor: float = 0.0,
     ):
         """
-        A uniform mesh of rectangular pixels, which without interpolation are paired with a 2D grid of (y,x)
-        coordinates.
+        A uniform rectangular mesh of pixels used to reconstruct a source on a
+        regular grid, with adaptive weighting driven by an external adapt image.
 
-        For a full description of how a mesh is paired with another grid,
-        see the :meth:`Pixelization API documentation <autoarray.inversion.pixelization.pixelization.Pixelization>`.
+        The mesh geometry is fixed and defined by a 2D shape
+        `(total_y_pixels, total_x_pixels)`. Pixels are indexed in row-major order:
 
-        The rectangular grid is uniform, has dimensions (total_y_pixels, total_x_pixels) and has indexing beginning
-        in the top-left corner and going rightwards and downwards.
+            - Index 0 corresponds to the top-left pixel.
+            - Indices increase left-to-right across rows and top-to-bottom
+              between rows.
 
-        A ``Pixelization`` using a ``RectangularAdaptDensity`` mesh has three grids associated with it:
+        Each source-plane coordinate is associated with the rectangular pixel
+        in which it lies. No interpolation is performed — every coordinate
+        contributes fully to a single pixel.
 
-        - ``image_plane_data_grid``: The observed data grid in the image-plane (which is paired with the mesh in
-          the source-plane).
-        - ``source_plane_data_grid``: The observed data grid mapped to the source-plane after gravitational lensing.
-        - ``source_plane_mesh_grid``: The centres of each rectangular pixel.
+        Adaptive behaviour (adapt image)
+        --------------------------------
+        Unlike a purely density-based rectangular mesh, this class adapts the
+        effective reconstruction using an *adapt image*. The adapt image provides
+        weights that emphasise specific regions of the source plane, typically
+        bright regions of a previously estimated reconstruction.
 
-        It does not have a ``image_plane_mesh_grid`` because a rectangular pixelization is constructed by overlaying
-        a grid of rectangular over the `source_plane_data_grid`.
+        Pixels corresponding to higher adapt-image intensity receive increased
+        weighting, allowing the inversion to prioritise reconstructing structure
+        in bright regions of the source. This leads to:
 
-        Each (y,x) coordinate in the `source_plane_data_grid` is associated with the rectangular pixelization pixel
-        it falls within. No interpolation is performed when making these associations.
+          - improved resolution in high-signal regions,
+          - smoother behaviour in faint regions,
+          - reduced overfitting of noise in low-signal areas.
+
+        The weighting applied to each pixel is controlled by:
+
+          - `weight_power`: raises the adapt-image values to a power, increasing
+            or decreasing contrast between bright and faint regions.
+          - `weight_floor`: sets a minimum weight to prevent pixels in very faint
+            regions from becoming unconstrained.
+
+        This approach is particularly effective in strong gravitational lensing,
+        where the adapt image typically traces the intrinsic brightness
+        distribution of the source.
+
+        Edge handling
+        -------------
+        Boundary (edge) pixels are automatically identified via the mesh
+        neighbour structure and may be internally excluded (zeroed) during
+        inversion to improve numerical stability and reduce edge artefacts.
+
         Parameters
         ----------
-        shape
-            The 2D dimensions of the rectangular grid of pixels (total_y_pixels, total_x_pixel).
+        shape : Tuple[int, int]
+            The 2D dimensions of the rectangular pixel grid
+            `(total_y_pixels, total_x_pixels)`.
+        weight_power : float, optional
+            Exponent applied to the adapt-image weights to control the strength
+            of adaptivity.
+        weight_floor : float, optional
+            Minimum weight applied to ensure numerical stability in low-intensity
+            regions.
         """
 
         super().__init__(shape=shape)

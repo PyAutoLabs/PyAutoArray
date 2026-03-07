@@ -69,7 +69,7 @@ def test__delaunay_mapper():
     grid.over_sampled[0, 0] = -2.0
     grid.over_sampled[0, 1] = 2.0
 
-    mesh = aa.mesh.Delaunay()
+    mesh = aa.mesh.Delaunay(pixels=5)
     image_mesh = aa.image_mesh.Overlay(shape=(3, 3))
     image_plane_mesh_grid = image_mesh.image_plane_mesh_grid_from(
         mask=mask, adapt_data=None

@@ -8,7 +8,6 @@ from autoarray.inversion.mappers.abstract import Mapper
 from autoarray.inversion.inversion.abstract import AbstractInversion
 from autoarray.inversion.linear_obj.linear_obj import LinearObj
 from autoarray.settings import Settings
-from autoarray.preloads import Preloads
 
 from autoarray.inversion.inversion.imaging import inversion_imaging_util
 
@@ -19,7 +18,6 @@ class AbstractInversionImaging(AbstractInversion):
         dataset: Union[Imaging, DatasetInterface],
         linear_obj_list: List[LinearObj],
         settings: Settings = None,
-        preloads: Preloads = None,
         xp=np,
     ):
         """
@@ -67,7 +65,6 @@ class AbstractInversionImaging(AbstractInversion):
             dataset=dataset,
             linear_obj_list=linear_obj_list,
             settings=settings,
-            preloads=preloads,
             xp=xp,
         )
 

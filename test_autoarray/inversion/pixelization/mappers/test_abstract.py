@@ -139,7 +139,7 @@ def test__mapped_to_source_from(grid_2d_7x7):
         over_sample_size=1,
     )
 
-    mesh = aa.mesh.Delaunay()
+    mesh = aa.mesh.Delaunay(pixels=6)
 
     interpolator = mesh.interpolator_from(
         source_plane_data_grid=grid_2d_7x7,

@@ -14,7 +14,7 @@ def test__neighbors(grid_2d_sub_1_7x7):
     )
 
     mesh_geometry = aa.MeshGeometryDelaunay(
-        mesh=aa.mesh.Delaunay(),
+        mesh=aa.mesh.Delaunay(pixels=6),
         mesh_grid=mesh_grid,
         data_grid=grid_2d_sub_1_7x7,
     )
@@ -45,7 +45,7 @@ def test__voronoi_areas_via_delaunay_from(grid_2d_sub_1_7x7):
     )
 
     mesh = aa.MeshGeometryDelaunay(
-        mesh=aa.mesh.Delaunay(),
+        mesh=aa.mesh.Delaunay(pixels=6),
         mesh_grid=mesh_grid,
         data_grid=grid_2d_sub_1_7x7.over_sampled,
     )

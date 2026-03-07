@@ -8,19 +8,14 @@ if TYPE_CHECKING:
 import numpy as np
 from pathlib import Path
 import scipy
-from typing import List, Optional, Tuple, Union
+from typing import Optional, Tuple, Union
 import warnings
 
 from autoconf import conf
-from autoconf.fitsable import header_obj_from
-
-from autoarray.structures.arrays.uniform_2d import AbstractArray2D
 from autoarray.structures.arrays.uniform_2d import Array2D
 from autoarray.structures.grids.uniform_2d import Grid2D
-from autoarray.structures.header import Header
 
 from autoarray import exc
-from autoarray import type as ty
 
 
 class ConvolverState:
@@ -122,10 +117,6 @@ class ConvolverState:
             s1 + s2 - 1 for s1, s2 in zip(mask_shape, self.kernel.shape_native)
         )
         fft_shape = tuple(scipy.fft.next_fast_len(s, real=True) for s in full_shape)
-
-        # make fft_shape odd x odd to avoid wrap-around artefacts with even kernels
-        # TODO : Fix this so it pads corrrectly internally
-        fft_shape = tuple(s + 1 if s % 2 == 0 else s for s in fft_shape)
 
         self.fft_shape = fft_shape
         self.mask = mask.resized_from(self.fft_shape, pad_value=1)
@@ -248,11 +239,16 @@ class Convolver:
         return self._use_fft
 
     @property
-    def normalized(self) -> "Kernel2D":
+    def normalized(self) -> "Convolver":
         """
-        Normalize the Kernel2D such that its data_vector values sum to unity.
+        Normalize the Convolver such that its data_vector values sum to unity.
+
+        A copy of the kernel is used to avoid mutating the original kernel instance,
+        and no existing state is reused so that any cached FFTs are recomputed for
+        the normalized kernel.
         """
-        return Convolver(kernel=self.kernel, state=self._state, normalize=True)
+        kernel_copy = self.kernel.copy()
+        return Convolver(kernel=kernel_copy, state=None, normalize=True)
 
     @classmethod
     def no_blur(cls, pixel_scales):

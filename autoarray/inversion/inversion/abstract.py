@@ -12,7 +12,6 @@ from autoarray.inversion.linear_obj.linear_obj import LinearObj
 from autoarray.inversion.mappers.abstract import Mapper
 from autoarray.inversion.regularization.abstract import AbstractRegularization
 from autoarray.settings import Settings
-from autoarray.preloads import Preloads
 from autoarray.structures.arrays.uniform_2d import Array2D
 from autoarray.structures.grids.irregular_2d import Grid2DIrregular
 from autoarray.structures.visibilities import Visibilities
@@ -27,7 +26,6 @@ class AbstractInversion:
         dataset: Union[Imaging, Interferometer, DatasetInterface],
         linear_obj_list: List[LinearObj],
         settings: Settings = None,
-        preloads: Preloads = None,
         xp=np,
     ):
         """
@@ -73,8 +71,6 @@ class AbstractInversion:
         self.linear_obj_list = linear_obj_list
 
         self.settings = settings or Settings()
-
-        self.preloads = preloads or Preloads()
 
         self.use_jax = xp is not np
 
@@ -234,9 +230,6 @@ class AbstractInversion:
     @property
     def mapper_indices(self) -> np.ndarray:
 
-        if self.preloads.mapper_indices is not None:
-            return self.preloads.mapper_indices
-
         mapper_indices = []
 
         param_range_list = self.param_range_list_from(cls=Mapper)
@@ -387,6 +380,107 @@ class AbstractInversion:
         return self.curvature_reg_matrix[ids_to_keep][:, ids_to_keep]
 
     @cached_property
+    def zeroed_ids_to_keep(self):
+        """
+        Return the **positive global indices** of linear parameters that should be
+        kept (solved for) in the inversion, accounting for **zeroed pixel indices**
+        from one or more mappers.
+
+        ---------------------------------------------------------------------------
+        Parameter vector layout
+        ---------------------------------------------------------------------------
+        This method assumes the full linear parameter vector is ordered as:
+
+            [ non-pixel linear objects ][ mapper_0 pixels ][ mapper_1 pixels ] ... [ mapper_M pixels ]
+
+        where:
+
+        - *Non-pixel linear objects* include quantities such as analytic light
+          profiles, regularization amplitudes, etc.
+        - Each mapper contributes a contiguous block of pixel-based linear parameters.
+        - The concatenated pixel blocks occupy the **final** entries of the parameter
+          vector, with total length:
+
+              total_pixels = sum(mapper.mesh.pixels for mapper in mappers)
+
+        ---------------------------------------------------------------------------
+        Zeroed pixel convention
+        ---------------------------------------------------------------------------
+        For each mapper:
+
+        - `mapper.mesh.zeroed_pixels` must be a 1D array of **positive, mesh-local**
+          pixel indices in the range `[0, mapper.mesh.pixels - 1]`.
+        - These indices identify pixels that should be **excluded** from the linear
+          solve (e.g. edge pixels, masked regions, or padding pixels).
+        - Indexing is defined purely within the mapper’s own pixelization (e.g.
+          row-major flattening for rectangular meshes).
+
+        This method converts all mesh-local zeroed pixel indices into **global
+        parameter indices**, correctly offsetting for:
+          - the presence of non-pixel linear objects at the start of the vector
+          - the cumulative pixel counts of preceding mappers
+
+        ---------------------------------------------------------------------------
+        Backend and implementation details
+        ---------------------------------------------------------------------------
+        - The implementation is backend-agnostic and supports both NumPy and JAX via
+          `self._xp`.
+        - The returned indices are **positive global indices**, suitable for advanced
+          indexing of:
+              - `self.data_vector`
+              - `self.curvature_reg_matrix`
+        - When using JAX, this method avoids backend-incompatible operations and
+          preserves JIT compatibility under the same constraints as the rest of the
+          inversion pipeline.
+
+        Returns
+        -------
+        array-like
+            A 1D array of **positive global indices**, sorted in ascending order,
+            corresponding to linear parameters that should be kept in the inversion.
+        """
+
+        mapper_list = self.cls_list_from(cls=Mapper)
+
+        n_total = int(self.total_params)
+
+        pixels_per_mapper = [int(m.mesh.pixels) for m in mapper_list]
+        total_pixels = int(sum(pixels_per_mapper))
+
+        # Global start index of concatenated pixel block
+        pixel_start = n_total - total_pixels
+
+        # Total number of zeroed pixels across all mappers (Python int => static)
+        total_zeroed = int(sum(len(m.mesh.zeroed_pixels) for m in mapper_list))
+        n_keep = int(n_total - total_zeroed)
+
+        # Build global indices-to-zero across all mappers
+        zeros_global_list = []
+        offset = 0
+        for m, n_pix in zip(mapper_list, pixels_per_mapper):
+            zeros_local = self._xp.asarray(m.mesh.zeroed_pixels, dtype=self._xp.int32)
+            zeros_global_list.append(pixel_start + offset + zeros_local)
+            offset += n_pix
+
+        zeros_global = (
+            self._xp.concatenate(zeros_global_list)
+            if len(zeros_global_list) > 0
+            else self._xp.asarray([], dtype=self._xp.int32)
+        )
+
+        keep = self._xp.ones((n_total,), dtype=bool)
+
+        if self._xp is np:
+            keep[zeros_global] = False
+            keep_ids = self._xp.nonzero(keep)[0]
+
+        else:
+            keep = keep.at[zeros_global].set(False)
+            keep_ids = self._xp.nonzero(keep, size=n_keep)[0]
+
+        return keep_ids
+
+    @cached_property
     def reconstruction(self) -> np.ndarray:
         """
         Solve the linear system [F + reg_coeff*H] S = D -> S = [F + reg_coeff*H]^-1 D given by equation (12)
@@ -405,16 +499,13 @@ class AbstractInversion:
 
         if self.settings.use_positive_only_solver:
 
-            if self.preloads.source_pixel_zeroed_indices is not None:
-
-                # ids of values which are not zeroed and therefore kept in soluiton, which is computed in preloads.
-                ids_to_keep = self.preloads.source_pixel_zeroed_indices_to_keep
+            if self.settings.use_edge_zeroed_pixels and self.has(cls=Mapper):
 
                 # Use advanced indexing to select rows/columns
-                data_vector = self.data_vector[ids_to_keep]
-                curvature_reg_matrix = self.curvature_reg_matrix[ids_to_keep][
-                    :, ids_to_keep
-                ]
+                data_vector = self.data_vector[self.zeroed_ids_to_keep]
+                curvature_reg_matrix = self.curvature_reg_matrix[
+                    self.zeroed_ids_to_keep
+                ][:, self.zeroed_ids_to_keep]
 
                 # Perform reconstruction via fnnls
                 reconstruction_partial = (
@@ -431,11 +522,11 @@ class AbstractInversion:
 
                 # Scatter the partial solution back to the full shape
                 if self._xp.__name__.startswith("jax"):
-                    reconstruction = reconstruction.at[ids_to_keep].set(
+                    reconstruction = reconstruction.at[self.zeroed_ids_to_keep].set(
                         reconstruction_partial
                     )
                 else:
-                    reconstruction[ids_to_keep] = reconstruction_partial
+                    reconstruction[self.zeroed_ids_to_keep] = reconstruction_partial
 
                 return reconstruction
 

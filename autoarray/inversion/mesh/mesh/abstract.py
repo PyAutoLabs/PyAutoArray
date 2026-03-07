@@ -99,7 +99,6 @@ class AbstractMesh:
         source_plane_mesh_grid: Grid2DIrregular,
         border_relocator: Optional[BorderRelocator] = None,
         adapt_data: np.ndarray = None,
-        preloads=None,
         xp=np,
     ):
         raise NotImplementedError

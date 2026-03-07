@@ -15,7 +15,6 @@ from autoarray.mask.mask_2d import Mask2D
 from autoarray import type as ty
 
 from autoarray import exc
-from autoarray.operators.over_sampling import over_sample_util
 
 from autoarray.inversion.inversion.imaging import inversion_imaging_util
 

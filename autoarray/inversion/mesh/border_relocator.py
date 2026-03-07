@@ -415,6 +415,8 @@ class BorderRelocator:
             grid=grid.over_sampled.array, origin=origin, a=a, b=b, phi=phi, xp=xp
         )
 
+        over_sampled = Grid2DIrregular(values=over_sampled)
+
         return Grid2D(
             values=values,
             mask=grid.mask,

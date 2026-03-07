@@ -12,6 +12,7 @@ class Settings:
         self,
         use_mixed_precision: bool = False,
         use_positive_only_solver: Optional[bool] = None,
+        use_edge_zeroed_pixels: Optional[bool] = None,
         use_border_relocator: Optional[bool] = None,
         no_regularization_add_to_curvature_diag_value: float = None,
     ):
@@ -41,6 +42,7 @@ class Settings:
         """
         self.use_mixed_precision = use_mixed_precision
         self._use_positive_only_solver = use_positive_only_solver
+        self._use_edge_zeroed_pixels = use_edge_zeroed_pixels
         self._use_border_relocator = use_border_relocator
         self._no_regularization_add_to_curvature_diag_value = (
             no_regularization_add_to_curvature_diag_value
@@ -52,6 +54,13 @@ class Settings:
             return conf.instance["general"]["inversion"]["use_positive_only_solver"]
 
         return self._use_positive_only_solver
+
+    @property
+    def use_edge_zeroed_pixels(self):
+        if self._use_edge_zeroed_pixels is None:
+            return conf.instance["general"]["inversion"]["use_edge_zeroed_pixels"]
+
+        return self._use_edge_zeroed_pixels
 
     @property
     def use_border_relocator(self):

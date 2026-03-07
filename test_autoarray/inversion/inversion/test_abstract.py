@@ -159,8 +159,8 @@ def test__curvature_matrix_via_sparse_operator__includes_source_interpolation__i
 
     grid = aa.Grid2D.from_mask(mask=mask, over_sample_size=1)
 
-    mesh_0 = aa.mesh.Delaunay()
-    mesh_1 = aa.mesh.Delaunay()
+    mesh_0 = aa.mesh.Delaunay(pixels=9)
+    mesh_1 = aa.mesh.Delaunay(pixels=16)
 
     image_mesh_0 = aa.image_mesh.Overlay(shape=(3, 3))
     image_mesh_1 = aa.image_mesh.Overlay(shape=(4, 4))
@@ -559,7 +559,7 @@ def test__max_pixel_list_from_and_centre():
     mapper = aa.m.MockMapper(source_plane_mesh_grid=source_plane_mesh_grid)
 
     interpolator = aa.InterpolatorDelaunay(
-        mesh=aa.mesh.Delaunay(),
+        mesh=aa.mesh.Delaunay(pixels=4),
         mesh_grid=source_plane_mesh_grid,
         data_grid=None,
     )
@@ -597,7 +597,7 @@ def test__max_pixel_list_from__filter_neighbors():
     )
 
     mesh_geometry = aa.MeshGeometryDelaunay(
-        mesh=aa.mesh.Delaunay(),
+        mesh=aa.mesh.Delaunay(pixels=9),
         mesh_grid=source_plane_mesh_grid,
         data_grid=None,
     )

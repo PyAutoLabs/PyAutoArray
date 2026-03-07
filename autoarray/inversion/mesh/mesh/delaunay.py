@@ -8,32 +8,80 @@ from autoarray.structures.grids.irregular_2d import Grid2DIrregular
 
 
 class Delaunay(AbstractMesh):
-    def __init__(self, areas_factor: float = 0.5):
+    def __init__(
+        self, pixels: int, zeroed_pixels: Optional[int] = 0, areas_factor: float = 0.5
+    ):
         """
-        An irregular mesh of Delaunay triangle pixels, which using linear barycentric interpolation are paired with
-        a 2D grid of (y,x) coordinates.
+        A Delaunay mesh composed of irregular triangular pixels used to reconstruct
+        a source on an unstructured grid.
 
-        For a full description of how a mesh is paired with another grid,
-        see the :meth:`Pixelization API documentation <autoarray.inversion.pixelization.pixelization.Pixelization>`.
+        The mesh consists of `pixels` vertices in the source plane, which are
+        connected via a Delaunay triangulation to form triangular elements.
+        Each vertex represents a linear parameter in the inversion.
 
-        The Delaunay mesh represents pixels as an irregular 2D grid of Delaunay triangles.
+        Source-plane coordinates are interpolated onto this mesh using barycentric
+        interpolation within the enclosing triangle. For each coordinate, the three
+        vertices of the containing Delaunay triangle are identified and weighted
+        according to their barycentric distances, providing a smooth, piecewise-linear
+        reconstruction.
 
-        - ``image_plane_data_grid``: The observed data grid in the image-plane (which is paired with the mesh in
-          the source-plane).
-        - ``image_plane_mesh_grid``: The (y,x) mesh coordinates in the image-plane (which are the corners of Delaunay
-          triangles in the source-plane).
-        - ``source_plane_data_grid``: The observed data grid mapped to the source-plane after gravitational lensing.
-        - ``source_plane_mesh_grid``: The corner of each Delaunay triangle in the source-plane
-          (the ``image_plane_mesh_grid`` maps to this after gravitational lensing).
+        Zeroed pixels
+        -------------
+        The `zeroed_pixels` parameter specifies a number of mesh vertices that are
+        **excluded from the inversion**. These pixels are intended to correspond to
+        *edge or boundary vertices* of the Delaunay mesh.
 
-        Each (y,x) coordinate in the ``source_plane_data_grid`` is paired with the three nearest Delaunay triangle
-        corners, using a weighted interpolation scheme.
+        Zeroing edge pixels helps to:
+          - stabilize the linear inversion,
+          - prevent poorly constrained boundary vertices from absorbing flux,
+          - reduce edge artefacts in the reconstructed source.
 
-        Coordinates on the ``source_plane_data_grid`` are therefore given higher weights when paired with Delaunay
-        triangle corners they are a closer distance to.
+        Zeroed pixels are always placed at the **end of the mesh parameter vector**
+        and are not solved for; their values are fixed to zero. Internally, the
+        inversion accounts for these excluded parameters when constructing and
+        solving the linear system.
+
+        Parameters
+        ----------
+        pixels : int
+            The number of active mesh vertices (linear parameters) used to represent
+            the source reconstruction.
+        areas_factor : float, optional
+            The barycentric area of Delaunay triangles is used to weight the regularization matrix.
+            This factor scales these areas, allowing for tuning of the regularization strength
+            based on triangle size.
+        zeroed_pixels : int, optional
+            The number of edge mesh vertices to exclude from the inversion. These
+            are appended to the end of the mesh and fixed to zero.
         """
+
+        pixels = int(pixels) + zeroed_pixels
+
         super().__init__()
+        self.pixels = pixels
         self.areas_factor = areas_factor
+        self._zeroed_pixels = zeroed_pixels
+
+    @property
+    def zeroed_pixels(self):
+        """
+        Return the **positive** mesh-local pixel indices to zero for a Delaunay mesh.
+
+        For Delaunay meshes, `self.zeroed_pixels` is interpreted as a *count* of pixels
+        to be zeroed at the end of the pixel block. For example:
+            self.pixels = 780, self.zeroed_pixels = 30
+        returns indices 750..779.
+
+        Returns
+        -------
+        np.ndarray
+            1D array of positive pixel indices to zero.
+        """
+        if self._zeroed_pixels <= 0:
+            return np.array([], dtype=int)
+
+        start = self.pixels - self._zeroed_pixels
+        return np.arange(start, self.pixels, dtype=int)
 
     @property
     def skip_areas(self):
@@ -60,7 +108,6 @@ class Delaunay(AbstractMesh):
         source_plane_mesh_grid: Grid2DIrregular,
         border_relocator: Optional[BorderRelocator] = None,
         adapt_data: np.ndarray = None,
-        preloads=None,
         xp=np,
     ):
         """
@@ -120,6 +167,5 @@ class Delaunay(AbstractMesh):
             data_grid=relocated_grid,
             mesh_grid=relocated_mesh_grid,
             adapt_data=adapt_data,
-            preloads=preloads,
             xp=xp,
         )

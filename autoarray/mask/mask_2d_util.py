@@ -1,5 +1,6 @@
 import numpy as np
 import warnings
+from scipy.ndimage import binary_dilation
 from typing import Tuple
 
 from autoarray import exc
@@ -460,67 +461,167 @@ def min_false_distance_to_edge(mask: np.ndarray) -> Tuple[int, int]:
     return min(top_dist, bottom_dist), min(left_dist, right_dist)
 
 
-def blurring_mask_2d_from(
-    mask_2d: np.ndarray, kernel_shape_native: Tuple[int, int]
-) -> np.ndarray:
+import warnings
+from typing import Tuple
+
+import numpy as np
+from scipy.ndimage import binary_dilation
+
+
+def required_shape_for_kernel(
+    mask_2d: np.ndarray,
+    kernel_shape_native: Tuple[int, int],
+) -> Tuple[int, int]:
     """
-    Returns a blurring mask from an input mask and psf shape.
-
-    The blurring mask corresponds to all pixels which are outside of the mask but will have a fraction of their
-    light blur into the masked region due to PSF convolution. The PSF shape is used to determine which pixels these are.
-
-    If a pixel is identified which is outside the 2D dimensions of the input mask, an error is raised and the user
-    should pad the input mask (and associated images).
+    Return the minimal shape the mask must be padded to so that a kernel with the given
+    footprint can be applied without sampling beyond the array edge, while preserving
+    parity (odd->odd, even->even) in each dimension.
 
     Parameters
     ----------
     mask_2d
-        A 2D array of bools, where `False` values are unmasked.
+        2D boolean array where False is unmasked and True is masked.
     kernel_shape_native
-        The 2D shape of the PSF which is used to compute the blurring mask.
+        (ky, kx) footprint of the convolution kernel.
 
     Returns
     -------
-    ndarray
-        The 2D blurring mask array whose unmasked values (`False`) correspond to where the mask will have PSF light
-        blurred into them.
-
-    Examples
-    --------
-    mask = np.array([[True, True, True],
-                     [True, False, True]
-                     [True, True, True]])
-
-    blurring_mask = blurring_from(mask=mask)
-
+    required_shape
+        The minimal (ny, nx) shape such that the minimum distance from any unmasked
+        pixel to the array edge is at least (ky//2, kx//2), and each dimension keeps
+        the same parity as the input mask.
     """
-    from scipy.ndimage import convolve
+    mask_2d = np.asarray(mask_2d, dtype=bool)
 
-    # Get the distance from False values to edges
-    y_distance, x_distance = min_false_distance_to_edge(mask_2d)
-
-    # Compute kernel half-size in y and x direction
-    y_kernel_distance = (kernel_shape_native[0]) // 2
-    x_kernel_distance = (kernel_shape_native[1]) // 2
-
-    # Check if mask is too small for the kernel size
-    if (y_distance < y_kernel_distance) or (x_distance < x_kernel_distance):
-        raise exc.MaskException(
-            "The input mask is too small for the kernel shape. "
-            "Please pad the mask before computing the blurring mask."
+    ky, kx = kernel_shape_native
+    if ky <= 0 or kx <= 0:
+        raise ValueError(
+            f"kernel_shape_native must be positive, got {kernel_shape_native}."
         )
 
-    # Create a kernel with the given PSF shape
-    kernel = np.ones(kernel_shape_native, dtype=np.uint8)
+    pad_y, pad_x = ky // 2, kx // 2
+    y_distance, x_distance = min_false_distance_to_edge(mask_2d)
 
-    # Convolve mask with kernel producing non-zero values around mask False values
-    convolved_mask = convolve(mask_2d.astype(np.uint8), kernel, mode="reflect", cval=0)
+    extra_y = max(0, pad_y - y_distance)
+    extra_x = max(0, pad_x - x_distance)
 
-    # Identify pixels that are non-zero and fully covered by kernel
-    result_mask = convolved_mask == np.prod(kernel_shape_native)
+    new_y = mask_2d.shape[0] + 2 * extra_y
+    new_x = mask_2d.shape[1] + 2 * extra_x
 
-    # Create the blurring mask by removing False values in original mask
-    return ~mask_2d + result_mask
+    # Preserve parity per axis: odd->odd, even->even
+    if (new_y % 2) != (mask_2d.shape[0] % 2):
+        new_y += 1
+    if (new_x % 2) != (mask_2d.shape[1] % 2):
+        new_x += 1
+
+    return new_y, new_x
+
+
+def blurring_mask_2d_from(
+    mask_2d: np.ndarray,
+    kernel_shape_native: Tuple[int, int],
+    allow_padding: bool = False,
+) -> np.ndarray:
+    """
+    Return the blurring mask for a 2D mask and kernel footprint.
+
+    Convention (as used by PyAutoLens / PyAutoArray masks):
+    - False = unmasked (included)
+    - True  = masked   (excluded)
+
+    The returned blurring mask is a *mask* where the blurring-region pixels are
+    unmasked (False) and all other pixels are masked (True).
+
+    If the input mask is too small for the kernel footprint:
+    - allow_padding=False (default): raises an exception.
+    - allow_padding=True: pads the mask symmetrically with masked pixels (True) to the
+      minimal required shape (with parity preserved) and emits a warning.
+
+    Parameters
+    ----------
+    mask_2d
+        2D boolean mask.
+    kernel_shape_native
+        (ky, kx) kernel footprint.
+    allow_padding
+        If False, raise if padding is required. If True, pad and warn.
+
+    Returns
+    -------
+    blurring_mask
+        Boolean mask of the same shape as the (possibly padded) input.
+    """
+    mask_2d = np.asarray(mask_2d, dtype=bool)
+
+    required_shape = required_shape_for_kernel(mask_2d, kernel_shape_native)
+
+    if required_shape != mask_2d.shape:
+        if not allow_padding:
+            raise exc.MaskException(
+                "The input mask is too small for the kernel shape. "
+                f"Current shape: {mask_2d.shape}, required shape: {required_shape}. "
+                "Set allow_padding=True to pad automatically."
+            )
+
+        warnings.warn(
+            f"Mask padded from {mask_2d.shape} to {required_shape} "
+            f"(parity preserved) to support kernel footprint {kernel_shape_native}.",
+            UserWarning,
+        )
+
+        dy = required_shape[0] - mask_2d.shape[0]
+        dx = required_shape[1] - mask_2d.shape[1]
+
+        pad_top = dy // 2
+        pad_bottom = dy - pad_top
+        pad_left = dx // 2
+        pad_right = dx - pad_left
+
+        mask_2d = np.pad(
+            mask_2d,
+            pad_width=((pad_top, pad_bottom), (pad_left, pad_right)),
+            mode="constant",
+            constant_values=True,  # outside is masked
+        )
+
+    # (Optional) hard invariant: parity preserved after any padding
+    if (mask_2d.shape[0] % 2) != (required_shape[0] % 2) or (mask_2d.shape[1] % 2) != (
+        required_shape[1] % 2
+    ):
+        raise RuntimeError(
+            f"Parity invariant violated: got {mask_2d.shape}, expected parity of {required_shape}."
+        )
+
+    ky, kx = kernel_shape_native
+    pad_y, pad_x = ky // 2, kx // 2
+    structure = np.ones((ky, kx), dtype=bool)
+
+    # Unmasked region (True where unmasked)
+    unmasked = ~mask_2d
+
+    # Explicit padding so outside behaves as masked => outside is NOT unmasked
+    unmasked_padded = np.pad(
+        unmasked,
+        pad_width=((pad_y, pad_y), (pad_x, pad_x)),
+        mode="constant",
+        constant_values=False,
+    )
+
+    # Pixels within kernel footprint of any unmasked pixel
+    near_unmasked_padded = binary_dilation(unmasked_padded, structure=structure)
+    near_unmasked = near_unmasked_padded[
+        pad_y : pad_y + mask_2d.shape[0],
+        pad_x : pad_x + mask_2d.shape[1],
+    ]
+
+    # Blurring region: masked pixels near unmasked pixels
+    blurring_region = mask_2d & near_unmasked
+
+    # Return as a mask: blurring region is unmasked (False), everything else masked (True)
+    blurring_mask = np.ones_like(mask_2d, dtype=bool)
+    blurring_mask[blurring_region] = False
+
+    return blurring_mask
 
 
 def mask_slim_indexes_from(

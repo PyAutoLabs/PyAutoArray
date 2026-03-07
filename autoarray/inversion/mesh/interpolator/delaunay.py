@@ -368,7 +368,6 @@ class InterpolatorDelaunay(AbstractInterpolator):
         mesh_grid,
         data_grid,
         adapt_data: np.ndarray = None,
-        preloads=None,
         xp=np,
     ):
         """
@@ -403,7 +402,6 @@ class InterpolatorDelaunay(AbstractInterpolator):
             mesh_grid=mesh_grid,
             data_grid=data_grid,
             adapt_data=adapt_data,
-            preloads=preloads,
             xp=xp,
         )
 
@@ -457,7 +455,7 @@ class InterpolatorDelaunay(AbstractInterpolator):
                 points, simplices, mappings, split_points, splitted_mappings = (
                     jax_delaunay(
                         points=self.mesh_grid_xy,
-                        query_points=self.data_grid.over_sampled,
+                        query_points=self.data_grid.over_sampled.array,
                         areas_factor=self.mesh.areas_factor,
                     )
                 )
@@ -467,7 +465,7 @@ class InterpolatorDelaunay(AbstractInterpolator):
                 points, simplices, mappings, split_points, splitted_mappings = (
                     scipy_delaunay(
                         points_np=self.mesh_grid_xy,
-                        query_points_np=self.data_grid.over_sampled,
+                        query_points_np=self.data_grid.over_sampled.array,
                         areas_factor=self.mesh.areas_factor,
                     )
                 )
@@ -480,14 +478,14 @@ class InterpolatorDelaunay(AbstractInterpolator):
 
                 points, simplices, mappings = jax_delaunay_matern(
                     points=self.mesh_grid_xy,
-                    query_points=self.data_grid.over_sampled,
+                    query_points=self.data_grid.over_sampled.array,
                 )
 
             else:
 
                 points, simplices, mappings = scipy_delaunay_matern(
                     points_np=self.mesh_grid_xy,
-                    query_points_np=self.data_grid.over_sampled,
+                    query_points_np=self.data_grid.over_sampled.array,
                 )
 
             split_points = None
@@ -569,7 +567,7 @@ class InterpolatorDelaunay(AbstractInterpolator):
         sizes = self.delaunay.sizes.astype("int")
 
         weights = pixel_weights_delaunay_from(
-            data_grid=self.data_grid.over_sampled,
+            data_grid=self.data_grid.over_sampled.array,
             mesh_grid=self.mesh_grid.array,
             pix_indexes_for_sub_slim_index=mappings,
             xp=self._xp,

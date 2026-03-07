@@ -410,7 +410,7 @@ def make_delaunay_mapper_9_3x3():
         pixel_scales=1.0,
     )
 
-    mesh = aa.mesh.Delaunay()
+    mesh = aa.mesh.Delaunay(pixels=9)
 
     interpolator = mesh.interpolator_from(
         source_plane_data_grid=make_grid_2d_sub_2_7x7(),
@@ -443,7 +443,7 @@ def make_knn_mapper_9_3x3():
         pixel_scales=1.0,
     )
 
-    mesh = aa.mesh.KNearestNeighbor(split_neighbor_division=1)
+    mesh = aa.mesh.KNearestNeighbor(pixels=9, split_neighbor_division=1)
 
     interpolator = mesh.interpolator_from(
         source_plane_data_grid=make_grid_2d_sub_2_7x7(),

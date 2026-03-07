@@ -9,14 +9,12 @@ class AbstractInterpolator:
         mesh_grid,
         data_grid,
         adapt_data: np.ndarray = None,
-        preloads=None,
         xp=np,
     ):
         self.mesh = mesh
         self.mesh_grid = mesh_grid
         self.data_grid = data_grid
         self.adapt_data = adapt_data
-        self.preloads = preloads
         self.use_jax = xp is not np
 
     @property

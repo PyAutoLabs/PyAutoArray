@@ -2,7 +2,7 @@ import autoarray as aa
 
 
 def test__grid_is_relocated_via_border(grid_2d_7x7):
-    mesh = aa.mesh.Delaunay()
+    mesh = aa.mesh.Delaunay(pixels=9)
 
     mask = aa.Mask2D.circular(
         shape_native=(60, 60),
@@ -47,7 +47,7 @@ def test__grid_is_relocated_via_border(grid_2d_7x7):
     assert image_mesh[0, 0] != interpolator.mesh_grid[0, 0]
     assert interpolator.mesh_grid[0, 0] < 5.0
 
-    mesh = aa.mesh.Delaunay()
+    mesh = aa.mesh.Delaunay(pixels=9)
 
     border_relocator = aa.BorderRelocator(mask=mask, sub_size=1)
 

@@ -268,22 +268,22 @@ def test__inversion_imaging__via_regularizations(
     )
 
 
-def test__inversion_imaging__source_pixel_zeroed_indices(
+def test__inversion_imaging__zeroed_pixels(
     masked_imaging_7x7_no_blur,
     rectangular_mapper_7x7_3x3,
 ):
+
     inversion = aa.Inversion(
         dataset=masked_imaging_7x7_no_blur,
         linear_obj_list=[rectangular_mapper_7x7_3x3],
-        settings=aa.Settings(use_positive_only_solver=True),
-        preloads=aa.Preloads(
-            mapper_indices=range(0, 9), source_pixel_zeroed_indices=np.array([0])
+        settings=aa.Settings(
+            use_positive_only_solver=True, use_edge_zeroed_pixels=True
         ),
     )
 
     assert inversion.reconstruction.shape[0] == 9
     assert inversion.reconstruction[0] == 0.0
-    assert inversion.reconstruction[1] > 0.0
+    assert inversion.reconstruction[4] > 0.0
 
 
 def test__inversion_imaging__via_linear_obj_func_and_mapper(

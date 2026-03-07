@@ -64,31 +64,53 @@ def overlay_grid_from(
 class RectangularAdaptDensity(AbstractMesh):
     def __init__(self, shape: Tuple[int, int] = (3, 3)):
         """
-        A uniform mesh of rectangular pixels, which without interpolation are paired with a 2D grid of (y,x)
-        coordinates.
+        A uniform rectangular mesh of pixels used to reconstruct a source on a
+        regular grid.
 
-        For a full description of how a mesh is paired with another grid,
-        see the :meth:`Pixelization API documentation <autoarray.inversion.pixelization.pixelization.Pixelization>`.
+        The mesh is defined by a 2D shape `(total_y_pixels, total_x_pixels)` and
+        is indexed in row-major order:
 
-        The rectangular grid is uniform, has dimensions (total_y_pixels, total_x_pixels) and has indexing beginning
-        in the top-left corner and going rightwards and downwards.
+            - Index 0 corresponds to the top-left pixel.
+            - Indices increase from left to right across each row,
+              and from top to bottom across rows.
 
-        A ``Pixelization`` using a ``RectangularAdaptDensity`` mesh has three grids associated with it:
+        Each source-plane coordinate is associated with the rectangular pixel
+        in which it lies. No interpolation is performed — every coordinate
+        contributes entirely to a single pixel.
 
-        - ``image_plane_data_grid``: The observed data grid in the image-plane (which is paired with the mesh in
-          the source-plane).
-        - ``source_plane_data_grid``: The observed data grid mapped to the source-plane after gravitational lensing.
-        - ``source_plane_mesh_grid``: The centres of each rectangular pixel.
+        Adaptive behaviour
+        ------------------
+        Although the rectangular mesh has a fixed, uniform geometry, it adapts
+        *implicitly* to the spatial density of the points it is paired with.
+        Regions of the source plane where many coordinates map onto the same
+        pixel receive stronger observational constraints, while sparsely
+        sampled regions are more weakly constrained.
 
-        It does not have a ``image_plane_mesh_grid`` because a rectangular pixelization is constructed by overlaying
-        a grid of rectangular over the `source_plane_data_grid`.
+        In gravitational lensing applications, this naturally concentrates
+        information in regions of high magnification, where many image-plane
+        pixels map to a small area of the source plane. The inversion therefore
+        achieves higher effective resolution in these regions without requiring
+        explicit refinement of the mesh geometry.
 
-        Each (y,x) coordinate in the `source_plane_data_grid` is associated with the rectangular pixelization pixel
-        it falls within. No interpolation is performed when making these associations.
+        Edge handling
+        -------------
+        Boundary (edge) pixels are automatically identified through the mesh
+        neighbour structure. These edge pixels may be internally excluded
+        (zeroed) during inversion to improve numerical stability and reduce
+        edge artefacts. This zeroing is determined by the mesh connectivity
+        and does not require manual specification of boundary indices.
+
         Parameters
         ----------
-        shape
-            The 2D dimensions of the rectangular grid of pixels (total_y_pixels, total_x_pixel).
+        shape : Tuple[int, int]
+            The 2D dimensions of the rectangular pixel grid
+            `(total_y_pixels, total_x_pixels)`.
+
+        Raises
+        ------
+        MeshException
+            If either dimension is less than 3, as a minimum of 3×3 pixels
+            is required to define interior and boundary structure.
         """
 
         if shape[0] <= 2 or shape[1] <= 2:
@@ -99,6 +121,32 @@ class RectangularAdaptDensity(AbstractMesh):
         self.shape = (int(shape[0]), int(shape[1]))
         self.pixels = self.shape[0] * self.shape[1]
         super().__init__()
+
+    @property
+    def zeroed_pixels(self):
+        """
+        Return the **positive** 1D pixel indices of the edge pixels in a rectangular mesh.
+
+        Indices are in row-major (C-order) flattened form for the rectangular pixel grid:
+            - 0 corresponds to the top-left pixel (row=0, col=0)
+            - indices increase across rows
+
+        These indices are defined purely within the rectangular mesh's pixel indexing
+        scheme (size = rows * cols) and are intended to be shifted / mapped to the full
+        inversion indexing inside the inversion logic.
+
+        Returns
+        -------
+        np.ndarray
+            A 1D array of positive indices corresponding to edge pixels.
+        """
+        from autoarray.inversion.mesh.mesh_geometry.rectangular import (
+            rectangular_edge_pixel_list_from,
+        )
+
+        edge_pixel_list = rectangular_edge_pixel_list_from(shape_native=self.shape)
+
+        return np.array(edge_pixel_list, dtype=int)
 
     @property
     def interpolator_cls(self):
@@ -127,7 +175,6 @@ class RectangularAdaptDensity(AbstractMesh):
         source_plane_mesh_grid: Grid2DIrregular,
         border_relocator: Optional[BorderRelocator] = None,
         adapt_data: np.ndarray = None,
-        preloads=None,
         xp=np,
     ):
         """
@@ -169,7 +216,7 @@ class RectangularAdaptDensity(AbstractMesh):
 
         mesh_grid = overlay_grid_from(
             shape_native=self.shape,
-            grid=Grid2DIrregular(relocated_grid.over_sampled),
+            grid=relocated_grid.over_sampled,
             xp=xp,
         )
 
@@ -181,6 +228,5 @@ class RectangularAdaptDensity(AbstractMesh):
             mesh_grid=Grid2DIrregular(mesh_grid),
             mesh_weight_map=mesh_weight_map,
             adapt_data=adapt_data,
-            preloads=preloads,
             xp=xp,
         )

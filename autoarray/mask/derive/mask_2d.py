@@ -139,7 +139,9 @@ class DeriveMask2D:
             origin=self.mask.origin,
         )
 
-    def blurring_from(self, kernel_shape_native: Tuple[int, int]) -> Mask2D:
+    def blurring_from(
+        self, kernel_shape_native: Tuple[int, int], allow_padding: bool = False
+    ) -> Mask2D:
         """
         Returns a blurring ``Mask2D``, representing all masked pixels (given by ``True``) whose values are blurred
         into unmasked pixels (given by ``False``) when a 2D convolution is performed.
@@ -201,6 +203,7 @@ class DeriveMask2D:
         blurring_mask = mask_2d_util.blurring_mask_2d_from(
             mask_2d=self.mask,
             kernel_shape_native=kernel_shape_native,
+            allow_padding=allow_padding,
         )
 
         return Mask2D(

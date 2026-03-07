@@ -175,6 +175,13 @@ class InversionPlotter(AbstractPlotter):
                 mapper_plotter.mapper
             ]
 
+            from autoarray.structures.visibilities import Visibilities
+
+            if isinstance(array, Visibilities):
+                array = self.inversion.mapped_reconstructed_data_dict[
+                    mapper_plotter.mapper
+                ]
+
             self.mat_plot_2d.plot_array(
                 array=array,
                 visuals_2d=self.visuals_2d,
