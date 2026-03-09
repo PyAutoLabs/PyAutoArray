@@ -770,8 +770,8 @@ class Grid2D(Structure):
         grid_y = grid_subtracted[:, 0]
         grid_x = grid_subtracted[:, 1]
 
-        grid_rotated_y = grid_x * cos_angle - grid_y * sin_angle
-        grid_rotated_x = grid_x * sin_angle + grid_y * cos_angle
+        grid_rotated_x = grid_x * cos_angle - grid_y * sin_angle
+        grid_rotated_y = grid_x * sin_angle + grid_y * cos_angle
         
         grid_rotated = xp.stack((grid_rotated_y, grid_rotated_x), axis=-1)
 
@@ -779,8 +779,8 @@ class Grid2D(Structure):
         over_sub_y = over_sampled_subtracted[:, 0]
         over_sub_x = over_sampled_subtracted[:, 1]
 
-        over_rotated_y = over_sub_x * cos_angle - over_sub_y * sin_angle
-        over_rotated_x = over_sub_x * sin_angle + over_sub_y * cos_angle
+        over_rotated_x = over_sub_x * cos_angle - over_sub_y * sin_angle
+        over_rotated_y = over_sub_x * sin_angle + over_sub_y * cos_angle
 
         over_sampled_rotated = xp.stack((over_rotated_y, over_rotated_x), axis=-1)
 
