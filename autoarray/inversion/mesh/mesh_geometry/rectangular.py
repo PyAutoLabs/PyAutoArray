@@ -470,7 +470,24 @@ class MeshGeometryRectangular(AbstractMeshGeometry):
 
         The neighbors of a rectangular pixelization are computed by exploiting the uniform and symmetric nature of the
         rectangular grid, as described in the method `rectangular_neighbors_from`.
+
+        When ``spline_deg`` is set (spline-CDF meshes), routes through the
+        polynomial+Hermite-spline variant to keep the areas consistent with
+        the mapper's CDF choice. Otherwise uses the linear-interp CDF.
         """
+        if self.spline_deg is not None:
+            from autoarray.inversion.mesh.interpolator.rectangular_spline import (
+                adaptive_rectangular_areas_from_spline,
+            )
+
+            return adaptive_rectangular_areas_from_spline(
+                source_grid_shape=self.shape_native,
+                data_grid=self.data_grid.over_sampled,
+                mesh_weight_map=self.mesh_weight_map,
+                deg=self.spline_deg,
+                xp=self._xp,
+            )
+
         return adaptive_rectangular_areas_from(
             source_grid_shape=self.shape_native,
             data_grid=self.data_grid.over_sampled,
@@ -500,15 +517,28 @@ class MeshGeometryRectangular(AbstractMeshGeometry):
         rectangular grid, as described in the method `rectangular_neighbors_from`.
         """
 
-        from autoarray.inversion.mesh.interpolator.rectangular import (
-            adaptive_rectangular_transformed_grid_from,
-        )
-
         # edges defined in 0 -> 1 space, there is one more edge than pixel centers on each side
         edges_y = self._xp.linspace(1, 0, self.shape_native[0] + 1)
         edges_x = self._xp.linspace(0, 1, self.shape_native[1] + 1)
 
         edges_reshaped = self._xp.stack([edges_y, edges_x]).T
+
+        if self.spline_deg is not None:
+            from autoarray.inversion.mesh.interpolator.rectangular_spline import (
+                adaptive_rectangular_transformed_grid_from_spline,
+            )
+
+            return adaptive_rectangular_transformed_grid_from_spline(
+                data_grid=self.data_grid.array,
+                grid=edges_reshaped,
+                mesh_weight_map=self.mesh_weight_map,
+                deg=self.spline_deg,
+                xp=self._xp,
+            )
+
+        from autoarray.inversion.mesh.interpolator.rectangular import (
+            adaptive_rectangular_transformed_grid_from,
+        )
 
         return adaptive_rectangular_transformed_grid_from(
             data_grid=self.data_grid.array,
