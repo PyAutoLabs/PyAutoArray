@@ -43,11 +43,13 @@ def test__via_image_from__psf_off__include_poisson_noise_in_noise_map(
     dataset = simulator.via_image_from(image=image)
 
     assert dataset.data.native == pytest.approx(
-        np.array([[1.05, 1.3, 1.25], [1.05, 2.1, 1.2], [1.05, 1.3, 1.15]]), 1e-2
+        np.array([[0.95, 0.7, 0.75], [0.95, 1.9, 0.8], [0.95, 0.7, 0.85]]), 1e-2
     )
 
     assert dataset.noise_map.native == pytest.approx(
-        np.array([[0.229, 0.255, 0.25], [0.229, 0.324, 0.245], [0.229, 0.255, 0.240]]),
+        np.array(
+            [[0.218, 0.187, 0.194], [0.218, 0.308, 0.2], [0.218, 0.187, 0.206]]
+        ),
         1e-2,
     )
 
@@ -85,10 +87,10 @@ def test__via_image_from__psf_off__background_sky_on(image_central_delta_3x3):
 
     assert (
         dataset.data.native
-        == np.array([[1.0, 5.0, 4.0], [1.0, 2.0, 1.0], [5.0, 2.0, 7.0]])
+        == np.array([[-1.0, -5.0, -4.0], [-1.0, 0.0, -1.0], [-5.0, -2.0, -7.0]])
     ).all()
 
-    assert dataset.noise_map.native[0, 0] == pytest.approx(4.12310, 1.0e-4)
+    assert dataset.noise_map.native[0, 0] == pytest.approx(3.87298, 1.0e-4)
 
 
 def test__via_image_from__psf_on__psf_blurs_image_with_edge_trimming(
@@ -143,7 +145,7 @@ def test__via_image_from__psf_on__disable_poisson_noise_in_data(
 
     assert dataset.noise_map.native == pytest.approx(
         np.array(
-            [[0.0, 0.22912, 0.0], [0.25495, 0.34278, 0.22912], [0.0, 0.229128, 0.0]]
+            [[0.0, 0.21794, 0.0], [0.18708, 0.28723, 0.21794], [0.0, 0.21794, 0.0]]
         ),
         1e-2,
     )
@@ -169,5 +171,5 @@ def test__via_image_from__psf_on__psf_and_noise_both_on(image_central_delta_3x3)
     dataset = simulator.via_image_from(image=image)
 
     assert dataset.data.native == pytest.approx(
-        np.array([[4.1, 6.65, 4.45], [6.15, 8.15, 6.5], [4.1, 6.7, 4.25]]), 1e-2
+        np.array([[3.9, 5.35, 3.55], [5.85, 7.85, 5.5], [3.9, 5.3, 3.75]]), 1e-2
     )
