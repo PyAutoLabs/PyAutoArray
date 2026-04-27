@@ -472,10 +472,12 @@ def poisson_noise_via_data_eps_from(data_eps, exposure_time_map, seed=-1):
     """
     setup_random_seed(seed)
 
-    image_counts = np.multiply(data_eps.array, exposure_time_map.array)
-    return data_eps - np.divide(
-        np.random.poisson(image_counts, data_eps.shape), exposure_time_map.array
+    image_counts = data_eps.array * exposure_time_map.array
+    noisy_eps_array = (
+        np.random.poisson(image_counts, data_eps.shape) / exposure_time_map.array
     )
+
+    return data_eps.with_new_array(noisy_eps_array) - data_eps
 
 
 def data_eps_with_poisson_noise_added(data_eps, exposure_time_map, seed=-1):

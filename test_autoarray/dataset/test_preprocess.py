@@ -612,7 +612,7 @@ def test__poisson_noise_from_data():
     )
 
     assert (
-        poisson_noise.native == np.array([[(10.0 - 9.0), 0], [0, (10.0 - 6.0)]])
+        poisson_noise.native == np.array([[(9.0 - 10.0), 0], [0, (6.0 - 10.0)]])
     ).all()
 
     data = aa.Array2D.full(fill_value=10.0, shape_native=(2, 2), pixel_scales=1.0)
@@ -623,7 +623,7 @@ def test__poisson_noise_from_data():
     )
 
     # Use known noise_map_1d map for given seed.
-    assert (poisson_noise.native == np.array([[1, 4], [3, 1]])).all()
+    assert (poisson_noise.native == np.array([[-1, -4], [-3, -1]])).all()
 
     data = aa.Array2D.no_mask(
         values=[[10000000.0, 0.0], [0.0, 10000000.0]], pixel_scales=1.0
@@ -634,7 +634,7 @@ def test__poisson_noise_from_data():
         data_eps=data, exposure_time_map=exposure_time_map, seed=1
     )
 
-    assert (poisson_noise.native == np.array([[743, 0], [0, 3783]])).all()
+    assert (poisson_noise.native == np.array([[-743, 0], [0, -3783]])).all()
 
 
 def test__data_with_poisson_noised_added():
@@ -654,7 +654,7 @@ def test__data_with_poisson_noised_added():
         data_eps=data, exposure_time_map=exposure_time_map, seed=1
     )
 
-    assert (data_with_poisson_noise.native == np.array([[11, 0], [0, 14]])).all()
+    assert (data_with_poisson_noise.native == np.array([[9, 0], [0, 6]])).all()
 
     data = aa.Array2D.full(fill_value=10.0, shape_native=(2, 2), pixel_scales=1.0)
 
@@ -663,7 +663,7 @@ def test__data_with_poisson_noised_added():
         data_eps=data, exposure_time_map=exposure_time_map, seed=1
     )
 
-    assert (data_with_poisson_noise.native == np.array([[11, 14], [13, 11]])).all()
+    assert (data_with_poisson_noise.native == np.array([[9, 6], [7, 9]])).all()
 
     data = aa.Array2D.no_mask(
         values=[[10000000.0, 0.0], [0.0, 10000000.0]], pixel_scales=1.0
@@ -676,7 +676,7 @@ def test__data_with_poisson_noised_added():
     )
 
     assert (
-        data_with_poisson_noise.native == np.array([[10000743, 0.0], [0.0, 10003783.0]])
+        data_with_poisson_noise.native == np.array([[9999257, 0.0], [0.0, 9996217.0]])
     ).all()
 
 
