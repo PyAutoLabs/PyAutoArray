@@ -37,12 +37,7 @@ jobs:
         pip3 install setuptools
         pip3 install wheel
         pip3 install pytest coverage pytest-cov
-        pip install ./PyAutoConf ./PyAutoArray
-        if [ "${{ matrix.python-version }}" = "3.12" ]; then
-          pip install "./PyAutoArray[optional]"
-        else
-          pip install numba pynufft
-        fi
+        pip install ./PyAutoConf "./PyAutoArray[optional]"
 
     - name: Extract branch name
       shell: bash
