@@ -1,4 +1,3 @@
-import importlib.util
 import os
 from os import path
 import pytest
@@ -6,13 +5,6 @@ from matplotlib import pyplot
 
 from autoarray import fixtures
 from autoconf import conf
-
-# Skip JAX-only tests when jax isn't installed. find_spec checks availability
-# WITHOUT importing the module, so this conftest stays numpy-only per the
-# "library unit tests stay numpy-only" rule.
-collect_ignore_glob = []
-if importlib.util.find_spec("jax") is None:
-    collect_ignore_glob = ["test_jax_*.py", "**/test_jax_*.py"]
 
 
 class PlotPatch:
