@@ -2,7 +2,6 @@ import os
 from os import path
 import shutil
 import numpy as np
-import pytest
 
 import autoarray as aa
 
@@ -76,22 +75,14 @@ def test__grid_2d_via_deflection_grid_from():
 
 
 def test__grid_2d_via_deflection_grid_from__propagates_xp():
-    # numpy-backed receiver -> numpy-backed result
+    # numpy-backed receiver -> numpy-backed result.
+    # The JAX half of this assertion lives in
+    # autolens_workspace_test/scripts/jax_assertions/grid_irregular.py.
     grid_np = aa.Grid2DIrregular(values=[(1.0, 1.0), (2.0, 2.0)])
     result_np = grid_np.grid_2d_via_deflection_grid_from(
         deflection_grid=np.array([[1.0, 0.0], [1.0, 1.0]])
     )
     assert result_np._xp is np
-
-    # jax-backed receiver -> jax-backed result (so downstream .square calls use jnp)
-    jnp = pytest.importorskip("jax.numpy")
-    grid_jax = aa.Grid2DIrregular(
-        values=jnp.array([[1.0, 1.0], [2.0, 2.0]]), xp=jnp
-    )
-    result_jax = grid_jax.grid_2d_via_deflection_grid_from(
-        deflection_grid=jnp.array([[1.0, 0.0], [1.0, 1.0]])
-    )
-    assert result_jax._xp is jnp
 
 
 def test__furthest_distances_to_other_coordinates():
