@@ -310,9 +310,24 @@ def psf_precision_value_from(
 
     for k0_y in range(kernel_native.shape[0]):
         for k0_x in range(kernel_native.shape[1]):
-            value = value_native[
-                ip0_y + k0_y + kernel_shift_y, ip0_x + k0_x + kernel_shift_x
-            ]
+            iy = ip0_y + k0_y + kernel_shift_y
+            ix = ip0_x + k0_x + kernel_shift_x
+
+            # numba @jit() does not bounds-check array reads. Without this
+            # guard, a kernel position that lands off the noise-map array
+            # (e.g. a mask pixel within `kernel_shift` of the array edge)
+            # silently reads uninitialized memory, producing astronomical
+            # or non-finite contributions that poison the entire
+            # psf_precision_operator and downstream curvature matrix.
+            if (
+                iy < 0
+                or iy >= value_native.shape[0]
+                or ix < 0
+                or ix >= value_native.shape[1]
+            ):
+                continue
+
+            value = value_native[iy, ix]
 
             if value > 0.0:
                 k1_y = k0_y + ip_y_offset
