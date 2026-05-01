@@ -1,11 +1,16 @@
-import jax
-import jax.numpy as jnp
+try:
+    import jax
+    import jax.numpy as jnp
 
-jax.config.update("jax_enable_x64", True)
+    jax.config.update("jax_enable_x64", True)
+    _JAX_AVAILABLE = True
+except ImportError:
+    _JAX_AVAILABLE = False
 
 
 def pytest_configure():
-    _ = jnp.sum(jnp.array([0.0]))  # Force backend init
+    if _JAX_AVAILABLE:
+        _ = jnp.sum(jnp.array([0.0]))  # Force backend init
 
 
 import os
