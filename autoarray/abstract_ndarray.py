@@ -418,10 +418,20 @@ class AbstractNDArray(ABC):
             self.__class__.__name__,
         )
 
-    def __array__(self, dtype=None):
-        if dtype:
-            return self._array.astype(dtype)
-        return self._array
+    def __array__(self, dtype=None, copy=None):
+        # numpy >=1.26 requires __array__ to return an actual np.ndarray
+        # ("object __array__ method not producing an array" otherwise),
+        # and numpy 2.0 added the `copy` kwarg. self._array can be a
+        # jax.Array on the JAX path (set in `_array = jnp.where(...)` etc.)
+        # — coerce to numpy so the protocol contract holds.
+        arr = self._array
+        if not isinstance(arr, np.ndarray):
+            arr = np.asarray(arr)
+        if dtype is not None:
+            arr = arr.astype(dtype)
+        if copy:
+            arr = arr.copy()
+        return arr
 
     def __len__(self):
         return len(self._array)
