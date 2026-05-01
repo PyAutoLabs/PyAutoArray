@@ -1,18 +1,4 @@
-try:
-    import jax
-    import jax.numpy as jnp
-
-    jax.config.update("jax_enable_x64", True)
-    _JAX_AVAILABLE = True
-except ImportError:
-    _JAX_AVAILABLE = False
-
-
-def pytest_configure():
-    if _JAX_AVAILABLE:
-        _ = jnp.sum(jnp.array([0.0]))  # Force backend init
-
-
+import importlib.util
 import os
 from os import path
 import pytest
@@ -20,6 +6,13 @@ from matplotlib import pyplot
 
 from autoarray import fixtures
 from autoconf import conf
+
+# Skip JAX-only tests when jax isn't installed. find_spec checks availability
+# WITHOUT importing the module, so this conftest stays numpy-only per the
+# "library unit tests stay numpy-only" rule.
+collect_ignore_glob = []
+if importlib.util.find_spec("jax") is None:
+    collect_ignore_glob = ["test_jax_*.py", "**/test_jax_*.py"]
 
 
 class PlotPatch:
