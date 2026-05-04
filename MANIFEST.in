@@ -1,6 +1,6 @@
 # MANIFEST.in
 exclude .gitignore
-include README.rst
+include README.md
 include setup.cfg
 include CITATIONS.rst
 include LICENSE
