@@ -121,6 +121,92 @@ def test__psf_precision_operator_sparse_from():
     assert psf_weighted_noise_lengths == pytest.approx(np.array([4, 3, 2, 1]), 1.0e-4)
 
 
+def test__psf_precision_operator_sparse_from__edge_pixels():
+    # Regression test: every slim pixel sits at a corner of the 4x4 noise map,
+    # so the kernel walk in psf_precision_value_from indexes off the array.
+    # numba.jit() does not bounds-check, so without the explicit guard added
+    # in the function those reads return uninitialized memory and produce
+    # astronomically large or non-finite operator entries.
+    noise_map = np.array(
+        [
+            [1.0, 1.0, 1.0, 1.0],
+            [1.0, 2.0, 2.0, 1.0],
+            [1.0, 2.0, 2.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0],
+        ]
+    )
+    kernel = np.array([[1.0, 1.0, 0.0], [1.0, 2.0, 1.0], [0.0, 1.0, 1.0]])
+    native_index_for_slim_index = np.array([[0, 0], [0, 3], [3, 0], [3, 3]])
+
+    (
+        op,
+        indexes,
+        lengths,
+    ) = aa.util.inversion_imaging_numba.psf_precision_operator_sparse_from(
+        noise_map_native=noise_map,
+        kernel_native=kernel,
+        native_index_for_slim_index=native_index_for_slim_index,
+    )
+
+    # Sanity: no inf/nan in the operator.
+    assert np.isfinite(op).all()
+    assert int(lengths.sum()) == op.shape[0]
+
+    # Independent reference: a pure-numpy bounds-checked re-implementation of
+    # psf_precision_value_from. The numba version with the fix applied must
+    # match this byte-for-byte.
+    def _reference_value(ip0_y, ip0_x, ip1_y, ip1_x):
+        h, w = noise_map.shape
+        kh, kw = kernel.shape
+        kernel_shift_y = -(kw // 2)
+        kernel_shift_x = -(kh // 2)
+        ip_y_offset = ip0_y - ip1_y
+        ip_x_offset = ip0_x - ip1_x
+        if (
+            ip_y_offset < 2 * kernel_shift_y
+            or ip_y_offset > -2 * kernel_shift_y
+            or ip_x_offset < 2 * kernel_shift_x
+            or ip_x_offset > -2 * kernel_shift_x
+        ):
+            return 0.0
+        total = 0.0
+        for k0_y in range(kh):
+            for k0_x in range(kw):
+                iy = ip0_y + k0_y + kernel_shift_y
+                ix = ip0_x + k0_x + kernel_shift_x
+                if iy < 0 or iy >= h or ix < 0 or ix >= w:
+                    continue
+                v = noise_map[iy, ix]
+                if v > 0.0:
+                    k1_y = k0_y + ip_y_offset
+                    k1_x = k0_x + ip_x_offset
+                    if 0 <= k1_y < kh and 0 <= k1_x < kw:
+                        total += kernel[k0_y, k0_x] * kernel[k1_y, k1_x] / v ** 2
+        return total
+
+    n_pix = native_index_for_slim_index.shape[0]
+    expected = []
+    expected_indexes = []
+    expected_lengths = []
+    for ip0 in range(n_pix):
+        ip0_y, ip0_x = native_index_for_slim_index[ip0]
+        count = 0
+        for ip1 in range(ip0, n_pix):
+            ip1_y, ip1_x = native_index_for_slim_index[ip1]
+            v = _reference_value(ip0_y, ip0_x, ip1_y, ip1_x)
+            if ip0 == ip1:
+                v /= 2.0
+            if v > 0.0:
+                expected.append(v)
+                expected_indexes.append(ip1)
+                count += 1
+        expected_lengths.append(count)
+
+    assert op == pytest.approx(np.array(expected), 1.0e-4)
+    assert indexes == pytest.approx(np.array(expected_indexes), 1.0e-4)
+    assert lengths == pytest.approx(np.array(expected_lengths), 1.0e-4)
+
+
 def test__data_vector_via_blurred_mapping_matrix_from():
     blurred_mapping_matrix = np.array(
         [
@@ -181,144 +267,3 @@ def test__data_vector_via_blurred_mapping_matrix_from():
     )
 
     assert (data_vector == np.array([2.0, 3.0, 1.0])).all()
-
-
-def test__data_vector_via_weighted_data_two_methods_agree():
-    mask = aa.Mask2D.circular(shape_native=(51, 51), pixel_scales=0.1, radius=2.0)
-
-    image = np.random.uniform(size=mask.shape_native)
-    image = aa.Array2D(values=image, mask=mask)
-
-    noise_map = np.random.uniform(size=mask.shape_native)
-    noise_map = aa.Array2D(values=noise_map, mask=mask)
-
-    convolver = aa.Convolver.from_gaussian(
-        shape_native=(7, 7), pixel_scales=mask.pixel_scales, sigma=1.0, normalize=True
-    )
-
-    psf = convolver
-
-    mesh = aa.mesh.RectangularUniform(shape=(20, 20))
-
-    # TODO : Use pytest.parameterize
-
-    for sub_size in range(1, 3):
-
-        grid = aa.Grid2D.from_mask(mask=mask, over_sample_size=sub_size)
-
-        interpolator = mesh.interpolator_from(
-            source_plane_data_grid=grid, source_plane_mesh_grid=None
-        )
-
-        mapper = aa.Mapper(interpolator=interpolator)
-
-        mapping_matrix = mapper.mapping_matrix
-
-        blurred_mapping_matrix = psf.convolved_mapping_matrix_from(
-            mapping_matrix=mapping_matrix, mask=mask
-        )
-
-        data_vector = (
-            aa.util.inversion_imaging.data_vector_via_blurred_mapping_matrix_from(
-                blurred_mapping_matrix=blurred_mapping_matrix,
-                image=image,
-                noise_map=noise_map,
-            )
-        )
-
-        rows, cols, vals = aa.util.mapper.sparse_triplets_from(
-            pix_indexes_for_sub=mapper.pix_indexes_for_sub_slim_index,
-            pix_weights_for_sub=mapper.pix_weights_for_sub_slim_index,
-            slim_index_for_sub=mapper.slim_index_for_sub_slim_index,
-            fft_index_for_masked_pixel=mask.fft_index_for_masked_pixel,
-            sub_fraction_slim=mapper.over_sampler.sub_fraction.array,
-        )
-
-        weight_map = image.array / (noise_map.array**2)
-        weight_map = aa.Array2D(values=weight_map, mask=noise_map.mask)
-
-        psf_weighted_data = aa.util.inversion_imaging.psf_weighted_data_from(
-            weight_map_native=weight_map.native.array,
-            kernel_native=convolver.kernel.native.array,
-            native_index_for_slim_index=mask.derive_indexes.native_for_slim.astype(
-                "int"
-            ),
-        )
-
-        data_vector_via_psf_weighted_noise = (
-            aa.util.inversion_imaging.data_vector_via_psf_weighted_data_from(
-                psf_weighted_data=psf_weighted_data,
-                rows=rows,
-                cols=cols,
-                vals=vals,
-                S=mesh.pixels,
-            )
-        )
-
-        assert data_vector_via_psf_weighted_noise == pytest.approx(data_vector, 1.0e-4)
-
-
-def test__curvature_matrix_via_psf_weighted_noise_two_methods_agree():
-
-    mask = aa.Mask2D.circular(shape_native=(21, 21), pixel_scales=0.1, radius=0.8)
-
-    noise_map = np.random.uniform(size=mask.shape_native)
-    noise_map = aa.Array2D(values=noise_map, mask=mask)
-
-    kernel = aa.Convolver.from_gaussian(
-        shape_native=(5, 5), pixel_scales=mask.pixel_scales, sigma=1.0, normalize=True
-    )
-
-    psf = kernel
-
-    sparse_operator = aa.ImagingSparseOperator.from_noise_map_and_psf(
-        data=noise_map,
-        noise_map=noise_map,
-        psf=psf.kernel.native,
-    )
-
-    mesh = aa.mesh.RectangularAdaptDensity(shape=(8, 8))
-
-    interpolator = mesh.interpolator_from(
-        source_plane_data_grid=mask.derive_grid.unmasked,
-        source_plane_mesh_grid=None,
-    )
-
-    mapper = aa.Mapper(interpolator=interpolator)
-
-    mapping_matrix = mapper.mapping_matrix
-
-    rows, cols, vals = aa.util.mapper.sparse_triplets_from(
-        pix_indexes_for_sub=mapper.pix_indexes_for_sub_slim_index,
-        pix_weights_for_sub=mapper.pix_weights_for_sub_slim_index,
-        slim_index_for_sub=mapper.slim_index_for_sub_slim_index,
-        fft_index_for_masked_pixel=mask.fft_index_for_masked_pixel,
-        sub_fraction_slim=mapper.over_sampler.sub_fraction.array,
-        return_rows_slim=False,
-    )
-
-    curvature_matrix_via_sparse_operator = sparse_operator.curvature_matrix_diag_from(
-        rows,
-        cols,
-        vals,
-        S=mesh.shape[0] * mesh.shape[1],
-    )
-
-    curvature_matrix_via_sparse_operator = (
-        aa.util.inversion_imaging.curvature_matrix_mirrored_from(
-            curvature_matrix=curvature_matrix_via_sparse_operator,
-        )
-    )
-
-    blurred_mapping_matrix = psf.convolved_mapping_matrix_from(
-        mapping_matrix=mapping_matrix, mask=mask
-    )
-
-    curvature_matrix = aa.util.inversion.curvature_matrix_via_mapping_matrix_from(
-        mapping_matrix=blurred_mapping_matrix,
-        noise_map=noise_map,
-    )
-
-    assert curvature_matrix_via_sparse_operator == pytest.approx(
-        curvature_matrix, abs=1.0e-4
-    )

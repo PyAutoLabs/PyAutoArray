@@ -38,16 +38,14 @@ class Grid2DContour:
         if self._contour_array is not None:
             return self._contour_array
 
-        import jax.numpy as jnp
-
         pixel_centres = geometry_util.grid_pixel_centres_2d_slim_from(
             grid_scaled_2d_slim=np.array(self.grid),
             shape_native=self.shape_native,
             pixel_scales=self.pixel_scales,
         ).astype("int")
 
-        arr = jnp.zeros(self.shape_native)
-        arr = arr.at[tuple(jnp.array(pixel_centres).T)].set(1)
+        arr = np.zeros(self.shape_native)
+        arr[tuple(pixel_centres.T)] = 1
 
         return arr
 
@@ -56,12 +54,12 @@ class Grid2DContour:
         # make sure to use base numpy to convert JAX array back to a normal array
 
         from skimage import measure
-        import jax.numpy as jnp
 
-        if isinstance(self.contour_array, jnp.ndarray):
-            contour_array = np.array(self.contour_array)
+        contour_array = self.contour_array
+        if hasattr(contour_array, "array"):
+            contour_array = np.array(contour_array.array)
         else:
-            contour_array = np.array(self.contour_array.array)
+            contour_array = np.array(contour_array)
 
         contour_indices_list = measure.find_contours(contour_array, 0)
 

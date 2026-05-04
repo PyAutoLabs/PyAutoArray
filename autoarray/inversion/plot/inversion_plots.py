@@ -60,8 +60,13 @@ def subplot_of_mapper(
 
     # panel 0: data subtracted
     try:
+        array = inversion.data_subtracted_dict[mapper]
+        from autoarray.structures.visibilities import Visibilities
+
+        if isinstance(array, Visibilities):
+            array = inversion.transformer.image_from(visibilities=array)
         plot_array(
-            inversion.data_subtracted_dict[mapper],
+            array,
             ax=axes[0],
             title=_pf("Data Subtracted"),
             colormap=colormap,
@@ -286,8 +291,13 @@ def subplot_mappings(
 
     # panel 0: data subtracted
     try:
+        array = inversion.data_subtracted_dict[mapper]
+        from autoarray.structures.visibilities import Visibilities
+
+        if isinstance(array, Visibilities):
+            array = inversion.transformer.image_from(visibilities=array)
         plot_array(
-            inversion.data_subtracted_dict[mapper],
+            array,
             ax=axes[0],
             title="Data Subtracted",
             colormap=colormap,
