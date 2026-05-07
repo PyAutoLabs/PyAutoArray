@@ -1,18 +1,16 @@
-from os import path
 import pytest
 import autoarray as aa
 import autoarray.plot as aplt
 from autoarray.dataset.plot.imaging_plots import subplot_imaging_dataset
+from pathlib import Path
 
 
-directory = path.dirname(path.realpath(__file__))
+directory = Path(__file__).resolve().parent
 
 
 @pytest.fixture(name="plot_path")
 def make_plot_path_setup():
-    return path.join(
-        "{}".format(path.dirname(path.realpath(__file__))), "files", "plots", "imaging"
-    )
+    return Path(Path(__file__).resolve().parent) / "files" / "plots" / "imaging"
 
 
 def test__individual_attributes_are_output(
@@ -25,7 +23,7 @@ def test__individual_attributes_are_output(
         output_filename="data",
         output_format="png",
     )
-    assert path.join(plot_path, "data.png") in plot_patch.paths
+    assert str(Path(plot_path) / "data.png") in plot_patch.paths
 
     aplt.plot_array_2d(
         array=imaging_7x7.noise_map,
@@ -33,7 +31,7 @@ def test__individual_attributes_are_output(
         output_filename="noise_map",
         output_format="png",
     )
-    assert path.join(plot_path, "noise_map.png") in plot_patch.paths
+    assert str(Path(plot_path) / "noise_map.png") in plot_patch.paths
 
     if imaging_7x7.psf is not None:
         aplt.plot_array_2d(
@@ -42,7 +40,7 @@ def test__individual_attributes_are_output(
             output_filename="psf",
             output_format="png",
         )
-        assert path.join(plot_path, "psf.png") in plot_patch.paths
+        assert str(Path(plot_path) / "psf.png") in plot_patch.paths
 
     aplt.plot_array_2d(
         array=imaging_7x7.signal_to_noise_map,
@@ -50,7 +48,7 @@ def test__individual_attributes_are_output(
         output_filename="signal_to_noise_map",
         output_format="png",
     )
-    assert path.join(plot_path, "signal_to_noise_map.png") in plot_patch.paths
+    assert str(Path(plot_path) / "signal_to_noise_map.png") in plot_patch.paths
 
     aplt.plot_array_2d(
         array=imaging_7x7.grids.over_sample_size_lp,
@@ -58,7 +56,7 @@ def test__individual_attributes_are_output(
         output_filename="over_sample_size_lp",
         output_format="png",
     )
-    assert path.join(plot_path, "over_sample_size_lp.png") in plot_patch.paths
+    assert str(Path(plot_path) / "over_sample_size_lp.png") in plot_patch.paths
 
     aplt.plot_array_2d(
         array=imaging_7x7.grids.over_sample_size_pixelization,
@@ -66,7 +64,7 @@ def test__individual_attributes_are_output(
         output_filename="over_sample_size_pixelization",
         output_format="png",
     )
-    assert path.join(plot_path, "over_sample_size_pixelization.png") in plot_patch.paths
+    assert str(Path(plot_path) / "over_sample_size_pixelization.png") in plot_patch.paths
 
     plot_patch.paths = []
 
@@ -76,8 +74,8 @@ def test__individual_attributes_are_output(
         output_filename="data",
         output_format="png",
     )
-    assert path.join(plot_path, "data.png") in plot_patch.paths
-    assert not path.join(plot_path, "noise_map.png") in plot_patch.paths
+    assert str(Path(plot_path) / "data.png") in plot_patch.paths
+    assert not str(Path(plot_path) / "noise_map.png") in plot_patch.paths
 
 
 def test__subplot_is_output(
@@ -89,7 +87,7 @@ def test__subplot_is_output(
         output_format="png",
     )
 
-    assert path.join(plot_path, "dataset.png") in plot_patch.paths
+    assert str(Path(plot_path) / "dataset.png") in plot_patch.paths
 
 
 def test__output_as_fits__correct_output_format(
@@ -103,7 +101,7 @@ def test__output_as_fits__correct_output_format(
     )
 
     image_from_plot = aa.ndarray_via_fits_from(
-        file_path=path.join(plot_path, "data.fits"), hdu=0
+        file_path=Path(plot_path) / "data.fits", hdu=0
     )
 
     assert image_from_plot.shape == (7, 7)

@@ -1,12 +1,10 @@
 from autoarray import util
 
-import os
+from pathlib import Path
 import numpy as np
 
 
-test_data_path = os.path.join(
-    "{}".format(os.path.dirname(os.path.realpath(__file__))), "files"
-)
+test_data_path = Path(__file__).resolve().parent / "files"
 
 
 def test__resized_array_2d_from__trimming():

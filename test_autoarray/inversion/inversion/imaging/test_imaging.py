@@ -10,10 +10,10 @@ from autoarray.inversion.inversion.imaging.sparse import (
 from autoarray import exc
 
 import numpy as np
-from os import path
 import pytest
+from pathlib import Path
 
-directory = path.dirname(path.realpath(__file__))
+directory = Path(__file__).resolve().parent
 
 
 def test__operated_mapping_matrix_property(psf_3x3, rectangular_mapper_7x7_3x3):

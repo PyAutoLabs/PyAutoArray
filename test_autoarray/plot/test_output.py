@@ -1,10 +1,10 @@
 import autoarray.plot as aplt
 
-from os import path
+from pathlib import Path
 
 import shutil
 
-directory = path.dirname(path.realpath(__file__))
+directory = Path(__file__).resolve().parent
 
 
 def test__constructor():
@@ -22,17 +22,17 @@ def test__constructor():
     assert output.format == "png"
     assert output.filename == "file"
 
-    if path.exists(output.path):
+    if Path(output.path).exists():
         shutil.rmtree(output.path)
 
 
 def test__input_path_is_created():
-    test_path = path.join(directory, "files", "output_path")
+    test_path = str(directory / "files" / "output_path")
 
-    if path.exists(test_path):
+    if Path(test_path).exists():
         shutil.rmtree(test_path)
 
-    assert not path.exists(test_path)
+    assert not Path(test_path).exists()
 
     output = aplt.Output(
         path=test_path,
@@ -40,4 +40,4 @@ def test__input_path_is_created():
     )
     output.to_figure(structure=None, auto_filename="test")
 
-    assert path.exists(test_path)
+    assert Path(test_path).exists()

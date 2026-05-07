@@ -4,6 +4,7 @@ Shared utilities for the direct-matplotlib plot functions.
 
 import logging
 import os
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -310,8 +311,8 @@ def _output_mode_save(fig, filename):
 
     import sys
 
-    script_name = os.path.splitext(os.path.basename(sys.argv[0]))[0]
-    output_path = os.path.join(os.getcwd(), "output_mode", script_name)
+    script_name = Path(sys.argv[0]).stem
+    output_path = str(Path(os.getcwd()) / "output_mode" / script_name)
     os.makedirs(output_path, exist_ok=True)
 
     count = getattr(_output_mode_save, "_count", -1) + 1
@@ -319,7 +320,7 @@ def _output_mode_save(fig, filename):
 
     try:
         fig.savefig(
-            os.path.join(output_path, f"{count}_{filename}.png"),
+            str(Path(output_path) / f"{count}_{filename}.png"),
             dpi=150,
             bbox_inches="tight",
             pad_inches=0.1,
@@ -371,7 +372,7 @@ def subplot_save(fig, output_path, output_filename, output_format=None):
         os.makedirs(output_path, exist_ok=True)
         try:
             fig.savefig(
-                os.path.join(output_path, f"{output_filename}.{output_format}"),
+                str(Path(output_path) / f"{output_filename}.{output_format}"),
                 bbox_inches="tight",
                 pad_inches=0.1,
             )
@@ -552,7 +553,7 @@ def save_figure(
                 continue
             try:
                 fig.savefig(
-                    os.path.join(path, f"{filename}.{fmt}"),
+                    str(Path(path) / f"{filename}.{fmt}"),
                     dpi=dpi,
                     bbox_inches="tight",
                     pad_inches=0.1,

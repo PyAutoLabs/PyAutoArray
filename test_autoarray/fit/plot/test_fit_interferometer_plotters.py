@@ -1,20 +1,15 @@
 import autoarray.plot as aplt
 import numpy as np
 import pytest
+from pathlib import Path
 
-from os import path
 
-directory = path.dirname(path.realpath(__file__))
+directory = Path(__file__).resolve().parent
 
 
 @pytest.fixture(name="plot_path")
 def make_plot_path_setup():
-    return path.join(
-        "{}".format(path.dirname(path.realpath(__file__))),
-        "files",
-        "plots",
-        "fit_dataset",
-    )
+    return Path(Path(__file__).resolve().parent) / "files" / "plots" / "fit_dataset"
 
 
 def test__fit_quantities_are_output(fit_interferometer_7, plot_path, plot_patch):
@@ -26,7 +21,7 @@ def test__fit_quantities_are_output(fit_interferometer_7, plot_path, plot_patch)
         output_filename="data",
         output_format="png",
     )
-    assert path.join(plot_path, "data.png") in plot_patch.paths
+    assert str(Path(plot_path) / "data.png") in plot_patch.paths
 
     aplt.plot_yx_1d(
         y=np.real(fit_interferometer_7.residual_map),
@@ -36,10 +31,7 @@ def test__fit_quantities_are_output(fit_interferometer_7, plot_path, plot_patch)
         output_format="png",
         plot_axis_type="scatter",
     )
-    assert (
-        path.join(plot_path, "real_residual_map_vs_uv_distances.png")
-        in plot_patch.paths
-    )
+    assert str(Path(plot_path) / "real_residual_map_vs_uv_distances.png") in plot_patch.paths
 
     aplt.plot_yx_1d(
         y=np.real(fit_interferometer_7.chi_squared_map),
@@ -49,10 +41,7 @@ def test__fit_quantities_are_output(fit_interferometer_7, plot_path, plot_patch)
         output_format="png",
         plot_axis_type="scatter",
     )
-    assert (
-        path.join(plot_path, "real_chi_squared_map_vs_uv_distances.png")
-        in plot_patch.paths
-    )
+    assert str(Path(plot_path) / "real_chi_squared_map_vs_uv_distances.png") in plot_patch.paths
 
     aplt.plot_yx_1d(
         y=np.imag(fit_interferometer_7.chi_squared_map),
@@ -62,10 +51,7 @@ def test__fit_quantities_are_output(fit_interferometer_7, plot_path, plot_patch)
         output_format="png",
         plot_axis_type="scatter",
     )
-    assert (
-        path.join(plot_path, "imag_chi_squared_map_vs_uv_distances.png")
-        in plot_patch.paths
-    )
+    assert str(Path(plot_path) / "imag_chi_squared_map_vs_uv_distances.png") in plot_patch.paths
 
     aplt.plot_array_2d(
         array=fit_interferometer_7.dirty_image,
@@ -73,7 +59,7 @@ def test__fit_quantities_are_output(fit_interferometer_7, plot_path, plot_patch)
         output_filename="dirty_image",
         output_format="png",
     )
-    assert path.join(plot_path, "dirty_image.png") in plot_patch.paths
+    assert str(Path(plot_path) / "dirty_image.png") in plot_patch.paths
 
     plot_patch.paths = []
 
@@ -100,19 +86,10 @@ def test__fit_quantities_are_output(fit_interferometer_7, plot_path, plot_patch)
         plot_axis_type="scatter",
     )
 
-    assert path.join(plot_path, "data.png") in plot_patch.paths
-    assert (
-        path.join(plot_path, "real_chi_squared_map_vs_uv_distances.png")
-        in plot_patch.paths
-    )
-    assert (
-        path.join(plot_path, "imag_chi_squared_map_vs_uv_distances.png")
-        in plot_patch.paths
-    )
-    assert (
-        path.join(plot_path, "real_residual_map_vs_uv_distances.png")
-        not in plot_patch.paths
-    )
+    assert str(Path(plot_path) / "data.png") in plot_patch.paths
+    assert str(Path(plot_path) / "real_chi_squared_map_vs_uv_distances.png") in plot_patch.paths
+    assert str(Path(plot_path) / "imag_chi_squared_map_vs_uv_distances.png") in plot_patch.paths
+    assert str(Path(plot_path) / "real_residual_map_vs_uv_distances.png") not in plot_patch.paths
 
 
 def test__fit_sub_plots(fit_interferometer_7, plot_path, plot_patch):
@@ -122,7 +99,7 @@ def test__fit_sub_plots(fit_interferometer_7, plot_path, plot_patch):
         output_format="png",
     )
 
-    assert path.join(plot_path, "fit.png") in plot_patch.paths
+    assert str(Path(plot_path) / "fit.png") in plot_patch.paths
 
     aplt.subplot_fit_interferometer_dirty_images(
         fit=fit_interferometer_7,
@@ -130,4 +107,4 @@ def test__fit_sub_plots(fit_interferometer_7, plot_path, plot_patch):
         output_format="png",
     )
 
-    assert path.join(plot_path, "fit_dirty_images.png") in plot_patch.paths
+    assert str(Path(plot_path) / "fit_dirty_images.png") in plot_patch.paths

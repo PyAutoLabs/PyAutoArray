@@ -3,11 +3,11 @@ from astropy.modeling import functional_models
 from astropy.coordinates import Angle
 import numpy as np
 import pytest
-from os import path
 
 import autoarray as aa
+from pathlib import Path
 
-test_data_path = path.join("{}".format(path.dirname(path.realpath(__file__))), "files")
+test_data_path = Path(Path(__file__).resolve().parent) / "files"
 
 
 @pytest.mark.parametrize(

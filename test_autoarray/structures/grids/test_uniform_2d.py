@@ -1,4 +1,4 @@
-from os import path
+from pathlib import Path
 import numpy as np
 import pytest
 
@@ -6,7 +6,7 @@ from autoconf import conf
 import autoarray as aa
 from autoarray import exc
 
-test_grid_dir = path.join("{}".format(path.dirname(path.realpath(__file__))), "files")
+test_grid_dir = Path(__file__).resolve().parent / "files"
 
 
 def test__constructor__2x2_all_false_mask__native_slim_and_pixel_scales_correct():
@@ -473,7 +473,7 @@ def test__from_mask():
 def test__to_and_from_fits_methods():
     grid_2d = aa.Grid2D.uniform(shape_native=(2, 2), pixel_scales=2.0)
 
-    file_path = path.join(test_grid_dir, "grid_2d.fits")
+    file_path = test_grid_dir / "grid_2d.fits"
 
     from autoconf.fitsable import output_to_fits
     output_to_fits(values=grid_2d.native.array.astype("float"), file_path=file_path, overwrite=True, header_dict=grid_2d.mask.header_dict)

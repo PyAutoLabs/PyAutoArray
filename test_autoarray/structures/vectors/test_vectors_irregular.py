@@ -1,4 +1,4 @@
-from os import path
+from pathlib import Path
 
 from matplotlib.patches import Ellipse
 import pytest

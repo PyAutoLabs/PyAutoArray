@@ -1,5 +1,5 @@
 import os
-from os import path
+from pathlib import Path
 import numpy as np
 import pytest
 import shutil
@@ -7,7 +7,7 @@ import shutil
 import autoarray as aa
 from autoarray.structures import visibilities as vis
 
-test_data_path = path.join("{}".format(path.dirname(path.realpath(__file__))), "files")
+test_data_path = Path(__file__).resolve().parent / "files"
 
 
 def test__manual__makes_visibilities_without_other_inputs():
@@ -72,14 +72,14 @@ def test__ones_zeros__makes_visibilities_without_other_inputs():
 
 def test__from_fits__makes_visibilities_without_other_inputs():
     visibilities = aa.Visibilities.from_fits(
-        file_path=path.join(test_data_path, "3x2_ones.fits"), hdu=0
+        file_path=test_data_path / "3x2_ones.fits", hdu=0
     )
 
     assert type(visibilities) == vis.Visibilities
     assert (visibilities.slim == np.array([1.0 + 1.0j, 1.0 + 1.0j, 1.0 + 1.0j])).all()
 
     visibilities = aa.Visibilities.from_fits(
-        file_path=path.join(test_data_path, "3x2_twos.fits"), hdu=0
+        file_path=test_data_path / "3x2_twos.fits", hdu=0
     )
 
     assert type(visibilities) == vis.Visibilities
@@ -87,26 +87,24 @@ def test__from_fits__makes_visibilities_without_other_inputs():
 
 
 def test__output_to_fits():
-    test_data_path = path.join(
-        "{}".format(path.dirname(path.realpath(__file__))), "files"
-    )
+    files_path = Path(__file__).resolve().parent / "files"
 
     visibilities = aa.Visibilities.from_fits(
-        file_path=path.join(test_data_path, "3x2_ones.fits"), hdu=0
+        file_path=files_path / "3x2_ones.fits", hdu=0
     )
 
-    test_data_path = path.join(test_data_path, "output_test")
+    output_test_path = files_path / "output_test"
 
-    if path.exists(test_data_path):
-        shutil.rmtree(test_data_path)
+    if output_test_path.exists():
+        shutil.rmtree(output_test_path)
 
-    os.makedirs(test_data_path)
+    os.makedirs(output_test_path)
 
     from autoconf.fitsable import output_to_fits
-    output_to_fits(values=visibilities.in_array, file_path=path.join(test_data_path, "data.fits"))
+    output_to_fits(values=visibilities.in_array, file_path=output_test_path / "data.fits")
 
     visibilities_from_out = aa.Visibilities.from_fits(
-        file_path=path.join(test_data_path, "data.fits"), hdu=0
+        file_path=output_test_path / "data.fits", hdu=0
     )
     assert (
         visibilities_from_out.slim == np.array([1.0 + 1.0j, 1.0 + 1.0j, 1.0 + 1.0j])

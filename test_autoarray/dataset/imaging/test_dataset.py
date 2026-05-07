@@ -1,6 +1,5 @@
 import copy
 import os
-from os import path
 
 import numpy as np
 import pytest
@@ -9,23 +8,16 @@ import shutil
 import autoarray as aa
 
 from autoarray import exc
+from pathlib import Path
 
-test_data_path = path.join(
-    "{}".format(path.dirname(path.realpath(__file__))),
-    "files",
-)
+test_data_path = Path(Path(__file__).resolve().parent) / "files"
 
 
 @pytest.fixture(name="test_data_path")
 def make_test_data_path():
-    test_data_path = path.join(
-        "{}".format(os.path.dirname(os.path.realpath(__file__))),
-        "files",
-        "array",
-        "output_test",
-    )
+    test_data_path = Path(__file__).resolve().parent / "files" / "array" / "output_test"
 
-    if os.path.exists(test_data_path):
+    if test_data_path.exists():
         shutil.rmtree(test_data_path)
 
     os.makedirs(test_data_path)
@@ -132,9 +124,9 @@ def test__no_noise_map__raises_exception():
 def test__from_fits__separate_fits_files__loads_data_psf_noise_map_correctly():
     dataset = aa.Imaging.from_fits(
         pixel_scales=0.1,
-        data_path=path.join(test_data_path, "3x3_ones.fits"),
-        psf_path=path.join(test_data_path, "3x3_twos.fits"),
-        noise_map_path=path.join(test_data_path, "3x3_threes.fits"),
+        data_path=Path(test_data_path) / "3x3_ones.fits",
+        psf_path=Path(test_data_path) / "3x3_twos.fits",
+        noise_map_path=Path(test_data_path) / "3x3_threes.fits",
     )
 
     assert (dataset.data.native == np.ones((3, 3))).all()
@@ -151,11 +143,11 @@ def test__from_fits__separate_fits_files__loads_data_psf_noise_map_correctly():
 def test__from_fits__all_data_in_one_fits_file_multiple_hdus__loads_data_psf_noise_map_correctly():
     dataset = aa.Imaging.from_fits(
         pixel_scales=0.1,
-        data_path=path.join(test_data_path, "3x3_multiple_hdu.fits"),
+        data_path=Path(test_data_path) / "3x3_multiple_hdu.fits",
         data_hdu=0,
-        psf_path=path.join(test_data_path, "3x3_multiple_hdu.fits"),
+        psf_path=Path(test_data_path) / "3x3_multiple_hdu.fits",
         psf_hdu=1,
-        noise_map_path=path.join(test_data_path, "3x3_multiple_hdu.fits"),
+        noise_map_path=Path(test_data_path) / "3x3_multiple_hdu.fits",
         noise_map_hdu=2,
     )
 
@@ -178,17 +170,17 @@ def test__output_to_fits__round_trips_data_psf_noise_map_correctly(
 
     fits_imaging(
         dataset=imaging_7x7,
-        data_path=path.join(test_data_path, "data.fits"),
-        psf_path=path.join(test_data_path, "psf.fits"),
-        noise_map_path=path.join(test_data_path, "noise_map.fits"),
+        data_path=Path(test_data_path) / "data.fits",
+        psf_path=Path(test_data_path) / "psf.fits",
+        noise_map_path=Path(test_data_path) / "noise_map.fits",
         overwrite=True,
     )
 
     dataset = aa.Imaging.from_fits(
         pixel_scales=0.1,
-        data_path=path.join(test_data_path, "data.fits"),
-        psf_path=path.join(test_data_path, "psf.fits"),
-        noise_map_path=path.join(test_data_path, "noise_map.fits"),
+        data_path=Path(test_data_path) / "data.fits",
+        psf_path=Path(test_data_path) / "psf.fits",
+        noise_map_path=Path(test_data_path) / "noise_map.fits",
     )
 
     assert (dataset.data.native == np.ones((7, 7))).all()

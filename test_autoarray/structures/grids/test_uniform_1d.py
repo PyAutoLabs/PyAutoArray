@@ -1,4 +1,4 @@
-from os import path
+from pathlib import Path
 import numpy as np
 import pytest
 

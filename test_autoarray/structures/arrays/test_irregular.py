@@ -1,9 +1,9 @@
-from os import path
+from pathlib import Path
 
 import numpy as np
 import autoarray as aa
 
-test_values_dir = path.join("{}".format(path.dirname(path.realpath(__file__))), "files")
+test_values_dir = Path(__file__).resolve().parent / "files"
 
 
 def test__input_as_list__convert_correctly():

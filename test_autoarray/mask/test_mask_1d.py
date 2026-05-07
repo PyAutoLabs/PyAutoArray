@@ -1,13 +1,11 @@
 import numpy as np
-from os import path
+from pathlib import Path
 import pytest
 
 import autoarray as aa
 from autoarray import exc
 
-test_data_path = path.join(
-    "{}".format(path.dirname(path.realpath(__file__))), "files", "mask"
-)
+test_data_path = Path(__file__).resolve().parent / "files" / "mask"
 
 
 # ---------------------------------------------------------------------------
