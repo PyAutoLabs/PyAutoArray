@@ -1,16 +1,14 @@
 from astropy.io import fits
 import os
-from os import path
 import numpy as np
 import pytest
 import shutil
 
 import autoarray as aa
 from autoarray import exc
+from pathlib import Path
 
-test_data_path = path.join(
-    "{}".format(path.dirname(path.realpath(__file__))), "files", "mask"
-)
+test_data_path = Path(Path(__file__).resolve().parent) / "files" / "mask"
 
 
 # ---------------------------------------------------------------------------
@@ -375,19 +373,14 @@ def test__from_pixel_coordinates__two_coordinates_buffer_1__two_separate_unmaske
 
 def test__from_fits__output_to_fits__roundtrip_preserves_values_pixel_scales_and_header():
     mask = aa.Mask2D.from_fits(
-        file_path=path.join(test_data_path, "3x3_ones.fits"),
+        file_path=Path(test_data_path) / "3x3_ones.fits",
         hdu=0,
         pixel_scales=(1.0, 1.0),
     )
 
-    output_path = path.join(
-        "{}".format(path.dirname(path.realpath(__file__))),
-        "files",
-        "array",
-        "output_test",
-    )
+    output_path = Path(Path(__file__).resolve().parent) / "files" / "array" / "output_test"
 
-    if path.exists(output_path):
+    if Path(output_path).exists():
         shutil.rmtree(output_path)
 
     os.makedirs(output_path)
@@ -395,13 +388,13 @@ def test__from_fits__output_to_fits__roundtrip_preserves_values_pixel_scales_and
     from autoconf.fitsable import output_to_fits
     output_to_fits(
         values=mask.astype("float"),
-        file_path=path.join(output_path, "mask.fits"),
+        file_path=Path(output_path) / "mask.fits",
         header_dict=mask.header_dict,
         ext_name="mask",
     )
 
     mask = aa.Mask2D.from_fits(
-        file_path=path.join(output_path, "mask.fits"),
+        file_path=Path(output_path) / "mask.fits",
         hdu=0,
         pixel_scales=(1.0, 1.0),
         origin=(2.0, 2.0),
@@ -411,7 +404,7 @@ def test__from_fits__output_to_fits__roundtrip_preserves_values_pixel_scales_and
     assert mask.pixel_scales == (1.0, 1.0)
     assert mask.origin == (2.0, 2.0)
 
-    header = aa.header_obj_from(file_path=path.join(output_path, "mask.fits"), hdu=0)
+    header = aa.header_obj_from(file_path=Path(output_path) / "mask.fits", hdu=0)
 
     assert header["PIXSCAY"] == 1.0
     assert header["PIXSCAX"] == 1.0
@@ -424,7 +417,7 @@ def test__from_fits__with_resized_mask_shape__output_shape_matches_requested_sha
     resized_shape,
 ):
     mask = aa.Mask2D.from_fits(
-        file_path=path.join(test_data_path, "3x3_ones.fits"),
+        file_path=Path(test_data_path) / "3x3_ones.fits",
         hdu=0,
         pixel_scales=(1.0, 1.0),
         resized_mask_shape=resized_shape,

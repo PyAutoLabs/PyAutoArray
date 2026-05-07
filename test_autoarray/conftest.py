@@ -1,5 +1,5 @@
 import os
-from os import path
+from pathlib import Path
 import pytest
 from matplotlib import pyplot
 
@@ -12,7 +12,7 @@ class PlotPatch:
         self.paths = []
 
     def __call__(self, path, *args, **kwargs):
-        self.paths.append(path)
+        self.paths.append(str(path))
 
 
 @pytest.fixture(name="plot_patch")
@@ -25,7 +25,7 @@ def make_plot_patch(monkeypatch):
     return plot_patch
 
 
-directory = path.dirname(path.realpath(__file__))
+directory = Path(__file__).resolve().parent
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -34,7 +34,7 @@ def remove_logs():
     for d, _, files in os.walk(directory):
         for file in files:
             if file.endswith(".log"):
-                os.remove(path.join(d, file))
+                os.remove(Path(d) / file)
 
 
 @pytest.fixture(autouse=True)
@@ -42,8 +42,8 @@ def set_config_path(request):
     # if dirname(realpath(__file__)) in str(request.module):
 
     conf.instance.push(
-        new_path=path.join(directory, "config"),
-        output_path=path.join(directory, "output"),
+        new_path=str(directory / "config"),
+        output_path=str(directory / "output"),
     )
 
 

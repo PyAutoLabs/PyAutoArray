@@ -1,17 +1,15 @@
-from os import path
 import pytest
 
 import autoarray as aa
 import autoarray.plot as aplt
+from pathlib import Path
 
-directory = path.dirname(path.realpath(__file__))
+directory = Path(__file__).resolve().parent
 
 
 @pytest.fixture(name="plot_path")
 def make_plot_path_setup():
-    return path.join(
-        "{}".format(path.dirname(path.realpath(__file__))), "files", "structures"
-    )
+    return Path(Path(__file__).resolve().parent) / "files" / "structures"
 
 
 def test__plot_mapper(
@@ -27,7 +25,7 @@ def test__plot_mapper(
         output_format="png",
     )
 
-    assert path.join(plot_path, "mapper1.png") in plot_patch.paths
+    assert str(Path(plot_path) / "mapper1.png") in plot_patch.paths
 
 
 def test__subplot_image_and_mapper(
@@ -43,4 +41,4 @@ def test__subplot_image_and_mapper(
         output_path=plot_path,
         output_format="png",
     )
-    assert path.join(plot_path, "image_and_mapper.png") in plot_patch.paths
+    assert str(Path(plot_path) / "image_and_mapper.png") in plot_patch.paths

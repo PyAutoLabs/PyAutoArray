@@ -1,6 +1,6 @@
 from astropy.io import fits
 import os
-from os import path
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -8,9 +8,7 @@ import shutil
 
 import autoarray as aa
 
-test_data_path = path.join(
-    "{}".format(os.path.dirname(os.path.realpath(__file__))), "files"
-)
+test_data_path = Path(__file__).resolve().parent / "files"
 
 
 def test__constructor__2x2_all_false_mask__native_matches_input_2d_values():
@@ -143,7 +141,7 @@ def test__zeros__2x2_shape__all_native_elements_are_zero():
 
 def test__from_fits__4x3_ones_fits__native_is_ones_array():
     array_2d = aa.Array2D.from_fits(
-        file_path=path.join(test_data_path, "4x3_ones.fits"), hdu=0, pixel_scales=1.0
+        file_path=test_data_path / "4x3_ones.fits", hdu=0, pixel_scales=1.0
     )
 
     assert type(array_2d) == aa.Array2D
@@ -153,7 +151,7 @@ def test__from_fits__4x3_ones_fits__native_is_ones_array():
 
 def test__from_fits__3x3_fits__header_bitpix_stored_correctly():
     array_2d = aa.Array2D.from_fits(
-        file_path=path.join(test_data_path, "3x3_ones.fits"), hdu=0, pixel_scales=1.0
+        file_path=test_data_path / "3x3_ones.fits", hdu=0, pixel_scales=1.0
     )
 
     assert array_2d.header.header_sci_obj["BITPIX"] == -64
@@ -162,7 +160,7 @@ def test__from_fits__3x3_fits__header_bitpix_stored_correctly():
 
 def test__from_fits__4x3_fits__header_bitpix_stored_correctly():
     array_2d = aa.Array2D.from_fits(
-        file_path=path.join(test_data_path, "4x3_ones.fits"), hdu=0, pixel_scales=1.0
+        file_path=test_data_path / "4x3_ones.fits", hdu=0, pixel_scales=1.0
     )
 
     assert array_2d.header.header_sci_obj["BITPIX"] == -64
@@ -194,30 +192,23 @@ def test__from_yx_and_values__3x2_grid__native_matches_expected_pixel_layout():
 
 
 def test__output_to_fits__3x3_ones__fits_file_has_ones_and_correct_pixel_scale_header():
-    test_data_path = path.join(
-        "{}".format(path.dirname(path.realpath(__file__))), "files"
-    )
+    files_path = Path(__file__).resolve().parent / "files"
 
     array_2d = aa.Array2D.from_fits(
-        file_path=path.join(test_data_path, "3x3_ones.fits"), hdu=0, pixel_scales=1.0
+        file_path=files_path / "3x3_ones.fits", hdu=0, pixel_scales=1.0
     )
 
-    test_data_path = path.join(
-        "{}".format(path.dirname(path.realpath(__file__))),
-        "files",
-        "array",
-        "output_test",
-    )
-    if path.exists(test_data_path):
-        shutil.rmtree(test_data_path)
+    output_test_path = files_path / "array" / "output_test"
+    if output_test_path.exists():
+        shutil.rmtree(output_test_path)
 
-    os.makedirs(test_data_path)
+    os.makedirs(output_test_path)
 
     from autoconf.fitsable import output_to_fits
-    output_to_fits(values=array_2d.native.array.astype("float"), file_path=path.join(test_data_path, "array.fits"), header_dict=array_2d.mask.header_dict)
+    output_to_fits(values=array_2d.native.array.astype("float"), file_path=output_test_path / "array.fits", header_dict=array_2d.mask.header_dict)
 
     array_from_fits = aa.Array2D.from_fits(
-        file_path=path.join(test_data_path, "array.fits"), hdu=0, pixel_scales=1.0
+        file_path=output_test_path / "array.fits", hdu=0, pixel_scales=1.0
     )
 
     assert (array_from_fits.native == np.ones((3, 3))).all()

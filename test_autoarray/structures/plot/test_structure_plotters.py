@@ -1,18 +1,16 @@
 import autoarray as aa
 import autoarray.plot as aplt
-from os import path
 import pytest
 import numpy as np
 import shutil
+from pathlib import Path
 
-directory = path.dirname(path.realpath(__file__))
+directory = Path(__file__).resolve().parent
 
 
 @pytest.fixture(name="plot_path")
 def make_plot_path_setup():
-    return path.join(
-        "{}".format(path.dirname(path.realpath(__file__))), "files", "structures"
-    )
+    return Path(Path(__file__).resolve().parent) / "files" / "structures"
 
 
 def test__plot_yx_line(plot_path, plot_patch):
@@ -25,7 +23,7 @@ def test__plot_yx_line(plot_path, plot_patch):
         plot_axis_type="loglog",
     )
 
-    assert path.join(plot_path, "yx_1.png") in plot_patch.paths
+    assert str(Path(plot_path) / "yx_1.png") in plot_patch.paths
 
 
 def test__array(
@@ -43,7 +41,7 @@ def test__array(
         output_format="png",
     )
 
-    assert path.join(plot_path, "array1.png") in plot_patch.paths
+    assert str(Path(plot_path) / "array1.png") in plot_patch.paths
 
     aplt.plot_array_2d(
         array=array_2d_7x7,
@@ -52,7 +50,7 @@ def test__array(
         output_format="png",
     )
 
-    assert path.join(plot_path, "array2.png") in plot_patch.paths
+    assert str(Path(plot_path) / "array2.png") in plot_patch.paths
 
     aplt.plot_array_2d(
         array=array_2d_7x7,
@@ -66,7 +64,7 @@ def test__array(
         output_format="png",
     )
 
-    assert path.join(plot_path, "array3.png") in plot_patch.paths
+    assert str(Path(plot_path) / "array3.png") in plot_patch.paths
 
 
 def test__grid(
@@ -88,7 +86,7 @@ def test__grid(
         color_array=color_array,
     )
 
-    assert path.join(plot_path, "grid1.png") in plot_patch.paths
+    assert str(Path(plot_path) / "grid1.png") in plot_patch.paths
 
     aplt.plot_grid_2d(
         grid=grid_2d_7x7,
@@ -99,7 +97,7 @@ def test__grid(
         color_array=color_array,
     )
 
-    assert path.join(plot_path, "grid2.png") in plot_patch.paths
+    assert str(Path(plot_path) / "grid2.png") in plot_patch.paths
 
     aplt.plot_grid_2d(
         grid=grid_2d_7x7,
@@ -111,7 +109,7 @@ def test__grid(
         color_array=color_array,
     )
 
-    assert path.join(plot_path, "grid3.png") in plot_patch.paths
+    assert str(Path(plot_path) / "grid3.png") in plot_patch.paths
 
 
 def test__array_rgb(
@@ -126,7 +124,7 @@ def test__array_rgb(
         output_format="png",
     )
 
-    assert path.join(plot_path, "array_rgb.png") in plot_patch.paths
+    assert str(Path(plot_path) / "array_rgb.png") in plot_patch.paths
 
 
 def test__plot_array_rgb(
@@ -147,4 +145,4 @@ def test__plot_array_rgb(
         output_format="png",
     )
 
-    assert path.join(plot_path, "array_rgb_high_level.png") in plot_patch.paths
+    assert str(Path(plot_path) / "array_rgb_high_level.png") in plot_patch.paths

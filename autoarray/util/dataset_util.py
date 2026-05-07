@@ -1,5 +1,6 @@
 import os
 import shutil
+from pathlib import Path
 
 
 def should_simulate(dataset_path):
@@ -18,7 +19,7 @@ def should_simulate(dataset_path):
             subprocess.run([sys.executable, "scripts/.../simulator.py"], check=True)
     """
     if os.environ.get("PYAUTO_SMALL_DATASETS") == "1":
-        if os.path.exists(dataset_path):
+        if Path(dataset_path).exists():
             shutil.rmtree(dataset_path)
 
-    return not os.path.exists(dataset_path)
+    return not Path(dataset_path).exists()

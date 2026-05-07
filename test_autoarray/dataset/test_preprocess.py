@@ -1,15 +1,13 @@
 import os
-from os import path
 
 import numpy as np
 import pytest
 import shutil
 
 import autoarray as aa
+from pathlib import Path
 
-test_data_path = path.join(
-    "{}".format(path.dirname(path.realpath(__file__))), "files", "imaging"
-)
+test_data_path = Path(Path(__file__).resolve().parent) / "files" / "imaging"
 
 
 def test__array_with_new_shape():

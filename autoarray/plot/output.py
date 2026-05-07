@@ -1,6 +1,6 @@
 import logging
-from os import path
 import os
+from pathlib import Path
 from typing import Union, List, Optional
 
 from autoarray.structures.abstract_structure import Structure
@@ -100,7 +100,7 @@ class Output:
             return None
 
         if self.format_folder:
-            output_path = path.join(self.path, format)
+            output_path = str(Path(self.path) / format)
         else:
             output_path = self.path
 
@@ -156,7 +156,7 @@ class Output:
 
         try:
             plt.savefig(
-                path.join(output_path, f"{filename}.{format}"),
+                str(Path(output_path) / f"{filename}.{format}"),
                 bbox_inches=self.bbox_inches,
                 pad_inches=0.1,
             )
@@ -257,9 +257,9 @@ class Output:
 
         import sys
 
-        script_name = path.split(sys.argv[0])[-1].replace(".py", "")
+        script_name = Path(sys.argv[0]).name.replace(".py", "")
 
-        output_path = path.join(os.getcwd(), "output_mode", script_name)
+        output_path = str(Path(os.getcwd()) / "output_mode" / script_name)
         os.makedirs(output_path, exist_ok=True)
 
         self.savefig(f"{COUNT}_{filename}", output_path, "png")

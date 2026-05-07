@@ -2,12 +2,9 @@ import autoarray as aa
 import numpy as np
 import pytest
 
-import os
-from os import path
+from pathlib import Path
 
-test_data_path = os.path.join(
-    "{}".format(os.path.dirname(os.path.realpath(__file__))), "files"
-)
+test_data_path = Path(__file__).resolve().parent / "files"
 
 
 def test__array_1d_slim_from():

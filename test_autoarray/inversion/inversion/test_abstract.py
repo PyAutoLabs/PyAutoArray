@@ -1,10 +1,10 @@
 import numpy as np
-from os import path
 import pytest
 
 import autoarray as aa
+from pathlib import Path
 
-directory = path.dirname(path.realpath(__file__))
+directory = Path(__file__).resolve().parent
 
 
 def test__has__linear_obj_with_regularization__returns_true():
