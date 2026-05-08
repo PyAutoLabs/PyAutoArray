@@ -203,13 +203,17 @@ class Imaging(AbstractDataset):
             passed into the calculations performed in the `inversion` module.
         """
 
+        from autoarray.util.dataset_util import cap_array_2d_for_small_datasets
+
         data = Array2D.from_fits(
             file_path=data_path, hdu=data_hdu, pixel_scales=pixel_scales
         )
+        data, pixel_scales = cap_array_2d_for_small_datasets(data, pixel_scales)
 
         noise_map = Array2D.from_fits(
             file_path=noise_map_path, hdu=noise_map_hdu, pixel_scales=pixel_scales
         )
+        noise_map, pixel_scales = cap_array_2d_for_small_datasets(noise_map, pixel_scales)
 
         if psf_path is not None:
             kernel = Array2D.from_fits(
