@@ -162,6 +162,77 @@ def test__from_fits__all_data_in_one_fits_file_multiple_hdus__loads_data_psf_noi
     assert dataset.noise_map.mask.pixel_scales == (0.1, 0.1)
 
 
+def test__from_fits__small_datasets_env_caps_data_and_noise_map(
+    test_data_path, monkeypatch
+):
+    """When PYAUTO_SMALL_DATASETS=1, Imaging.from_fits center-crops data and
+    noise_map to (15, 15) at pixel_scales=0.6 so they stay shape-consistent
+    with masks built via Mask2D.circular under the same env var. PSF is left
+    alone."""
+    from astropy.io import fits
+
+    fits.writeto(
+        Path(test_data_path) / "data_30x30.fits",
+        data=np.ones((30, 30), dtype=np.float64),
+        overwrite=True,
+    )
+    fits.writeto(
+        Path(test_data_path) / "noise_map_30x30.fits",
+        data=2.0 * np.ones((30, 30), dtype=np.float64),
+        overwrite=True,
+    )
+    fits.writeto(
+        Path(test_data_path) / "psf_5x5.fits",
+        data=(1.0 / 25.0) * np.ones((5, 5), dtype=np.float64),
+        overwrite=True,
+    )
+
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
+
+    dataset = aa.Imaging.from_fits(
+        pixel_scales=0.08,
+        data_path=Path(test_data_path) / "data_30x30.fits",
+        psf_path=Path(test_data_path) / "psf_5x5.fits",
+        noise_map_path=Path(test_data_path) / "noise_map_30x30.fits",
+    )
+
+    assert dataset.data.shape_native == (15, 15)
+    assert dataset.noise_map.shape_native == (15, 15)
+    assert dataset.pixel_scales == (0.6, 0.6)
+    assert dataset.psf.kernel.shape_native == (5, 5)
+
+
+def test__from_fits__small_datasets_env_unset__shape_unchanged(
+    test_data_path, monkeypatch
+):
+    """Sanity: with the env var unset, from_fits returns the on-disk shape
+    unchanged, even for files larger than the cap."""
+    from astropy.io import fits
+
+    fits.writeto(
+        Path(test_data_path) / "data_30x30.fits",
+        data=np.ones((30, 30), dtype=np.float64),
+        overwrite=True,
+    )
+    fits.writeto(
+        Path(test_data_path) / "noise_map_30x30.fits",
+        data=2.0 * np.ones((30, 30), dtype=np.float64),
+        overwrite=True,
+    )
+
+    monkeypatch.delenv("PYAUTO_SMALL_DATASETS", raising=False)
+
+    dataset = aa.Imaging.from_fits(
+        pixel_scales=0.08,
+        data_path=Path(test_data_path) / "data_30x30.fits",
+        noise_map_path=Path(test_data_path) / "noise_map_30x30.fits",
+    )
+
+    assert dataset.data.shape_native == (30, 30)
+    assert dataset.noise_map.shape_native == (30, 30)
+    assert dataset.pixel_scales == (0.08, 0.08)
+
+
 def test__output_to_fits__round_trips_data_psf_noise_map_correctly(
     imaging_7x7, test_data_path
 ):
