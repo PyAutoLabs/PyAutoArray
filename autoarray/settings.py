@@ -24,11 +24,52 @@ class Settings:
         Parameters
         ----------
         use_mixed_precision
-            If `True`, the linear algebra calculations of the inversion are performed using single precision on a
-            targeted subset of functions which provide significant speed up when using a GPU (x4), reduces VRAM
-            use and are expected to have minimal impact on the accuracy of the results. If `False`, all linear algebra
-            calculations are performed using double precision, which is the default and is more accurate but
-            slower on a GPU.
+            If `True`, a targeted subset of the inversion's linear algebra runs in single precision (float32 /
+            complex64) instead of double precision (float64 / complex128). This is intended to reduce VRAM use and
+            speed up the FFT-heavy and bandwidth-bound steps on GPU and CPU; only the JAX (`xp=jnp`) paths honor
+            the flag — the NumPy backend always runs in fp64.
+
+            Paths that honor the flag:
+
+            - PSF FFT convolution in :meth:`Convolver.convolved_image_from` (the light-profile blurring path,
+              used by linear MGE bases and similar): the input image, kernel multiply and inverse FFT all run in
+              complex64 / float32 end to end. This is the headline GPU win for MGE imaging pipelines.
+            - PSF FFT convolution in :meth:`Convolver.convolved_mapping_matrix_from` (the pixelization mapping
+              matrix path): the input cube is fp32 and the forward ``rfft2`` runs in complex64, but the kernel
+              multiply intentionally upcasts back to complex128 so the inverse FFT and downstream linear
+              algebra stay fp64. Pixelization meshes with K ≫ 40 source pixels accumulate enough fp32
+              round-off through NNLS / log-determinant to shift ``figure_of_merit`` by O(1) units; the upcast
+              preserves precision while the cheaper fp32 scatter and forward FFT are kept.
+            - The mapping matrix native cube allocation in
+              :func:`autoarray.inversion.mappers.mapper_util.mapping_matrix_from` — output dtype becomes fp32.
+            - The internal compute dtype of the curvature matrix accumulation in
+              :func:`autoarray.inversion.inversion.inversion_util.curvature_matrix_via_mapping_matrix_from` —
+              the noise-weighted ``A.T @ A`` is formed in fp32 then cast to fp64 for downstream stability.
+
+            Empirical platform notes:
+
+            - **GPU**: full pipeline single-JIT roughly matches the fp64 baseline; vmap-batched evaluation
+              (the production sampler hot path) shows 25–30% speedup on RTX 2060-class hardware.
+            - **CPU**: the per-call FFT itself is ~1.6× faster in fp32, but JAX/XLA's CPU FFT lowering does
+              not always re-compose well across ~40-call MGE-basis pipelines, so the single-JIT measurement
+              can be neutral or slightly slower than fp64. vmap remains comparable to or slightly faster than
+              fp64. The flag is most beneficial for GPU users.
+
+            Paths that intentionally stay in fp64:
+
+            - The NNLS reconstruction (jaxnnls / Cholesky factor + cho_solve) in
+              :func:`autoarray.inversion.inversion.inversion_util.reconstruction_positive_only_from`. Active-set
+              and PDIP solvers are sensitive to fp32 noise on ill-conditioned source meshes.
+            - The log-determinant of the curvature regularization matrix used by ``figure_of_merit``: condition
+              numbers can exceed 1e6 on fine pixelizations and fp32 silently loses 1+ digit there.
+            - Light profile evaluation on the (over-)sampled grid; only the resulting mapping matrix is downcast.
+
+            Empirical numerical impact on the MGE imaging regression (HST-shaped, 15k masked pixels, 40 linear
+            Gaussians): Δlog-likelihood ≈ 1e-4 absolute at log-likelihood ≈ 27,400. Well below the natural χ²
+            sampling noise floor (σ ≈ √(2N) ≈ 175). Pixelization paths with K ≫ 40 source pixels are more
+            sensitive — verify on representative integration tests before turning on for production fits.
+
+            If `False` (default), all paths run in fp64.
         use_positive_only_solver
             Whether to use a positive-only linear system solver, which requires that every reconstructed value is
             positive but is computationally much slower than the default solver (which allows for positive and

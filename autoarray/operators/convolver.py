@@ -133,6 +133,13 @@ class ConvolverState:
 
         self.fft_kernel = np.fft.rfft2(self.kernel.native.array, s=self.fft_shape)
         self.fft_kernel_mapping = np.expand_dims(self.fft_kernel, 2)
+        # Pre-cached complex64 view for the use_mixed_precision=True path of
+        # convolved_image_from. Cast once here so the FFT branch does not
+        # repeat the astype per JIT trace — it would otherwise produce a fresh
+        # numpy buffer each call, which on CPU costs more than the fp32 FFT
+        # saves. convolved_mapping_matrix_from intentionally does NOT use a
+        # complex64 kernel — see that method's body for why.
+        self.fft_kernel_c64 = self.fft_kernel.astype(np.complex64)
 
 
 class Convolver:
@@ -532,17 +539,23 @@ class Convolver:
 
         state = self.state_from(mask=image.mask)
 
+        # When use_mixed_precision is on, the FFT runs in complex64 end-to-end:
+        # the input cube is allocated as float32, rfft2 emits complex64, the
+        # precomputed (complex128) kernel is cast on the fly, and irfft2
+        # returns float32 natively. No trailing astype is needed.
+        real_dtype = jnp.float32 if use_mixed_precision else jnp.float64
+
         # Build combined native image in the FFT dtype
-        image_both_native = xp.zeros(state.fft_shape, dtype=jnp.float64)
+        image_both_native = xp.zeros(state.fft_shape, dtype=real_dtype)
 
         image_both_native = image_both_native.at[state.mask.slim_to_native_tuple].set(
-            jnp.asarray(image.array, dtype=jnp.float64)
+            jnp.asarray(image.array, dtype=real_dtype)
         )
 
         if blurring_image is not None:
             image_both_native = image_both_native.at[
                 state.blurring_mask.slim_to_native_tuple
-            ].set(jnp.asarray(blurring_image.array, dtype=jnp.float64))
+            ].set(jnp.asarray(blurring_image.array, dtype=real_dtype))
         else:
             warnings.warn(
                 "No blurring_image provided. Only the direct image will be convolved. "
@@ -554,9 +567,14 @@ class Convolver:
             image_both_native, s=state.fft_shape, axes=(0, 1)
         )
 
+        # Pick the precomputed kernel matching the FFT dtype. ConvolverState
+        # caches both complex128 (default) and complex64 (mixed precision) at
+        # init time, so this is a constant lookup rather than a per-call cast.
+        fft_kernel = state.fft_kernel_c64 if use_mixed_precision else state.fft_kernel
+
         # Multiply by PSF in Fourier space and invert
         blurred_image_full = xp.fft.irfft2(
-            state.fft_kernel * fft_image_native, s=state.fft_shape, axes=(0, 1)
+            fft_kernel * fft_image_native, s=state.fft_shape, axes=(0, 1)
         )
         ky, kx = self.kernel.shape_native  # (21, 21)
         off_y = (ky - 1) // 2
@@ -572,15 +590,11 @@ class Convolver:
             blurred_image_full, start_indices, state.fft_shape
         )
 
-        # Return slim form; optionally cast for downstream stability
+        # Return slim form; dtype already matches use_mixed_precision via the
+        # FFT path, so no explicit downcast.
         blurred_slim = blurred_image_native[state.mask.slim_to_native_tuple]
 
-        blurred_image = Array2D(values=blurred_slim, mask=image.mask)
-
-        if use_mixed_precision:
-            blurred_image = blurred_image.astype(jnp.float32)
-
-        return blurred_image
+        return Array2D(values=blurred_slim, mask=image.mask)
 
     def convolved_mapping_matrix_from(
         self,
@@ -677,7 +691,19 @@ class Convolver:
         # -------------------------------------------------------------------------
         # Mixed precision handling
         # -------------------------------------------------------------------------
-        fft_complex_dtype = jnp.complex64 if use_mixed_precision else jnp.complex128
+        # mapping_matrix_native_from honors use_mixed_precision and produces a
+        # fp32 native cube. rfft2 of that cube emits complex64. We deliberately
+        # multiply by the complex128 precomputed kernel below, which upcasts
+        # the product back to complex128 so the irfft2 returns float64. This
+        # asymmetry is intentional: pixelization meshes with K >> 40 source
+        # pixels accumulate enough fp32 round-off through the NNLS active-set
+        # / log-determinant that the figure_of_merit drifts by O(1) units
+        # (verified on the delaunay_mge regression). The fp32 input cube and
+        # complex64 forward FFT still buy us a faster scatter and slightly
+        # cheaper rfft2; keeping the kernel multiply in complex128 preserves
+        # the precision the downstream linear algebra needs.
+        # convolved_image_from (used by light profiles) takes the full fp32
+        # path because its 40-column linear systems are well-conditioned.
 
         # -------------------------------------------------------------------------
         # Build native cube on the *native mask grid*
