@@ -56,11 +56,12 @@ jax = ["autoconf[jax]"]
 optional = [
     "autoarray[jax]",
     "numba",
+    "nufftax",
     "pynufft",
     "tensorflow-probability==0.25.0"
 ]
 test = ["pytest"]
-dev = ["pytest", "black", "numba", "pynufft==2022.2.2"]
+dev = ["pytest", "black", "numba", "nufftax", "pynufft==2022.2.2"]
 
 [tool.pytest.ini_options]
 testpaths = ["test_autoarray"]

@@ -33,8 +33,9 @@ DataLike = Union[
 
 from autoarray.operators.transformer import TransformerDFT
 from autoarray.operators.transformer import TransformerNUFFT
+from autoarray.operators.transformer import TransformerNUFFTPyNUFFT
 
-Transformer = Union[TransformerDFT, TransformerNUFFT]
+Transformer = Union[TransformerDFT, TransformerNUFFT, TransformerNUFFTPyNUFFT]
 
 
 from autoarray.layout.region import Region1D

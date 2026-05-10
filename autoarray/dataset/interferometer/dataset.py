@@ -251,6 +251,29 @@ class Interferometer(AbstractDataset):
             enabling efficient pixelized source reconstruction via the sparse linear algebra formalism.
         """
 
+        if isinstance(self.transformer, TransformerNUFFT):
+            raise NotImplementedError(
+                "\n--------------------\n"
+                "`apply_sparse_operator` is not yet supported with the default "
+                "`TransformerNUFFT` (nufftax-backed) transformer.\n\n"
+                "The sparse-operator path consumes the dirty image returned by "
+                "`transformer.image_from(use_adjoint_scaling=True)` together with "
+                "the NUFFT precision operator; their relative scale matters. The "
+                "new `TransformerNUFFT` returns the strict mathematical adjoint "
+                "(matching `TransformerDFT`), whereas the legacy pynufft adjoint "
+                "applies an internal Kaiser-Bessel kernel deconvolution. The two "
+                "scales differ by a non-constant factor, so feeding the new "
+                "dirty image into the existing sparse-operator solver would "
+                "silently give wrong answers.\n\n"
+                "Workarounds:\n"
+                "  - Build the dataset with `transformer_class=TransformerDFT` "
+                "(the JAX-likelihood scripts do this today), or\n"
+                "  - Build the dataset with "
+                "`transformer_class=TransformerNUFFTPyNUFFT` to keep the legacy "
+                "pynufft adjoint scale (requires `pip install pynufft`).\n"
+                "----------------------"
+            )
+
         if nufft_precision_operator is None:
 
             logger.info(
