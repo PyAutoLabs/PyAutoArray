@@ -313,6 +313,50 @@ def test__reconstruction_dict__multiple_linear_objs_and_mappers__splits_reconstr
     assert (inversion.reconstruction_dict[mapper_1] == 2.0 * np.ones(3)).all()
 
 
+def test__regularization_weights_mapper_dict__linear_obj_before_mapper__indexes_correctly():
+    # Distinct coefficients identify which linear_obj_list entry each weight set
+    # came from: 7.0 → the non-mapper linear obj at index 0, 11.0 → the mapper
+    # at index 1. A pre-fix `enumerate(cls_list_from(Mapper))` would pass the
+    # mapper-only index 0 into `regularization_weights_from`, which reads
+    # `linear_obj_list[0]` and returns the 2-element 7.0 weights.
+    linear_obj = aa.m.MockLinearObj(
+        parameters=2, regularization=aa.reg.Constant(coefficient=7.0)
+    )
+    mapper = aa.m.MockMapper(
+        parameters=3, regularization=aa.reg.Constant(coefficient=11.0)
+    )
+
+    inversion = aa.m.MockInversion(linear_obj_list=[linear_obj, mapper])
+
+    weights = inversion.regularization_weights_mapper_dict[mapper]
+
+    assert weights.shape == (3,)
+    assert (weights == 11.0 * np.ones(3)).all()
+
+
+def test__regularization_weights_mapper_dict__multiple_mappers_with_linear_obj_between__indexes_correctly():
+    # Layout: [mapper_a (params=2), linear_obj (params=1), mapper_b (params=4)]
+    # Each gets a distinct Constant coefficient to verify per-mapper indexing.
+    mapper_a = aa.m.MockMapper(
+        parameters=2, regularization=aa.reg.Constant(coefficient=3.0)
+    )
+    linear_obj = aa.m.MockLinearObj(
+        parameters=1, regularization=aa.reg.Constant(coefficient=5.0)
+    )
+    mapper_b = aa.m.MockMapper(
+        parameters=4, regularization=aa.reg.Constant(coefficient=13.0)
+    )
+
+    inversion = aa.m.MockInversion(
+        linear_obj_list=[mapper_a, linear_obj, mapper_b],
+    )
+
+    rw_dict = inversion.regularization_weights_mapper_dict
+
+    assert (rw_dict[mapper_a] == 3.0 * np.ones(2)).all()
+    assert (rw_dict[mapper_b] == 13.0 * np.ones(4)).all()
+
+
 def test__mapped_reconstructed_data_dict__single_linear_obj__returns_correct_data_and_sum():
     linear_obj_0 = aa.m.MockLinearObj()
 
