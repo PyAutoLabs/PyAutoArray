@@ -802,7 +802,8 @@ class AbstractInversion:
     def regularization_weights_mapper_dict(self) -> Dict[LinearObj, np.ndarray]:
         regularization_weights_dict = {}
 
-        for index, mapper in enumerate(self.cls_list_from(cls=Mapper)):
+        for mapper in self.cls_list_from(cls=Mapper):
+            index = self.linear_obj_list.index(mapper)
             regularization_weights_dict[mapper] = self.regularization_weights_from(
                 index=index,
             )
