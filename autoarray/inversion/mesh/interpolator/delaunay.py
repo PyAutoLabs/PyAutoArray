@@ -64,6 +64,43 @@ def scipy_delaunay(points_np, query_points_np, areas_factor):
 
 
 def jax_delaunay(points, query_points, areas_factor=0.5):
+    """Run the Delaunay-triangulation + point-location pipeline returning
+    the five arrays consumed downstream.
+
+    Two implementations are available, gated by the autoconf flag
+    ``inversion.delaunay_jax_find_simplex``:
+
+    - ``False`` (default) — monolithic ``scipy_delaunay`` in a single
+      ``jax.pure_callback``. The historical path.
+    - ``True`` — only the triangulation runs in scipy (small, fast);
+      ``find_simplex`` point location, vertex gather, dual areas and
+      split-points are computed JAX-natively. Faster at production
+      batch sizes under vmap because the sequential callback's
+      per-element work shrinks dramatically.
+
+    The two paths return identical-shape outputs and (within numerical
+    tolerance) identical values, so callers don't need to care which
+    one ran.
+    """
+    from autoconf import conf
+
+    try:
+        split = conf.instance["general"]["inversion"][
+            "delaunay_jax_find_simplex"
+        ]
+    except KeyError:
+        # Workspace configs that pre-date the split path silently fall
+        # back to the monolithic scipy callback.
+        split = False
+
+    if split:
+        return _jax_delaunay_split(points, query_points, areas_factor)
+    return _jax_delaunay_monolithic(points, query_points, areas_factor)
+
+
+def _jax_delaunay_monolithic(points, query_points, areas_factor):
+    """Original path: scipy_delaunay does everything inside one
+    ``pure_callback``."""
     import jax
     import jax.numpy as jnp
 
@@ -92,6 +129,106 @@ def jax_delaunay(points, query_points, areas_factor=0.5):
         query_points,
         vmap_method="sequential",
     )
+
+
+def _jax_delaunay_split(points, query_points, areas_factor):
+    """Split path: scipy returns ONLY the triangulation; find_simplex,
+    dual areas, split-points and the second find_simplex all run as
+    JAX-native code under vmap.
+
+    Memory: see ``delaunay_jax_locate.jax_find_simplex_and_gather`` for
+    the chunking strategy that keeps peak VRAM bounded under vmap.
+
+    Parallelism: if the autoconf flag
+    ``inversion.delaunay_scipy_pool_workers > 0``, the scipy
+    triangulation is dispatched to a persistent multiprocessing pool
+    via ``vmap_method='parallel'`` so batch elements run concurrently
+    on separate CPU cores. Otherwise the callback runs serially per
+    batch element via ``vmap_method='sequential'``.
+    """
+    import jax
+    import jax.numpy as jnp
+    from autoconf import conf
+    from autoarray.inversion.mesh.interpolator.delaunay_jax_locate import (
+        jax_find_simplex_and_gather,
+    )
+    from autoarray.inversion.regularization.regularization_util import (
+        split_points_from,
+    )
+
+    N = points.shape[0]
+    max_simplices = 2 * N
+
+    points_shape = jax.ShapeDtypeStruct((N, 2), points.dtype)
+    simplices_padded_shape = jax.ShapeDtypeStruct((max_simplices, 3), jnp.int32)
+
+    try:
+        pool_workers = int(
+            conf.instance["general"]["inversion"]["delaunay_scipy_pool_workers"]
+        )
+    except KeyError:
+        pool_workers = 0
+
+    if pool_workers > 0:
+        # Parallel: hand batched (B, N, 2) input to a process pool.
+        from autoarray.inversion.mesh.interpolator.delaunay_scipy_pool import (
+            scipy_triangulate_batched,
+        )
+
+        def _triangulate_callback(pts):
+            return scipy_triangulate_batched(
+                pts, max_simplices=max_simplices, n_workers=pool_workers,
+            )
+
+        points_out, simplices_padded = jax.pure_callback(
+            _triangulate_callback,
+            (points_shape, simplices_padded_shape),
+            points,
+            vmap_method="legacy_vectorized",
+        )
+    else:
+        # Sequential: one scipy call per batch element.
+        def _scipy_triangulate_only(pts):
+            from scipy.spatial import Delaunay
+
+            pts_np = np.asarray(pts)
+            tri = Delaunay(pts_np)
+            out = -np.ones((max_simplices, 3), dtype=np.int32)
+            out[: tri.simplices.shape[0]] = tri.simplices.astype(np.int32)
+            return tri.points.astype(pts_np.dtype), out
+
+        points_out, simplices_padded = jax.pure_callback(
+            _scipy_triangulate_only,
+            (points_shape, simplices_padded_shape),
+            points,
+            vmap_method="sequential",
+        )
+
+    # Point location for the over-sampled image-plane data grid.
+    mappings = jax_find_simplex_and_gather(
+        simplices_padded=simplices_padded,
+        mesh_points=points_out,
+        queries=query_points,
+    )
+
+    # Per-vertex dual areas (JAX), then split-cross-point construction.
+    areas = barycentric_dual_area_from(points_out, simplices_padded, xp=jnp)
+    split_point_areas = areas_factor * jnp.sqrt(areas)
+    split_points_4d = split_points_from(
+        points=points_out,
+        area_weights=split_point_areas,
+        xp=jnp,
+    )
+    # split_points_from returns (N, 4, 2); downstream code expects (4N, 2).
+    split_points = split_points_4d.reshape(-1, 2)
+
+    splitted_mappings = jax_find_simplex_and_gather(
+        simplices_padded=simplices_padded,
+        mesh_points=points_out,
+        queries=split_points,
+    )
+
+    return points_out, simplices_padded, mappings, split_points, splitted_mappings
 
 
 def barycentric_dual_area_from(
@@ -143,12 +280,30 @@ def barycentric_dual_area_from(
     # scatter-add into dual area array
     # -------------------------------
     N_pix = mesh_grid.shape[0]
-    dual_area = xp.zeros(N_pix)
 
-    # xp.add.at works for np and jnp
+    if xp.__name__.startswith("jax"):
+        # jnp.add.at requires inplace=False and returns a new array; for
+        # vmap-friendly fusion we flatten the (N_tri, 3) (simplex, vertex)
+        # contributions into a single segment_sum call. Padded simplices
+        # (index -1) are masked out so they don't accumulate into segment 0.
+        import jax
+
+        flat_indices = simplices.reshape(-1)  # (3 * N_tri,)
+        flat_contrib = xp.broadcast_to(
+            contrib[:, None], (simplices.shape[0], 3)
+        ).reshape(-1)
+        flat_valid = flat_indices >= 0
+        flat_indices_safe = xp.where(flat_valid, flat_indices, 0)
+        flat_contrib_masked = xp.where(flat_valid, flat_contrib, 0.0)
+        return jax.ops.segment_sum(
+            flat_contrib_masked,
+            flat_indices_safe,
+            num_segments=N_pix,
+        )
+
+    dual_area = xp.zeros(N_pix)
     for k in range(3):
         xp.add.at(dual_area, simplices[:, k], contrib)
-
     return dual_area
 
 
