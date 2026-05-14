@@ -78,6 +78,7 @@ from .inversion.mesh.mesh_geometry.delaunay import MeshGeometryDelaunay
 from .inversion.mesh.interpolator.rectangular import InterpolatorRectangular
 from .inversion.mesh.interpolator.delaunay import InterpolatorDelaunay
 from .operators.convolver import Convolver
+from .operators.interp_2d import interp_2d
 from .structures.vectors.uniform import VectorYX2D
 from .structures.vectors.irregular import VectorYX2DIrregular
 from .structures.triangles.abstract import AbstractTriangles
