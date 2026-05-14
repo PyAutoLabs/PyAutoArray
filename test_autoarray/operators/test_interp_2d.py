@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from autoarray.numerics import interp_2d
+from autoarray.operators.interp_2d import interp_2d
 
 
 def test__interp_2d__numpy_random_inbounds():
