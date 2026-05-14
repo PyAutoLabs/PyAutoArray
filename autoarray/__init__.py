@@ -7,6 +7,7 @@ conf.instance.register(__file__)
 from . import exc
 from . import type
 from . import util
+from . import numerics
 from . import fixtures
 from . import mock as m
 
