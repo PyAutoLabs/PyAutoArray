@@ -268,3 +268,30 @@ class Grid2DIrregular(AbstractNDArray):
         closest_points = self.array[closest_idx]
 
         return Grid2DIrregular(closest_points)
+    
+
+    def subtracted_and_rotated_from(
+        self, offset: Tuple[float, float], angle: float, xp=np
+    ) -> "Grid2DIrregular":
+        
+        offset_array = xp.array(offset)
+
+        grid_subtracted = (self - offset_array).array
+        #rint(dir(grid_subtracted))
+        #grid_subtracted = xp.array(grid_subtracted)
+        
+        # 2. Rotate
+        angle_rad = xp.deg2rad(angle)
+        cos_angle = xp.cos(angle_rad)
+        sin_angle = xp.sin(angle_rad)
+
+        # Note: We manually extract columns and compute to avoid creating large rotation matrices
+        grid_y = grid_subtracted[:, 0]
+        grid_x = grid_subtracted[:, 1]
+
+        grid_rotated_x = grid_x * cos_angle - grid_y * sin_angle
+        grid_rotated_y = grid_x * sin_angle + grid_y * cos_angle
+        
+        grid_rotated = xp.stack((grid_rotated_y, grid_rotated_x), axis=-1)
+
+        return Grid2DIrregular(grid_rotated)
