@@ -22,13 +22,13 @@ class Pixelization:
         For the simplest case, we have a 2D image whose pixel centres are defined on a (y,x) grid of Cartesian
         coordinates, which are paired with the ``Mesh`` of the ``Pixelization``:
 
-        .. image:: https://github.com/Jammy2211/PyAutoGalaxy/blob/main/docs/api/images/pixelization_image_plane/data_image_plane.png?raw=true
+        .. image:: https://github.com/PyAutoLabs/PyAutoGalaxy/blob/main/docs/api/images/pixelization_image_plane/data_image_plane.png?raw=true
           :width: 240
 
-        .. image:: https://github.com/Jammy2211/PyAutoGalaxy/blob/main/docs/api/images/pixelization_image_plane/grid_image_plane.png?raw=true
+        .. image:: https://github.com/PyAutoLabs/PyAutoGalaxy/blob/main/docs/api/images/pixelization_image_plane/grid_image_plane.png?raw=true
           :width: 240
 
-        .. image:: https://github.com/Jammy2211/PyAutoGalaxy/blob/main/docs/api/images/pixelization_image_plane/image_plane_mesh.png?raw=true
+        .. image:: https://github.com/PyAutoLabs/PyAutoGalaxy/blob/main/docs/api/images/pixelization_image_plane/image_plane_mesh.png?raw=true
           :width: 240
 
         The visual above shows:
@@ -53,13 +53,13 @@ class Pixelization:
 
         The images below use the same image, which has had a 2.5" circular mask applied to it:
 
-        .. image:: https://github.com/Jammy2211/PyAutoGalaxy/blob/main/docs/api/images/pixelization_masked_image_plane/data_image_plane.png?raw=true
+        .. image:: https://github.com/PyAutoLabs/PyAutoGalaxy/blob/main/docs/api/images/pixelization_masked_image_plane/data_image_plane.png?raw=true
           :width: 240
 
-        .. image:: https://github.com/Jammy2211/PyAutoGalaxy/blob/main/docs/api/images/pixelization_masked_image_plane/grid_image_plane.png?raw=true
+        .. image:: https://github.com/PyAutoLabs/PyAutoGalaxy/blob/main/docs/api/images/pixelization_masked_image_plane/grid_image_plane.png?raw=true
           :width: 240
 
-        .. image:: https://github.com/Jammy2211/PyAutoGalaxy/blob/main/docs/api/images/pixelization_masked_image_plane/image_plane_mesh.png?raw=true
+        .. image:: https://github.com/PyAutoLabs/PyAutoGalaxy/blob/main/docs/api/images/pixelization_masked_image_plane/image_plane_mesh.png?raw=true
           :width: 240
 
         The behaviour is analogous to the non-masked case, however only unmasked pixel's in the image's (y,x) grid
@@ -73,13 +73,13 @@ class Pixelization:
         In the strong lensing package **PyAutoLens**, gravitational lensing deflects the observed image's (y,x)
         grid of coordinates and the ``mesh`` is overlaid in the source-plane:
 
-        .. image:: https://github.com/Jammy2211/PyAutoGalaxy/blob/main/docs/api/images/pixelization_masked_source_plane/data_image_plane.png?raw=true
+        .. image:: https://github.com/PyAutoLabs/PyAutoGalaxy/blob/main/docs/api/images/pixelization_masked_source_plane/data_image_plane.png?raw=true
           :width: 240
 
-        .. image:: https://github.com/Jammy2211/PyAutoGalaxy/blob/main/docs/api/images/pixelization_masked_source_plane/grid_image_plane.png?raw=true
+        .. image:: https://github.com/PyAutoLabs/PyAutoGalaxy/blob/main/docs/api/images/pixelization_masked_source_plane/grid_image_plane.png?raw=true
           :width: 240
 
-        .. image:: https://github.com/Jammy2211/PyAutoGalaxy/blob/main/docs/api/images/pixelization_masked_source_plane/source_plane_mesh.png?raw=true
+        .. image:: https://github.com/PyAutoLabs/PyAutoGalaxy/blob/main/docs/api/images/pixelization_masked_source_plane/source_plane_mesh.png?raw=true
           :width: 240
 
         The red points, highlighted throughout all visuals above, show that after gravitational lensing the points
