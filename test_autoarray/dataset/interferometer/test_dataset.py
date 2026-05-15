@@ -64,6 +64,52 @@ def test__dirty_signal_to_noise_map__shape_native_matches_real_space_mask(
     ).all()
 
 
+def test__from_fits__raise_error_dft_visibilities_limit__threads_kwarg(
+    tmp_path, mask_2d_7x7
+):
+    """``from_fits`` must forward ``raise_error_dft_visibilities_limit`` to the
+    ``Interferometer`` constructor so callers loading large DFT-based datasets can opt out
+    of the >10,000-visibility safety check (e.g. for profiling the JAX-traceable DFT path)."""
+    from astropy.io import fits
+
+    n_visibilities = 10_001
+    visibilities = np.ones((n_visibilities, 2), dtype=np.float64)
+    noise_map = np.ones((n_visibilities, 2), dtype=np.float64)
+    uv_wavelengths = np.zeros((n_visibilities, 2), dtype=np.float64)
+
+    data_path = tmp_path / "data.fits"
+    noise_map_path = tmp_path / "noise_map.fits"
+    uv_path = tmp_path / "uv_wavelengths.fits"
+
+    for arr, path in (
+        (visibilities, data_path),
+        (noise_map, noise_map_path),
+        (uv_wavelengths, uv_path),
+    ):
+        fits.PrimaryHDU(data=arr).writeto(path, overwrite=True)
+
+    with pytest.raises(aa.exc.DatasetException):
+        aa.Interferometer.from_fits(
+            data_path=data_path,
+            noise_map_path=noise_map_path,
+            uv_wavelengths_path=uv_path,
+            real_space_mask=mask_2d_7x7,
+            transformer_class=transformer.TransformerDFT,
+        )
+
+    dataset = aa.Interferometer.from_fits(
+        data_path=data_path,
+        noise_map_path=noise_map_path,
+        uv_wavelengths_path=uv_path,
+        real_space_mask=mask_2d_7x7,
+        transformer_class=transformer.TransformerDFT,
+        raise_error_dft_visibilities_limit=False,
+    )
+
+    assert dataset.uv_wavelengths.shape[0] == n_visibilities
+    assert type(dataset.transformer) == transformer.TransformerDFT
+
+
 def test__from_fits__all_files_in_one_fits__load_using_different_hdus(mask_2d_7x7):
     dataset = aa.Interferometer.from_fits(
         real_space_mask=mask_2d_7x7,
