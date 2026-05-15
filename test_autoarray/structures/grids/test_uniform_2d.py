@@ -830,3 +830,40 @@ def test__apply_over_sampling():
     grid = grid.apply_over_sampling(over_sample_size=2)
 
     assert grid.over_sampled.shape[0] == 16
+
+
+def test__subtracted_and_rotated_from__zero_angle_is_pure_shift():
+    grid = aa.Grid2D.uniform(shape_native=(3, 3), pixel_scales=1.0, over_sample_size=1)
+
+    shifted = grid.subtracted_and_rotated_from(offset=(0.5, -0.5), angle=0.0)
+
+    expected = grid.array - np.array([0.5, -0.5])
+    assert shifted.array == pytest.approx(expected, 1.0e-4)
+
+
+def test__subtracted_and_rotated_from__90_degrees_about_origin():
+    grid = aa.Grid2D.uniform(shape_native=(3, 3), pixel_scales=1.0, over_sample_size=1)
+
+    rotated = grid.subtracted_and_rotated_from(offset=(0.0, 0.0), angle=90.0)
+
+    # 90 deg CCW in (y, x) order maps (y, x) -> (x, -y).
+    expected = np.stack((grid.array[:, 1], -grid.array[:, 0]), axis=-1)
+    assert rotated.array == pytest.approx(expected, 1.0e-4)
+
+
+def test__subtracted_and_rotated_from__180_degrees_inverts_coordinates():
+    grid = aa.Grid2D.uniform(shape_native=(3, 3), pixel_scales=1.0, over_sample_size=1)
+
+    rotated = grid.subtracted_and_rotated_from(offset=(0.0, 0.0), angle=180.0)
+
+    assert rotated.array == pytest.approx(-grid.array, 1.0e-4)
+
+
+def test__subtracted_and_rotated_from__shift_first_then_rotate():
+    grid = aa.Grid2D.uniform(shape_native=(3, 3), pixel_scales=1.0, over_sample_size=1)
+
+    shifted = grid.array - np.array([1.0, 2.0])
+    expected = np.stack((shifted[:, 1], -shifted[:, 0]), axis=-1)
+
+    rotated = grid.subtracted_and_rotated_from(offset=(1.0, 2.0), angle=90.0)
+    assert rotated.array == pytest.approx(expected, 1.0e-4)

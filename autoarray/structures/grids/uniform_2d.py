@@ -736,6 +736,56 @@ class Grid2D(Structure):
             over_sampler=self.over_sampler,
         )
 
+    def subtracted_and_rotated_from(
+        self, offset: Tuple[float, float], angle: float, xp=np
+    ) -> "Grid2D":
+        """
+        Return a new Grid2D where the (y, x) coordinates of this grid have an offset subtracted
+        and are then rotated counter-clockwise by ``angle`` (in degrees) about the offset point.
+
+        Order: shift first, then rotate. With ``offset = (oy, ox)`` and ``angle = theta`` (degrees):
+
+          (y', x') = (y - oy, x - ox)
+          y'' = y' cos(theta) + x' sin(theta)
+          x'' = x' cos(theta) - y' sin(theta)
+
+        Parameters
+        ----------
+        offset
+            The (y, x) offset subtracted from every grid coordinate before rotation.
+        angle
+            The rotation angle in degrees. Positive values rotate counter-clockwise.
+        """
+        offset_array = xp.array(offset)
+        angle_rad = xp.deg2rad(angle)
+        cos_a = xp.cos(angle_rad)
+        sin_a = xp.sin(angle_rad)
+
+        def _shift_and_rotate(grid_array):
+            shifted = grid_array - offset_array
+            sy = shifted[:, 0]
+            sx = shifted[:, 1]
+            ry = sx * sin_a + sy * cos_a
+            rx = sx * cos_a - sy * sin_a
+            return xp.stack((ry, rx), axis=-1)
+
+        grid_rotated = _shift_and_rotate(self.array)
+        over_sampled_rotated = _shift_and_rotate(self.over_sampled.array)
+
+        mask = Mask2D(
+            mask=self.mask,
+            pixel_scales=self.pixel_scales,
+            origin=(self.origin[0] - offset[0], self.origin[1] - offset[1]),
+        )
+
+        return Grid2D(
+            values=grid_rotated,
+            mask=mask,
+            over_sample_size=self.over_sample_size,
+            over_sampled=Grid2DIrregular(over_sampled_rotated),
+            over_sampler=self.over_sampler,
+        )
+
     @property
     def slim(self) -> "Grid2D":
         """

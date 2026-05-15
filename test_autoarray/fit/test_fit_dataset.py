@@ -112,3 +112,64 @@ def test__grids__with_dataset_model_grid_offset__lp_and_pixelization_grids_offse
     assert fit.dataset_model.grid_offset == (1.0, 2.0)
     assert fit.grids.lp[0] == pytest.approx((0.0, -3.0), 1.0e-4)
     assert fit.grids.pixelization[0] == pytest.approx((0.0, -3.0), 1.0e-4)
+
+
+def test__grids__with_dataset_model_grid_rotation_angle__lp_grid_rotated_correctly(
+    imaging_7x7, mask_2d_7x7, model_image_7x7
+):
+    masked_imaging_7x7 = imaging_7x7.apply_mask(mask=mask_2d_7x7)
+
+    # Rotation by 90 degrees CCW about the origin maps (y, x) -> (x, -y).
+    fit = aa.m.MockFitImaging(
+        dataset=masked_imaging_7x7,
+        use_mask_in_fit=False,
+        model_data=model_image_7x7,
+        dataset_model=aa.DatasetModel(grid_rotation_angle=90.0),
+    )
+
+    assert fit.dataset_model.grid_rotation_angle == 90.0
+    # 90 deg CCW rotation in (y, x) order maps (y, x) -> (x, -y).
+    original = masked_imaging_7x7.grids.lp[0]
+    rotated = fit.grids.lp[0]
+    assert rotated[0] == pytest.approx(original[1], 1.0e-4)
+    assert rotated[1] == pytest.approx(-original[0], 1.0e-4)
+
+
+def test__grids__with_grid_offset_and_grid_rotation_angle__shift_then_rotate(
+    imaging_7x7, mask_2d_7x7, model_image_7x7
+):
+    masked_imaging_7x7 = imaging_7x7.apply_mask(mask=mask_2d_7x7)
+
+    fit = aa.m.MockFitImaging(
+        dataset=masked_imaging_7x7,
+        use_mask_in_fit=False,
+        model_data=model_image_7x7,
+        dataset_model=aa.DatasetModel(
+            grid_offset=(1.0, 2.0), grid_rotation_angle=90.0
+        ),
+    )
+
+    # First subtract the offset, then rotate 90deg CCW: (y, x) -> (x, -y).
+    original = masked_imaging_7x7.grids.lp[0]
+    shifted_y = original[0] - 1.0
+    shifted_x = original[1] - 2.0
+    expected = (shifted_x, -shifted_y)
+
+    assert fit.grids.lp[0] == pytest.approx(expected, 1.0e-4)
+
+
+def test__grids__with_grid_rotation_angle_zero__matches_subtracted_from(
+    imaging_7x7, mask_2d_7x7, model_image_7x7
+):
+    masked_imaging_7x7 = imaging_7x7.apply_mask(mask=mask_2d_7x7)
+
+    fit_rotated = aa.m.MockFitImaging(
+        dataset=masked_imaging_7x7,
+        use_mask_in_fit=False,
+        model_data=model_image_7x7,
+        dataset_model=aa.DatasetModel(grid_offset=(1.0, 2.0), grid_rotation_angle=0.0),
+    )
+
+    # angle=0 is identity rotation, so the result must equal the offset-only path.
+    assert fit_rotated.grids.lp[0] == pytest.approx((0.0, -3.0), 1.0e-4)
+    assert fit_rotated.grids.pixelization[0] == pytest.approx((0.0, -3.0), 1.0e-4)

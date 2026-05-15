@@ -1,6 +1,7 @@
 import os
 import shutil
 import numpy as np
+import pytest
 
 import autoarray as aa
 
@@ -125,3 +126,37 @@ def test__grid_of_closest_from():
     assert (
         grid_of_closest == np.array([[0.0, 0.0], [0.0, 0.0], [0.0, 1.0], [0.0, 0.0]])
     ).all()
+
+
+def test__subtracted_from():
+    grid = aa.Grid2DIrregular(np.array([[1.0, 2.0], [3.0, 4.0]]))
+
+    shifted = grid.subtracted_from(offset=(0.5, -0.5))
+
+    assert shifted.array == pytest.approx(np.array([[0.5, 2.5], [2.5, 4.5]]), 1.0e-4)
+
+
+def test__subtracted_and_rotated_from__zero_angle_is_pure_shift():
+    grid = aa.Grid2DIrregular(np.array([[1.0, 2.0], [3.0, 4.0]]))
+
+    shifted = grid.subtracted_and_rotated_from(offset=(0.5, -0.5), angle=0.0)
+
+    assert shifted.array == pytest.approx(np.array([[0.5, 2.5], [2.5, 4.5]]), 1.0e-4)
+
+
+def test__subtracted_and_rotated_from__90_degrees_about_origin():
+    grid = aa.Grid2DIrregular(np.array([[1.0, 0.0], [0.0, 1.0]]))
+
+    rotated = grid.subtracted_and_rotated_from(offset=(0.0, 0.0), angle=90.0)
+
+    # 90 deg CCW in (y, x) order maps (y, x) -> (x, -y).
+    assert rotated.array == pytest.approx(np.array([[0.0, -1.0], [1.0, 0.0]]), 1.0e-4)
+
+
+def test__subtracted_and_rotated_from__shift_first_then_rotate():
+    grid = aa.Grid2DIrregular(np.array([[2.0, 3.0]]))
+
+    rotated = grid.subtracted_and_rotated_from(offset=(1.0, 1.0), angle=90.0)
+
+    # Shifted -> (1.0, 2.0); 90 deg CCW -> (2.0, -1.0).
+    assert rotated.array == pytest.approx(np.array([[2.0, -1.0]]), 1.0e-4)

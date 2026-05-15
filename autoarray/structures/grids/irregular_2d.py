@@ -279,3 +279,39 @@ class Grid2DIrregular(AbstractNDArray):
         closest_points = self.array[closest_idx]
 
         return Grid2DIrregular(closest_points)
+
+    def subtracted_from(self, offset, xp=np) -> "Grid2DIrregular":
+        """
+        Return a new Grid2DIrregular with ``offset`` subtracted from every (y, x) coordinate.
+        """
+        offset_array = xp.array(offset)
+        return Grid2DIrregular(self.array - offset_array)
+
+    def subtracted_and_rotated_from(
+        self, offset, angle: float, xp=np
+    ) -> "Grid2DIrregular":
+        """
+        Return a new Grid2DIrregular where the (y, x) coordinates of this grid have an offset
+        subtracted and are then rotated counter-clockwise by ``angle`` (in degrees) about the
+        offset point.
+
+        Order matches :meth:`Grid2D.subtracted_and_rotated_from`: shift, then rotate.
+
+        Parameters
+        ----------
+        offset
+            The (y, x) offset subtracted from every grid coordinate before rotation.
+        angle
+            The rotation angle in degrees. Positive values rotate counter-clockwise.
+        """
+        offset_array = xp.array(offset)
+        angle_rad = xp.deg2rad(angle)
+        cos_a = xp.cos(angle_rad)
+        sin_a = xp.sin(angle_rad)
+
+        shifted = self.array - offset_array
+        sy = shifted[:, 0]
+        sx = shifted[:, 1]
+        ry = sx * sin_a + sy * cos_a
+        rx = sx * cos_a - sy * sin_a
+        return Grid2DIrregular(xp.stack((ry, rx), axis=-1))
