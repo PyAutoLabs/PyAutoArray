@@ -1,0 +1,3 @@
+# Known broken URLs grandfathered for url_check_live.sh.
+# Add a URL on its own line to ignore it. Comments start with '#'.
+# Currently no broken URLs in this repo's docs.
