@@ -705,3 +705,63 @@ def test__circular_radius__circular_mask__returns_radius_used_to_create_mask(
     )
 
     assert mask.circular_radius == pytest.approx(radius, 1e-4)
+
+
+@pytest.mark.parametrize(
+    "centre",
+    [
+        (0.25, 0.0),
+        (0.0, 0.25),
+        (0.27, 0.13),
+        (-0.34, 0.41),
+        (0.5, 0.5),
+    ],
+)
+def test__is_circular__offset_centre_circular_mask__returns_true(centre):
+    mask = aa.Mask2D.circular(
+        shape_native=(20, 20),
+        radius=0.4,
+        pixel_scales=(0.1, 0.1),
+        centre=centre,
+    )
+
+    assert mask.is_circular == True
+
+
+def test__is_circular__annular_mask__returns_false():
+    mask = aa.Mask2D.circular_annular(
+        shape_native=(20, 20),
+        inner_radius=0.1,
+        outer_radius=0.4,
+        pixel_scales=(0.1, 0.1),
+    )
+
+    assert mask.is_circular == False
+
+
+def test__is_circular__square_unmasked_region__returns_false():
+    mask_array = np.full((10, 10), True)
+    mask_array[3:8, 3:8] = False
+
+    mask = aa.Mask2D(mask=mask_array, pixel_scales=(1.0, 1.0))
+
+    assert mask.is_circular == False
+
+
+@pytest.mark.parametrize(
+    "centre",
+    [
+        (0.25, 0.0),
+        (0.0, 0.25),
+        (-0.34, 0.41),
+    ],
+)
+def test__circular_radius__offset_centre_circular_mask__returns_radius(centre):
+    mask = aa.Mask2D.circular(
+        shape_native=(40, 40),
+        radius=0.8,
+        pixel_scales=(0.1, 0.1),
+        centre=centre,
+    )
+
+    assert mask.circular_radius == pytest.approx(0.8, abs=0.1)
