@@ -139,6 +139,7 @@ class Interferometer(AbstractDataset):
         noise_map_hdu=0,
         uv_wavelengths_hdu=0,
         transformer_class=TransformerNUFFT,
+        raise_error_dft_visibilities_limit: bool = True,
     ):
         """
         Load an interferometer dataset from multiple .fits files.
@@ -176,6 +177,11 @@ class Interferometer(AbstractDataset):
         transformer_class
             The class of the Fourier Transform which maps images from real space to Fourier space
             visibilities. Defaults to `TransformerNUFFT` for efficiency with large datasets.
+        raise_error_dft_visibilities_limit
+            If True (default), raise a `DatasetException` when ``transformer_class`` is
+            `TransformerDFT` and the dataset has more than 10,000 visibilities. Set to False to
+            opt into the slow DFT path at ALMA-scale (e.g. when profiling the JAX-traceable
+            DFT path before a JIT-friendly NUFFT is available).
 
         Returns
         -------
@@ -199,6 +205,7 @@ class Interferometer(AbstractDataset):
             noise_map=noise_map,
             uv_wavelengths=uv_wavelengths,
             transformer_class=transformer_class,
+            raise_error_dft_visibilities_limit=raise_error_dft_visibilities_limit,
         )
 
     def apply_sparse_operator(
