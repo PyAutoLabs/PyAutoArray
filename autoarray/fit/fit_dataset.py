@@ -185,26 +185,23 @@ class FitDataset(AbstractFit):
     @property
     def grids(self) -> GridsInterface:
         """
-        The grids of (y,x) coordinates associated with the dataset, adjusted by any `grid_offset` specified in
-        the `dataset_model`. Each grid (`lp`, `pixelization`, `blurring`) has the offset subtracted from it
-        before being returned.
+        The grids of (y,x) coordinates associated with the dataset, adjusted by any `grid_offset` and
+        `grid_rotation_angle` specified in the `dataset_model`. Each grid (`lp`, `pixelization`, `blurring`)
+        has the offset subtracted from it and is then rotated counter-clockwise by `grid_rotation_angle`
+        about the offset point before being returned.
         """
 
-        def subtracted_from(grid, offset):
+        offset = self.dataset_model.grid_offset
+        angle = self.dataset_model.grid_rotation_angle
+
+        def shift_and_rotate(grid):
             if grid is None:
                 return None
+            return grid.subtracted_and_rotated_from(offset=offset, angle=angle, xp=self._xp)
 
-            return grid.subtracted_from(offset=offset, xp=self._xp)
-
-        lp = subtracted_from(
-            grid=self.dataset.grids.lp, offset=self.dataset_model.grid_offset
-        )
-        pixelization = subtracted_from(
-            grid=self.dataset.grids.pixelization, offset=self.dataset_model.grid_offset
-        )
-        blurring = subtracted_from(
-            grid=self.dataset.grids.blurring, offset=self.dataset_model.grid_offset
-        )
+        lp = shift_and_rotate(self.dataset.grids.lp)
+        pixelization = shift_and_rotate(self.dataset.grids.pixelization)
+        blurring = shift_and_rotate(self.dataset.grids.blurring)
 
         return GridsInterface(
             lp=lp,
