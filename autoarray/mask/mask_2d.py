@@ -938,10 +938,23 @@ class Mask2D(Mask):
     @property
     def is_circular(self) -> bool:
         """
-        Returns whether the mask is circular or not.
+        Returns whether the unmasked region of the mask is a filled circular disc.
 
-        This is performed by taking the central row and column of the mask (based on the mask centre) and counting
-        the number of unmasked pixels. If the number of unmasked pixels is the same, the mask is circular.
+        The check is robust to circles whose centre is offset from the coordinate origin, including offsets that
+        do not align with pixel boundaries. It rejects annular, square and other non-disc shapes.
+
+        The algorithm:
+
+        1) The bounding box of unmasked pixels must be square to within one pixel. Offset centres that fall between
+           pixel centres can produce a one-pixel asymmetry in the bounding box, which is allowed; anything larger
+           indicates a non-circular shape such as an ellipse. Tiny masks (bounding box <= 2 pixels) require an exactly
+           square bounding box, since the one-pixel slack would otherwise admit 1x2 strips.
+        2) The pixel at the geometric centre of the bounding box must be unmasked. This rejects annular masks whose
+           inner hole is at least one pixel wide.
+        3) The centre and radius of the unmasked region are inferred from the bounding box and pixel count, and a
+           reference circular mask is built with those parameters. The input mask must match the reference within a
+           small number of pixels (tolerance scales with mask area to absorb rim quantization). This rejects squares,
+           crosses and tight annuli that slipped past the earlier checks.
 
         This function does not support rectangular masks and an exception will be raised if the pixel scales in each
         direction are different.
@@ -955,22 +968,55 @@ class Mask2D(Mask):
                 """
             )
 
-        pixel_coordinates_2d = self.geometry.pixel_coordinates_2d_from(
-            scaled_coordinates_2d=self.mask_centre
+        where = np.where(np.invert(self.array))
+        if where[0].size == 0:
+            return False
+
+        y_min, y_max = int(where[0].min()), int(where[0].max())
+        x_min, x_max = int(where[1].min()), int(where[1].max())
+        y_extent = y_max - y_min + 1
+        x_extent = x_max - x_min + 1
+
+        if abs(y_extent - x_extent) > 1:
+            return False
+        if max(y_extent, x_extent) <= 2 and y_extent != x_extent:
+            return False
+
+        cy = (y_max + y_min) // 2
+        cx = (x_max + x_min) // 2
+        if bool(self.array[cy, cx]):
+            return False
+
+        actual_area = int(where[0].size)
+        inferred_radius_pix = np.sqrt(actual_area / np.pi)
+        inferred_radius = inferred_radius_pix * self.pixel_scales[0]
+
+        y_centre_scaled = (
+            0.5 * (self.shape_native[0] - 1) - 0.5 * (y_min + y_max)
+        ) * self.pixel_scales[0]
+        x_centre_scaled = (
+            0.5 * (x_min + x_max) - 0.5 * (self.shape_native[1] - 1)
+        ) * self.pixel_scales[1]
+
+        expected = mask_2d_util.mask_2d_circular_from(
+            shape_native=self.shape_native,
+            pixel_scales=self.pixel_scales,
+            radius=inferred_radius,
+            centre=(y_centre_scaled, x_centre_scaled),
         )
 
-        central_row_pixels = sum(np.invert(self[pixel_coordinates_2d[0], :]))
-        central_column_pixels = sum(np.invert(self[:, pixel_coordinates_2d[1]]))
-
-        return central_row_pixels == central_column_pixels
+        diff_count = int(np.sum(self.array != expected))
+        tolerance = max(2, int(0.1 * actual_area))
+        return diff_count <= tolerance
 
     @property
     def circular_radius(self) -> float:
         """
         Returns the radius in scaled units of a circular mask.
 
-        This is performed by taking the central row of the mask (based on the mask centre) and counting the number of
-        unmasked pixels. The radius is then half the number of unmasked pixels times the pixel scale.
+        The radius is computed from the bounding box of the unmasked region, taking the larger of the y and x extents
+        as the diameter in pixels. This is robust to offset centres that fall between pixel boundaries (where the
+        bounding box can be asymmetric by one pixel).
 
         The mask is first checked that it is circular using the `is_circular` property, with an exception raised if
         it is not.
@@ -987,15 +1033,14 @@ class Mask2D(Mask):
             raise exc.MaskException(
                 """
                 A circular radius can only be computed for a circular mask.
-                
+
                 The `is_circular` property of this mask has returned False, indicating the mask is not circular.
                 """
             )
 
-        pixel_coordinates_2d = self.geometry.pixel_coordinates_2d_from(
-            scaled_coordinates_2d=self.mask_centre
-        )
+        where = np.where(np.invert(self.array))
+        y_extent = int(where[0].max() - where[0].min() + 1)
+        x_extent = int(where[1].max() - where[1].min() + 1)
+        diameter = max(y_extent, x_extent)
 
-        central_row_pixels = sum(np.invert(self[pixel_coordinates_2d[0], :]))
-
-        return central_row_pixels * self.pixel_scales[0] / 2.0
+        return diameter * self.pixel_scales[0] / 2.0

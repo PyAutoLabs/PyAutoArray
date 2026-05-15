@@ -118,10 +118,16 @@ def grid_hilbert_order_from(length, mask_radius):
     return x1d_hb, y1d_hb
 
 
-def image_and_grid_from(image, mask, mask_radius, pixel_scales, hilbert_length):
+def image_and_grid_from(
+    image, mask, mask_radius, pixel_scales, hilbert_length, mask_centre=(0.0, 0.0)
+):
     """
     This code will create a grid in Hilbert space-filling curve order and an interpolated hyper
     image associated to that grid.
+
+    The Hilbert curve is generated around the origin and filtered to a disc of radius ``mask_radius``, then translated
+    by ``mask_centre`` so the sampling lands inside the mask's circle for offset-centre masks. For masks centred on
+    the origin the translation is a no-op and behaviour is unchanged.
     """
 
     from scipy.interpolate import griddata
@@ -145,6 +151,7 @@ def image_and_grid_from(image, mask, mask_radius, pixel_scales, hilbert_length):
     grid_hb = np.stack((y1d_hb, x1d_hb), axis=-1)
     grid_hb_radius = np.sqrt(grid_hb[:, 0] ** 2.0 + grid_hb[:, 1] ** 2.0)
     new_grid = grid_hb[grid_hb_radius <= mask_radius]
+    new_grid = new_grid + np.asarray(mask_centre)
 
     new_img = griddata(
         points=grid,
@@ -271,6 +278,7 @@ class Hilbert(AbstractImageMeshWeighted):
             mask_radius=mask.circular_radius,
             pixel_scales=mask.pixel_scales,
             hilbert_length=193,
+            mask_centre=mask.mask_centre,
         )
 
         weight_map = self.weight_map_from(adapt_data=adapt_data_hb)
