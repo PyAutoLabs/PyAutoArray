@@ -6,3 +6,4 @@ from .rectangular_spline_adapt_image import RectangularSplineAdaptImage
 from .rectangular_uniform import RectangularUniform
 from .delaunay import Delaunay
 from .knn import KNearestNeighbor
+from .knn import KNNBarycentric

@@ -77,3 +77,28 @@ class KNearestNeighbor(Delaunay):
         )
 
         return InterpolatorKNearestNeighbor
+
+
+class KNNBarycentric(KNearestNeighbor):
+    """
+    A mesh that inherits k-nearest-neighbour connectivity from
+    :class:`KNearestNeighbor` but uses :class:`InterpolatorKNNBarycentric` to
+    compute interpolation weights as locally-exact barycentric coordinates on
+    the triangle formed by the 3 nearest source-plane mesh vertices, rather
+    than a Wendland kernel.
+
+    This is a JAX-native approximation to Delaunay barycentric interpolation
+    that avoids the scipy.spatial.Delaunay callback. The kNN connectivity knobs
+    (``k_neighbors``, ``radius_scale``, ``split_neighbor_division``) are
+    inherited and still control the regularization-spacing computation, but the
+    *interpolation* weights always use k=3 + barycentric and ignore them.
+    """
+
+    @property
+    def interpolator_cls(self):
+
+        from autoarray.inversion.mesh.interpolator.knn import (
+            InterpolatorKNNBarycentric,
+        )
+
+        return InterpolatorKNNBarycentric
