@@ -7,12 +7,10 @@ from autoarray.inversion.inversion.interferometer.abstract import (
     AbstractInversionInterferometer,
 )
 from autoarray.inversion.linear_obj.linear_obj import LinearObj
-from autoarray.inversion.mesh.mesh.delaunay import Delaunay
+from autoarray.inversion.mappers import mapper_util
 from autoarray.settings import Settings
 from autoarray.inversion.mappers.abstract import Mapper
 from autoarray.structures.visibilities import Visibilities
-
-from autoarray.inversion.inversion.interferometer import inversion_interferometer_util
 
 
 class InversionInterferometerSparse(AbstractInversionInterferometer):
@@ -99,35 +97,27 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
 
         This function computes the diagonal terms of F using the sparse linear algebra formalism.
         """
-
         mapper = self.cls_list_from(cls=Mapper)[0]
 
-        # The interferometer sparse-operator curvature path
-        # (``InterferometerSparseOperator.curvature_matrix_via_sparse_operator_from``)
-        # has only been validated against ``Rectangular*`` meshes (single source
-        # pixel per image pixel, weight=1). When given a ``Delaunay`` mapper
-        # (three source pixels per image pixel via barycentric interpolation,
-        # weights summing to 1) the returned curvature matrix disagrees with the
-        # mapping path by ~34% Frobenius and the regularized matrix loses
-        # positive-definiteness, raising a numpy ``LinAlgError`` at the Cholesky
-        # call site in ``Inversion.log_det_curvature_reg_matrix_term``. Guard
-        # rather than silently mis-computing.
-        if isinstance(mapper.mesh, Delaunay):
-            raise NotImplementedError(
-                "Interferometer.apply_sparse_operator() is not implemented for "
-                "Delaunay-mesh pixelizations: the sparse curvature math has only "
-                "been validated against Rectangular meshes (Pmax=1, weight=1) "
-                "and is structurally wrong for barycentric-interpolated mappers "
-                "(Pmax=3). For Delaunay interferometer fits, use the plain DFT "
-                "or NUFFT path (i.e. omit the apply_sparse_operator step). "
-                "Tracking issue: https://github.com/PyAutoLabs/PyAutoArray/issues/314"
-            )
+        # The interferometer W~ operator lives on the unmasked-extent rectangular
+        # grid (shape_native_masked_pixels), not the full native grid used by
+        # the imaging path. Build sparse triplets with extent-flat row indices
+        # so they match the operator's (M = extent_y * extent_x, B) scatter buffer.
+        rows, cols, vals = mapper_util.sparse_triplets_from(
+            pix_indexes_for_sub=mapper.pix_indexes_for_sub_slim_index,
+            pix_weights_for_sub=mapper.pix_weights_for_sub_slim_index,
+            slim_index_for_sub=mapper.slim_index_for_sub_slim_index,
+            fft_index_for_masked_pixel=self.mask.extent_index_for_masked_pixel,
+            sub_fraction_slim=mapper.over_sampler.sub_fraction.array,
+            return_rows_slim=False,
+            xp=self._xp,
+        )
 
-        return self.dataset.sparse_operator.curvature_matrix_via_sparse_operator_from(
-            pix_indexes_for_sub_slim_index=mapper.pix_indexes_for_sub_slim_index,
-            pix_weights_for_sub_slim_index=mapper.pix_weights_for_sub_slim_index,
-            pix_pixels=self.linear_obj_list[0].params,
-            fft_index_for_masked_pixel=self.mask.fft_index_for_masked_pixel,
+        return self.dataset.sparse_operator.curvature_matrix_diag_from(
+            rows=rows,
+            cols=cols,
+            vals=vals,
+            S=mapper.params,
         )
 
     @property

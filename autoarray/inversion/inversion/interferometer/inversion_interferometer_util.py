@@ -554,6 +554,7 @@ class InterferometerSparseOperator:
     batch_size: int
     w_dtype: "jax.numpy.dtype"
     Khat: "jax.Array"  # (2y, 2x), complex
+    col_offsets: "jax.Array"  # (batch_size,) int32
     """
     Cached FFT operator state for fast interferometer curvature-matrix assembly.
 
@@ -672,168 +673,120 @@ class InterferometerSparseOperator:
             batch_size=int(batch_size),
             w_dtype=nufft_precision_operator.dtype,
             Khat=Khat,
+            col_offsets=jnp.arange(int(batch_size), dtype=jnp.int32),
         )
 
-    def curvature_matrix_via_sparse_operator_from(
-        self,
-        pix_indexes_for_sub_slim_index: np.ndarray,
-        pix_weights_for_sub_slim_index: np.ndarray,
-        pix_pixels: int,
-        fft_index_for_masked_pixel: np.ndarray,
-    ):
+    def apply_operator(self, Fbatch_flat):
         """
-        Assemble the curvature matrix C = Aᵀ W A using sparse triplets and the FFT W~ operator.
+        Apply the interferometer W~ operator to a batch of vectors.
 
-        This method computes the mapper (pixelization) curvature matrix without
-        forming a dense mapping matrix. Instead, it uses fixed-length mapping
-        arrays (pixel indexes + weights per masked pixel) which define a sparse
-        mapping operator A in COO-like form.
+        Given an input matrix of shape (M, B) on the rectangular real-space
+        grid (M = y_shape * x_shape), this method computes
 
-        Algorithm outline
-        -----------------
-        Let S be the number of source pixels and M be the number of rectangular
-        real-space pixels.
+            G = W~ Fbatch_flat
 
-        1) Build a fixed-length COO stream from the mapping arrays:
-              rows_rect[k] : rectangular pixel index (0..M-1)
-              cols[k]      : source pixel index (0..S-1)
-              vals[k]      : mapping weight
-           Invalid mappings (cols < 0 or cols >= S) are masked out.
+        via FFT-based convolution with the cached `Khat` kernel:
 
-        2) Process source-pixel columns in blocks of width `batch_size`:
-           - Scatter the block’s source columns into a dense (M, batch_size) array F.
-           - Apply the W~ operator by FFT:
-                 G = apply_W(F)
-           - Project back with Aᵀ via segmented reductions:
-                 C[:, start:start+B] = Aᵀ G
+            apply_W(F) = Re( IFFT( FFT(F_pad) * Khat ) )[:y, :x]
 
-        3) Symmetrize the result:
-              C <- 0.5 * (C + Cᵀ)
+        where `F_pad` is the (2y, 2x) zero-padded version of `F`.
 
         Parameters
         ----------
-        pix_indexes_for_sub_slim_index
-            Integer array of shape (M_masked, Pmax).
-            For each masked (slim) image pixel, stores the source-pixel indices
-            involved in the interpolation / mapping stencil. Invalid entries
-            should be set to -1.
-        pix_weights_for_sub_slim_index
-            Floating array of shape (M_masked, Pmax).
-            Weights corresponding to `pix_indexes_for_sub_slim_index`.
-            These should already include any oversampling normalisation (e.g.
-            sub-pixel fractions) required by the mapper.
-        pix_pixels
-            Number of source pixels, S.
-        fft_index_for_masked_pixel
-            Integer array of shape (M_masked,).
-            Maps each masked (slim) image pixel index to its corresponding
-            rectangular-grid flat index (0..M-1). This embeds the masked pixel
-            ordering into the FFT-friendly rectangular grid.
+        Fbatch_flat
+            Array of shape (M, B) representing B vectors on the rectangular grid.
 
         Returns
         -------
-        jax.Array
-            Curvature matrix of shape (S, S), symmetric.
-
-        Notes
-        -----
-        - The inner computation is written in JAX and is intended to be jitted.
-          For best performance, keep `batch_size` fixed (static) across calls.
-        - Choosing `batch_size` as a divisor of S avoids a smaller tail block,
-          but correctness does not require that if the implementation masks the tail.
-        - This method uses FFTs on padded (2y, 2x) arrays; memory use scales with
-          batch_size and grid size.
+        ndarray
+            Array of shape (M, B) equal to W~ applied to the batch.
         """
-
         import jax.numpy as jnp
+
+        y_shape, x_shape = self.y_shape, self.x_shape
+        M = y_shape * x_shape
+        Khat = self.Khat
+
+        B = Fbatch_flat.shape[1]
+        F_img = Fbatch_flat.T.reshape((B, y_shape, x_shape))
+        F_pad = jnp.pad(F_img, ((0, 0), (0, y_shape), (0, x_shape)))
+        Fhat = jnp.fft.fft2(F_pad)
+        Ghat = Fhat * Khat[None, :, :]
+        G_pad = jnp.fft.ifft2(Ghat)
+        G = jnp.real(G_pad[:, :y_shape, :x_shape])
+        return G.reshape((B, M)).T
+
+    def curvature_matrix_diag_from(self, rows, cols, vals, *, S: int):
+        """
+        Compute the diagonal (mapper-mapper) curvature matrix block F = Aᵀ W~ A.
+
+        This method mirrors `ImagingSparseOperator.curvature_matrix_diag_from`
+        and is the structural counterpart for the interferometer W~ operator.
+
+        Given a sparse mapping operator A in COO triplet form (rows, cols, vals)
+        with `S` source pixels, it computes
+
+            F = Aᵀ W~ A
+
+        in column blocks of width `batch_size`:
+
+        1) Assemble Fbatch = A[:, start:start+B] on the rectangular grid via scatter-add.
+        2) Apply W~ to the block via FFT: Gbatch = W~(Fbatch).
+        3) Project back with Aᵀ via segment_sum over `cols`.
+
+        Parameters
+        ----------
+        rows, cols, vals
+            COO triplets encoding the sparse mapping operator A.
+            - `rows`: rectangular-grid pixel indices (flat) in [0, M), shape (nnz,)
+            - `cols`: source pixel indices in [0, S), shape (nnz,)
+            - `vals`: mapping weights (interpolation + any sub-fraction normalisation),
+              shape (nnz,)
+            These should already be produced by `mapper.sparse_triplets_curvature`.
+        S
+            Number of source pixels / parameters for this mapper.
+
+        Returns
+        -------
+        ndarray
+            Curvature matrix of shape (S, S), symmetric.
+        """
+        import jax.numpy as jnp
+        from jax import lax
         from jax.ops import segment_sum
 
-        # -------------------------
-        # Pull static quantities from state
-        # -------------------------
-        y_shape = self.y_shape
-        x_shape = self.x_shape
+        rows = jnp.asarray(rows, dtype=jnp.int32)
+        cols = jnp.asarray(cols, dtype=jnp.int32)
+        vals = jnp.asarray(vals, dtype=jnp.float64)
+
         M = self.M
-        batch_size = self.batch_size
-        Khat = self.Khat
-        w_dtype = self.w_dtype
+        B = self.batch_size
 
-        # -------------------------
-        # Basic shape checks (NumPy side, safe)
-        # -------------------------
-        M_masked, Pmax = pix_indexes_for_sub_slim_index.shape
-        S = int(pix_pixels)
+        n_blocks = (S + B - 1) // B
+        S_pad = n_blocks * B
 
-        # -------------------------
-        # JAX core (unchanged COO logic)
-        # -------------------------
-        def _curvature_rect_jax(
-            pix_idx: jnp.ndarray,  # (M_masked, Pmax)
-            pix_wts: jnp.ndarray,  # (M_masked, Pmax)
-            rect_map: jnp.ndarray,  # (M_masked,)
-        ) -> jnp.ndarray:
-            rect_map = jnp.asarray(rect_map)
+        C0 = jnp.zeros((S, S_pad), dtype=jnp.float64)
 
-            nnz_full = M_masked * Pmax
+        def body(block_i, C):
+            start = block_i * B
 
-            # Flatten mapping arrays into a fixed-length COO stream
-            rows_mask = jnp.repeat(
-                jnp.arange(M_masked, dtype=jnp.int32), Pmax
-            )  # (nnz_full,)
-            cols = pix_idx.reshape((nnz_full,)).astype(jnp.int32)
-            vals = pix_wts.reshape((nnz_full,)).astype(w_dtype)
+            in_block = (cols >= start) & (cols < (start + B))
+            bc = jnp.where(in_block, cols - start, 0).astype(jnp.int32)
+            v = jnp.where(in_block, vals, 0.0)
 
-            # Validity mask
-            valid = (cols >= 0) & (cols < S)
+            F = jnp.zeros((M, B), dtype=jnp.float64)
+            F = F.at[rows, bc].add(v)
 
-            # Embed masked rows into rectangular rows
-            rows_rect = rect_map[rows_mask].astype(jnp.int32)
+            G = self.apply_operator(F)  # (M, B)
 
-            # Make cols / vals safe
-            cols_safe = jnp.where(valid, cols, 0)
-            vals_safe = jnp.where(valid, vals, 0.0)
+            contrib = vals[:, None] * G[rows, :]
+            Cblock = segment_sum(contrib, cols, num_segments=S)  # (S, B)
 
-            def apply_operator_fft_batch(Fbatch_flat: jnp.ndarray) -> jnp.ndarray:
-                B = Fbatch_flat.shape[1]
-                F_img = Fbatch_flat.T.reshape((B, y_shape, x_shape))
-                F_pad = jnp.pad(
-                    F_img, ((0, 0), (0, y_shape), (0, x_shape))
-                )  # (B,2y,2x)
-                Fhat = jnp.fft.fft2(F_pad)
-                Ghat = Fhat * Khat[None, :, :]
-                G_pad = jnp.fft.ifft2(Ghat)
-                G = jnp.real(G_pad[:, :y_shape, :x_shape])
-                return G.reshape((B, M)).T  # (M,B)
+            width = jnp.minimum(B, jnp.maximum(0, S - start))
+            Cblock = Cblock * (self.col_offsets < width)[None, :]
 
-            def compute_block(start_col: int) -> jnp.ndarray:
-                in_block = (cols_safe >= start_col) & (
-                    cols_safe < start_col + batch_size
-                )
-                in_use = valid & in_block
+            return lax.dynamic_update_slice(C, Cblock, (0, start))
 
-                bc = jnp.where(in_use, cols_safe - start_col, 0).astype(jnp.int32)
-                v = jnp.where(in_use, vals_safe, 0.0)
-
-                Fbatch = jnp.zeros((M, batch_size), dtype=w_dtype)
-                Fbatch = Fbatch.at[rows_rect, bc].add(v)
-
-                Gbatch = apply_operator_fft_batch(Fbatch)
-                G_at_rows = Gbatch[rows_rect, :]
-
-                contrib = vals_safe[:, None] * G_at_rows
-                return segment_sum(contrib, cols_safe, num_segments=S)
-
-            # Assemble curvature
-            C = jnp.zeros((S, S), dtype=w_dtype)
-            for start in range(0, S, batch_size):
-                Cblock = compute_block(start)
-                width = min(batch_size, S - start)
-                C = C.at[:, start : start + width].set(Cblock[:, :width])
-
-            return 0.5 * (C + C.T)
-
-        return _curvature_rect_jax(
-            pix_indexes_for_sub_slim_index,
-            pix_weights_for_sub_slim_index,
-            fft_index_for_masked_pixel,
-        )
+        C_pad = lax.fori_loop(0, n_blocks, body, C0)
+        C = C_pad[:, :S]
+        return 0.5 * (C + C.T)

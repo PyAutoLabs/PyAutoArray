@@ -64,21 +64,7 @@ def test__fast_chi_squared(
     assert inversion.fast_chi_squared == pytest.approx(chi_squared, 1.0e-4)
 
 
-def test__apply_sparse_operator__delaunay_mapper__raises_not_implemented():
-    """``InversionInterferometerSparse.curvature_matrix_diag`` must raise a
-    ``NotImplementedError`` rather than silently mis-computing when paired
-    with a Delaunay mapper.
-
-    The interferometer sparse-operator curvature path
-    (``InterferometerSparseOperator.curvature_matrix_via_sparse_operator_from``)
-    was only validated against ``Rectangular*`` meshes (single source pixel per
-    image pixel, weight 1). On a Delaunay mapper (three source pixels per image
-    pixel via barycentric interpolation, weights summing to 1) the returned
-    curvature matrix disagrees with the mapping path by ~34% Frobenius norm and
-    the regularized matrix loses positive-definiteness, raising a numpy
-    ``LinAlgError`` deep inside ``Inversion.log_det_curvature_reg_matrix_term``.
-    The guard at the entry point catches the mis-use early with a clear message.
-    """
+def test__curvature_matrix__interferometer_sparse_operator__delaunay__identical_to_mapping():
     mask = aa.Mask2D(
         mask=[
             [True, True, True, True, True, True, True],
@@ -123,12 +109,19 @@ def test__apply_sparse_operator__delaunay_mapper__raises_not_implemented():
         real_space_mask=mask,
         transformer_class=aa.TransformerDFT,
     )
+
     dataset_sparse = dataset.apply_sparse_operator(use_jax=False)
 
-    inversion = aa.Inversion(
+    inversion_sparse = aa.Inversion(
         dataset=dataset_sparse,
         linear_obj_list=[mapper],
     )
 
-    with pytest.raises(NotImplementedError, match=r"Delaunay"):
-        _ = inversion.curvature_matrix
+    inversion_mapping = aa.Inversion(
+        dataset=dataset,
+        linear_obj_list=[mapper],
+    )
+
+    assert inversion_sparse.curvature_matrix == pytest.approx(
+        inversion_mapping.curvature_matrix, 1.0e-4
+    )

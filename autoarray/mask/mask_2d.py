@@ -712,6 +712,37 @@ class Mask2D(Mask):
         # Convert (y, x) coordinates to flat row-major indices
         return (ys * width + xs).astype(np.int32)
 
+    @cached_property
+    def extent_index_for_masked_pixel(self) -> np.ndarray:
+        """
+        Return a mapping from masked-pixel (slim) indices to flat indices on
+        the *unmasked-extent* rectangular FFT grid.
+
+        The unmasked extent is the bounding box of unmasked pixels
+        (``shape_native_masked_pixels``). This index is the interferometer
+        counterpart of `fft_index_for_masked_pixel`, which uses the full native
+        grid: the interferometer W~ kernel is computed on the (extent_y,
+        extent_x) grid because it is translation-invariant and only the offsets
+        between pairs of unmasked pixels matter — the surrounding masked region
+        contributes nothing.
+
+        Returns
+        -------
+        np.ndarray
+            A 1D array of shape (N_unmasked,) of int32 values in
+            ``[0, extent_y * extent_x)``, suitable as row indices into the
+            (extent_y * extent_x, batch) scatter buffer used by
+            ``InterferometerSparseOperator.curvature_matrix_diag_from``.
+        """
+        ys, xs = np.where(~self)
+        if ys.size == 0:
+            return np.zeros((0,), dtype=np.int32)
+
+        y0, x0 = int(np.min(ys)), int(np.min(xs))
+        extent_y, extent_x = self.shape_native_masked_pixels
+        width = int(extent_x)
+        return ((ys - y0) * width + (xs - x0)).astype(np.int32)
+
     def trimmed_array_from(self, padded_array, image_shape) -> Array2D:
         """
         Map a padded 1D array of values to its original 2D array, trimming all edge values.
