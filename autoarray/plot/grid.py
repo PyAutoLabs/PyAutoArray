@@ -151,7 +151,7 @@ def plot_grid(
     if lines is not None:
         for line in lines:
             if line is not None and len(line) > 0:
-                ax.plot(line[:, 1], line[:, 0], linewidth=2)
+                ax.plot(line[:, 1], line[:, 0], linewidth=1)
 
     # --- labels ----------------------------------------------------------------
     apply_labels(ax, title=title, xlabel=xlabel, ylabel=ylabel)

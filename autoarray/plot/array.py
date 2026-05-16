@@ -267,7 +267,7 @@ def plot_array(
             if line is not None and len(line) > 0:
                 line = np.asarray(line).reshape(-1, 2)
                 color = line_colors[i] if (line_colors is not None and i < len(line_colors)) else None
-                kw = {"linewidth": 2}
+                kw = {"linewidth": 1}
                 if color is not None:
                     kw["color"] = color
                 ax.plot(line[:, 1], line[:, 0], **kw)
