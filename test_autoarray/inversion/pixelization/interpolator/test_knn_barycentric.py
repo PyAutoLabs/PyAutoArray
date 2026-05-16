@@ -127,3 +127,44 @@ def test__mesh_class__inherits_knn_knobs():
     assert mesh.radius_scale == 1.5
     assert mesh.areas_factor == 0.5
     assert mesh.split_neighbor_division == 2
+
+
+def test__interpolator__numpy_path_returns_writable_mappings_and_weights():
+    """
+    Regression guard: on the numpy path, `mappings` and `weights` must be
+    writable numpy arrays — not read-only views of jax.Arrays. The
+    `ConstantSplit` / `AdaptSplit` regularization code uses in-place
+    assignment (e.g. `splitted_mappings[i][j+1] = ...` in `reg_split_np_from`),
+    which raises `ValueError: assignment destination is read-only` if the
+    array is a numpy view onto a jax.Array.
+    """
+    import autoarray as aa
+    from autoarray.inversion.mesh.interpolator.knn import (
+        InterpolatorKNNBarycentric,
+    )
+
+    mesh_grid = aa.Grid2D.no_mask(
+        values=[[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [0.5, 0.5], [-0.5, -0.5]],
+        shape_native=(3, 2),
+        pixel_scales=1.0,
+        over_sample_size=1,
+    )
+
+    class _Raw:
+        def __init__(self, arr):
+            self.array = arr
+
+    queries = np.array([[0.3, 0.3], [0.0, 0.0], [1.0, 1.0], [0.5, 0.5]])
+
+    interp = InterpolatorKNNBarycentric(
+        mesh=aa.mesh.KNNBarycentric(pixels=6),
+        mesh_grid=mesh_grid,
+        data_grid=_Raw(queries),
+        xp=np,
+    )
+    mappings, _, weights = interp._mappings_sizes_weights
+
+    assert isinstance(mappings, np.ndarray)
+    assert isinstance(weights, np.ndarray)
+    assert mappings.flags.writeable, "mappings must be writable (regularization mutates it)"
+    assert weights.flags.writeable, "weights must be writable (regularization mutates it)"

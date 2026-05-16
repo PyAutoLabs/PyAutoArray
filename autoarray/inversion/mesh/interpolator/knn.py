@@ -1,3 +1,5 @@
+import numpy as np
+
 from autoconf import cached_property
 
 from autoarray.inversion.mesh.interpolator.delaunay import InterpolatorDelaunay
@@ -357,8 +359,16 @@ class InterpolatorKNNBarycentric(InterpolatorKNearestNeighbor):
             xp=self._xp,
         )
 
-        mappings = self._xp.asarray(mappings)
-        weights = self._xp.asarray(weights)
+        # On the numpy path, materialize with `np.array(...)` so the regularization
+        # code (which uses in-place assignment, e.g. `reg_split_np_from`) gets a
+        # writable buffer rather than a read-only view of a jax.Array. On the jax
+        # path, asarray is the right cast (no copy in a JIT trace).
+        if self._xp is np:
+            mappings = np.array(mappings)
+            weights = np.array(weights)
+        else:
+            mappings = self._xp.asarray(mappings)
+            weights = self._xp.asarray(weights)
 
         sizes = self._xp.full(
             (mappings.shape[0],),
@@ -404,9 +414,20 @@ class InterpolatorKNNBarycentric(InterpolatorKNearestNeighbor):
         mappings = interpolator.mappings
         weights = interpolator.weights
 
+        # `reg_split_np_from` writes `splitted_mappings[i][j+1] = pixel_index`
+        # for the "flag-zero" insertion of the central pixel, so the buffer
+        # must have an extra column reserved past the k=3 mappings — matching
+        # `InterpolatorDelaunay._mappings_sizes_weights_split`'s hstack-append.
+        # `sizes` reports 3 (the actual mappings); `reg_split_np_from` grows it
+        # to 4 in-place when it inserts.
         sizes = self._xp.full(
             (mappings.shape[0],),
             mappings.shape[1],
         )
+
+        pad_int = self._xp.full((mappings.shape[0], 1), -1, dtype=mappings.dtype)
+        pad_float = self._xp.zeros((weights.shape[0], 1), dtype=weights.dtype)
+        mappings = self._xp.hstack((mappings, pad_int))
+        weights = self._xp.hstack((weights, pad_float))
 
         return mappings, sizes, weights
