@@ -20,4 +20,11 @@ class AbstractMeshGeometry:
         # When non-None, rectangular geometry uses the spline-CDF helpers
         # instead of the linear-interp CDF (areas / edges transforms only).
         self.spline_deg = spline_deg
-        self._xp = xp
+        self._use_jax = xp is not np
+
+    @property
+    def _xp(self):
+        if self._use_jax:
+            import jax.numpy as jnp
+            return jnp
+        return np
