@@ -25,6 +25,7 @@ def plot_inversion_reconstruction(
     vmax: Optional[float] = None,
     use_log10: bool = False,
     zoom_to_brightest: bool = True,
+    zoom_extent_scale: float = 1.0,
     # --- overlays ---------------------------------------------------------------
     lines: Optional[List[np.ndarray]] = None,
     line_colors: Optional[List] = None,
@@ -106,7 +107,9 @@ def plot_inversion_reconstruction(
         norm = None
 
     extent = mapper.extent_from(
-        values=pixel_values, zoom_to_brightest=zoom_to_brightest
+        values=pixel_values,
+        zoom_to_brightest=zoom_to_brightest,
+        zoom_extent_scale=zoom_extent_scale,
     )
 
     is_subplot = not owns_figure
