@@ -500,6 +500,7 @@ class Mapper(LinearObj):
         values: np.ndarray = None,
         zoom_to_brightest: bool = True,
         zoom_percent: Optional[float] = None,
+        zoom_extent_scale: float = 1.0,
     ) -> Tuple[float, float, float, float]:
 
         from autoarray.geometry import geometry_util
@@ -516,7 +517,7 @@ class Mapper(LinearObj):
             true_grid = self.source_plane_mesh_grid[true_indices]
 
             try:
-                return geometry_util.extent_symmetric_from(
+                extent = geometry_util.extent_symmetric_from(
                     extent=(
                         np.min(true_grid[:, 0, 1]),
                         np.max(true_grid[:, 0, 1]),
@@ -525,9 +526,38 @@ class Mapper(LinearObj):
                     )
                 )
             except ValueError:
-                return geometry_util.extent_symmetric_from(
+                extent = geometry_util.extent_symmetric_from(
                     extent=self.source_plane_mesh_grid.geometry.extent
                 )
+
+            if zoom_extent_scale != 1.0:
+                x_min, x_max, y_min, y_max = extent
+                x_centre = 0.5 * (x_min + x_max)
+                y_centre = 0.5 * (y_min + y_max)
+                target_half = 0.5 * max(x_max - x_min, y_max - y_min) * zoom_extent_scale
+
+                bound = geometry_util.extent_symmetric_from(
+                    extent=self.source_plane_mesh_grid.geometry.extent
+                )
+                max_allowable_half = min(
+                    x_centre - bound[0],
+                    bound[1] - x_centre,
+                    y_centre - bound[2],
+                    bound[3] - y_centre,
+                )
+                bound_cap_half = 0.7 * 0.5 * min(
+                    bound[1] - bound[0], bound[3] - bound[2]
+                )
+                final_half = min(target_half, max_allowable_half, bound_cap_half)
+
+                extent = (
+                    x_centre - final_half,
+                    x_centre + final_half,
+                    y_centre - final_half,
+                    y_centre + final_half,
+                )
+
+            return extent
 
         return geometry_util.extent_symmetric_from(
             extent=self.source_plane_mesh_grid.geometry.extent

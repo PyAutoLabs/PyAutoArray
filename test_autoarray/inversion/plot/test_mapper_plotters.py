@@ -28,6 +28,22 @@ def test__plot_mapper(
     assert str(Path(plot_path) / "mapper1.png") in plot_patch.paths
 
 
+def test__plot_mapper__zoom_extent_scale__widens_extent_around_centre(
+    rectangular_mapper_7x7_3x3,
+    plot_path,
+    plot_patch,
+):
+    aplt.plot_mapper(
+        mapper=rectangular_mapper_7x7_3x3,
+        zoom_extent_scale=2.5,
+        output_path=plot_path,
+        output_filename="mapper_mid_zoom",
+        output_format="png",
+    )
+
+    assert str(Path(plot_path) / "mapper_mid_zoom.png") in plot_patch.paths
+
+
 def test__subplot_image_and_mapper(
     imaging_7x7,
     rectangular_mapper_7x7_3x3,

@@ -24,6 +24,7 @@ def plot_mapper(
     line_colors=None,
     title: str = "Pixelization Mesh (Source-Plane)",
     zoom_to_brightest: bool = True,
+    zoom_extent_scale: float = 1.0,
     ax=None,
 ):
     """
@@ -67,6 +68,7 @@ def plot_mapper(
             vmin=vmin,
             vmax=vmax,
             zoom_to_brightest=zoom_to_brightest,
+            zoom_extent_scale=zoom_extent_scale,
             lines=numpy_lines(lines),
             line_colors=line_colors,
             grid=numpy_grid(mesh_grid),
