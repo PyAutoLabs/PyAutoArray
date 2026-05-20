@@ -475,6 +475,7 @@ class Grid2D(Structure):
         pixel_scales: ty.PixelScales,
         origin: Tuple[float, float] = (0.0, 0.0),
         over_sample_size: Union[int, Array2D] = 4,
+        respect_small_datasets: bool = True,
     ) -> "Grid2D":
         """
         Create a `Grid2D` (see *Grid2D.__new__*) as a uniform grid of (y,x) values given an input `shape_native` and
@@ -489,8 +490,13 @@ class Grid2D(Structure):
             it is converted to a (float, float) tuple.
         origin
             The origin of the grid's mask.
+        respect_small_datasets
+            When ``PYAUTO_SMALL_DATASETS=1`` is set, grids larger than 15x15 are silently shrunk to
+            ``(15, 15)`` at ``pixel_scales=0.6`` to keep smoke runs fast. Pass ``False`` to opt out
+            of that shrink for grids whose spatial extent is load-bearing for the script (e.g. a
+            visualization asserting cluster-scale critical curves at ~30-50").
         """
-        if os.environ.get("PYAUTO_SMALL_DATASETS") == "1":
+        if respect_small_datasets and os.environ.get("PYAUTO_SMALL_DATASETS") == "1":
             if shape_native[0] > 15 or shape_native[1] > 15:
                 shape_native = (15, 15)
                 pixel_scales = 0.6

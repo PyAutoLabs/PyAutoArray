@@ -176,6 +176,19 @@ def test__uniform__2x2_pixel_scale_2__native_coordinates_correct():
     assert grid_2d.origin == (0.0, 0.0)
 
 
+def test__uniform__small_datasets_env__respect_flag_false__shape_unchanged(monkeypatch):
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
+
+    grid_2d = aa.Grid2D.uniform(
+        shape_native=(200, 200),
+        pixel_scales=0.5,
+        respect_small_datasets=False,
+    )
+
+    assert grid_2d.shape_native == (200, 200)
+    assert grid_2d.pixel_scales == (0.5, 0.5)
+
+
 def test__uniform__2x2_with_origin__coordinates_offset_by_origin():
     grid_2d = aa.Grid2D.uniform(
         shape_native=(2, 2), pixel_scales=2.0, origin=(1.0, 1.0)
