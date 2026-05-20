@@ -364,6 +364,14 @@ class Mask2D(Mask):
             if shape_native[0] > 15 or shape_native[1] > 15:
                 shape_native = (15, 15)
                 pixel_scales = 0.6
+            scale_scalar = (
+                pixel_scales
+                if isinstance(pixel_scales, (int, float))
+                else min(pixel_scales)
+            )
+            max_radius = min(shape_native) * scale_scalar / 2.0
+            if radius > max_radius:
+                radius = max_radius
 
         pixel_scales = geometry_util.convert_pixel_scales_2d(pixel_scales=pixel_scales)
 
