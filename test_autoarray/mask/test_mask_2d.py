@@ -129,6 +129,42 @@ def test__circular__invert_true__output_is_inverted_util_result():
     assert mask.mask_centre == (0.0, 0.0)
 
 
+def test__circular__small_datasets_env__oversized_radius_clamped_to_disc(monkeypatch):
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
+
+    mask = aa.Mask2D.circular(shape_native=(100, 100), pixel_scales=0.1, radius=6.0)
+
+    assert mask.shape_native == (15, 15)
+    assert mask.pixel_scales == (0.6, 0.6)
+    assert mask.is_circular
+    n_unmasked = int((~mask.array).sum())
+    assert 100 < n_unmasked < 225
+
+
+def test__circular__small_datasets_env__in_bounds_radius_unchanged(monkeypatch):
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
+
+    capped = aa.Mask2D.circular(shape_native=(15, 15), pixel_scales=0.6, radius=2.0)
+    reference = aa.util.mask_2d.mask_2d_circular_from(
+        shape_native=(15, 15), pixel_scales=(0.6, 0.6), radius=2.0, centre=(0.0, 0.0)
+    )
+
+    assert (capped == reference).all()
+
+
+def test__circular__small_datasets_env__tuple_pixel_scales_oversized_radius_clamped(
+    monkeypatch,
+):
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
+
+    mask = aa.Mask2D.circular(
+        shape_native=(200, 200), pixel_scales=(0.1, 0.1), radius=7.5
+    )
+
+    assert mask.shape_native == (15, 15)
+    assert mask.is_circular
+
+
 # ---------------------------------------------------------------------------
 # circular_annular
 # ---------------------------------------------------------------------------
