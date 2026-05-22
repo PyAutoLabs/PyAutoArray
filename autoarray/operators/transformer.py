@@ -1,7 +1,7 @@
 import copy
 import numpy as np
 import warnings
-from typing import Tuple
+from typing import Optional, Tuple
 
 
 class NUFFTPlaceholder:
@@ -502,6 +502,7 @@ class TransformerNUFFT:
         uv_wavelengths: np.ndarray,
         real_space_mask: Mask2D,
         eps: float = 1e-12,
+        chunk_size: Optional[int] = None,
         xp=np,
         **kwargs,
     ):
@@ -540,6 +541,16 @@ class TransformerNUFFT:
             Requested NUFFT precision passed to nufftax. Defaults to `1e-12`
             (effectively machine precision); relax to `1e-9` or `1e-6` for
             faster execution if marginal accuracy is acceptable.
+        chunk_size
+            If set to a positive integer, the forward and adjoint NUFFT
+            calls split the visibility axis into chunks of this size and
+            iterate (via ``jax.lax.scan`` on the JAX path, a Python loop
+            on the numpy path). This caps the nufftax gather-buffer
+            allocation (~``2 * chunk_size * nspread^2 * dtype_size``) at
+            the cost of per-chunk overhead. Required for visibility counts
+            above ~5M on a 40-80 GB GPU. If ``None`` (default), a single
+            one-shot call is used — preserves existing behaviour for
+            small-N callers (sma-class datasets).
         xp
             Accepted for signature compatibility with the legacy class; not
             stored. The active backend is selected per-call via the `xp`
@@ -563,10 +574,16 @@ class TransformerNUFFT:
         if _nufftax is None:
             nufftax_exception()
 
+        if chunk_size is not None and chunk_size <= 0:
+            raise ValueError(
+                f"chunk_size must be a positive integer or None, got {chunk_size}"
+            )
+
         self.uv_wavelengths = uv_wavelengths.astype("float")
         self.real_space_mask = real_space_mask
         self.grid = Grid2D.from_mask(mask=self.real_space_mask).in_radians
         self.eps = eps
+        self.chunk_size = chunk_size
         self.native_index_for_slim_index = copy.copy(
             real_space_mask.derive_indexes.native_for_slim.astype("int")
         )
@@ -590,19 +607,63 @@ class TransformerNUFFT:
         self.adjoint_scaling = (2.0 * n_y) * (2.0 * n_x)
 
     def _forward_native(self, image_native_2d, xp=np):
-        """Run nufft2d2 on a 2D native-shape image array, returning visibilities."""
+        """Run nufft2d2 on a 2D native-shape image array, returning visibilities.
+
+        When ``self.chunk_size`` is set, the visibility axis is processed in
+        fixed-size chunks via ``jax.lax.scan`` (JAX path) or a Python loop
+        (numpy path) — caps the nufftax gather-buffer allocation per call.
+        """
+        K = int(self._x.shape[0])
+
         if xp.__name__.startswith("jax"):
+            import jax
             import jax.numpy as jnp
 
             img = jnp.asarray(image_native_2d)[::-1, :].astype(jnp.complex128)
-            x = jnp.asarray(self._x)
-            y = jnp.asarray(self._y)
-            shift = jnp.asarray(self._shift)
-            return _nufftax.nufft2d2(x, y, img, self.eps, -1) * shift
+            x_all = jnp.asarray(self._x)
+            y_all = jnp.asarray(self._y)
+            shift_all = jnp.asarray(self._shift)
+
+            if self.chunk_size is None or self.chunk_size >= K:
+                return _nufftax.nufft2d2(x_all, y_all, img, self.eps, -1) * shift_all
+
+            cs = int(self.chunk_size)
+            n_chunks = (K + cs - 1) // cs
+            K_pad = n_chunks * cs
+            x_pad = jnp.pad(x_all, (0, K_pad - K))
+            y_pad = jnp.pad(y_all, (0, K_pad - K))
+            shift_pad = jnp.pad(shift_all, (0, K_pad - K))
+            eps = self.eps
+
+            def body(carry, i):
+                k0 = i * cs
+                x_s = jax.lax.dynamic_slice(x_pad, (k0,), (cs,))
+                y_s = jax.lax.dynamic_slice(y_pad, (k0,), (cs,))
+                shift_s = jax.lax.dynamic_slice(shift_pad, (k0,), (cs,))
+                vis = _nufftax.nufft2d2(x_s, y_s, img, eps, -1) * shift_s
+                return carry, vis
+
+            _, vis_chunks = jax.lax.scan(body, None, jnp.arange(n_chunks))
+            return vis_chunks.reshape(K_pad)[:K]
 
         img = image_native_2d[::-1, :].astype(np.complex128)
-        out = _nufftax.nufft2d2(self._x, self._y, img, self.eps, -1) * self._shift
-        return np.array(np.asarray(out))
+
+        if self.chunk_size is None or self.chunk_size >= K:
+            out = _nufftax.nufft2d2(self._x, self._y, img, self.eps, -1) * self._shift
+            return np.array(np.asarray(out))
+
+        cs = int(self.chunk_size)
+        parts = []
+        for k0 in range(0, K, cs):
+            k1 = min(k0 + cs, K)
+            vis = (
+                _nufftax.nufft2d2(
+                    self._x[k0:k1], self._y[k0:k1], img, self.eps, -1
+                )
+                * self._shift[k0:k1]
+            )
+            parts.append(np.asarray(vis))
+        return np.concatenate(parts, axis=0)
 
     def visibilities_from(self, image, xp=np) -> Visibilities:
         """
@@ -654,21 +715,62 @@ class TransformerNUFFT:
         """
         n_y, n_x = self.real_space_mask.shape_native
         n_modes = (n_x, n_y)  # nufftax wants (n1, n2) = (N_x, N_y)
+        K = int(self._x.shape[0])
 
         if xp.__name__.startswith("jax"):
+            import jax
             import jax.numpy as jnp
 
-            x = jnp.asarray(self._x)
-            y = jnp.asarray(self._y)
-            shift_conj = jnp.asarray(np.conj(self._shift))
-            c = jnp.asarray(visibilities.array) * shift_conj
-            f = _nufftax.nufft2d1(x, y, c, n_modes, self.eps, +1)
-            image = jnp.real(f)[::-1, :]
-        else:
-            c = visibilities.array * np.conj(self._shift)
-            f = _nufftax.nufft2d1(self._x, self._y, c, n_modes, self.eps, +1)
-            image = np.array(np.asarray(f)[::-1, :].real)
+            x_all = jnp.asarray(self._x)
+            y_all = jnp.asarray(self._y)
+            shift_conj_all = jnp.asarray(np.conj(self._shift))
+            c_all = jnp.asarray(visibilities.array) * shift_conj_all
 
+            if self.chunk_size is None or self.chunk_size >= K:
+                f = _nufftax.nufft2d1(x_all, y_all, c_all, n_modes, self.eps, +1)
+                image = jnp.real(f)[::-1, :]
+                return Array2D(values=image, mask=self.real_space_mask)
+
+            cs = int(self.chunk_size)
+            n_chunks = (K + cs - 1) // cs
+            K_pad = n_chunks * cs
+            x_pad = jnp.pad(x_all, (0, K_pad - K))
+            y_pad = jnp.pad(y_all, (0, K_pad - K))
+            c_pad = jnp.pad(c_all, (0, K_pad - K))
+            eps = self.eps
+            idx = jnp.arange(cs)
+
+            def body(f_accum, i):
+                k0 = i * cs
+                x_s = jax.lax.dynamic_slice(x_pad, (k0,), (cs,))
+                y_s = jax.lax.dynamic_slice(y_pad, (k0,), (cs,))
+                c_s = jax.lax.dynamic_slice(c_pad, (k0,), (cs,))
+                valid = (idx + k0) < K
+                c_s = jnp.where(valid, c_s, jnp.complex128(0))
+                f_chunk = _nufftax.nufft2d1(x_s, y_s, c_s, n_modes, eps, +1)
+                return f_accum + f_chunk, None
+
+            f_init = jnp.zeros((n_y, n_x), dtype=jnp.complex128)
+            f_total, _ = jax.lax.scan(body, f_init, jnp.arange(n_chunks))
+            image = jnp.real(f_total)[::-1, :]
+            return Array2D(values=image, mask=self.real_space_mask)
+
+        c_all = visibilities.array * np.conj(self._shift)
+
+        if self.chunk_size is None or self.chunk_size >= K:
+            f = _nufftax.nufft2d1(self._x, self._y, c_all, n_modes, self.eps, +1)
+            image = np.array(np.asarray(f)[::-1, :].real)
+            return Array2D(values=image, mask=self.real_space_mask)
+
+        cs = int(self.chunk_size)
+        f_total = np.zeros((n_y, n_x), dtype=np.complex128)
+        for k0 in range(0, K, cs):
+            k1 = min(k0 + cs, K)
+            f_chunk = _nufftax.nufft2d1(
+                self._x[k0:k1], self._y[k0:k1], c_all[k0:k1], n_modes, self.eps, +1
+            )
+            f_total = f_total + np.asarray(f_chunk)
+        image = np.array(f_total[::-1, :].real)
         return Array2D(values=image, mask=self.real_space_mask)
 
     def transform_mapping_matrix(self, mapping_matrix, xp=np):
