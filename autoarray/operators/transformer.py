@@ -646,11 +646,11 @@ class TransformerNUFFT:
         deconvolution). The structure of the dirty image is the same, and
         the values match `TransformerDFT.image_from` exactly.
 
-        **Scale-sensitive callers**: `Interferometer.apply_sparse_operator`
-        consumes the dirty-image scale together with a precision operator; it
-        is currently incompatible with this class and raises
-        `NotImplementedError`. Use `TransformerDFT` or
-        `TransformerNUFFTPyNUFFT` if you need the sparse-operator path.
+        `use_adjoint_scaling` is accepted for API compatibility with the
+        legacy class and is otherwise unused (the nufftax adjoint is already
+        the mathematical adjoint; no extra normalisation is needed). This
+        matches `TransformerDFT.image_from` semantics so the sparse-operator
+        path is scale-consistent across both transformers.
         """
         n_y, n_x = self.real_space_mask.shape_native
         n_modes = (n_x, n_y)  # nufftax wants (n1, n2) = (N_x, N_y)
@@ -668,9 +668,6 @@ class TransformerNUFFT:
             c = visibilities.array * np.conj(self._shift)
             f = _nufftax.nufft2d1(self._x, self._y, c, n_modes, self.eps, +1)
             image = np.array(np.asarray(f)[::-1, :].real)
-
-        if use_adjoint_scaling:
-            image = image * self.adjoint_scaling
 
         return Array2D(values=image, mask=self.real_space_mask)
 
