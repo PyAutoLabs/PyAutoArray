@@ -201,6 +201,38 @@ def test__transformer__nufft_class__returns_transformer_nufft_instance(
     assert type(interferometer_7.transformer) == transformer.TransformerNUFFT
 
 
+def test__apply_sparse_operator__dft_and_nufft_dirty_image_match(mask_2d_7x7):
+    n_visibilities = 5
+    rng = np.random.default_rng(seed=0)
+    data = aa.Visibilities(
+        visibilities=rng.normal(size=(n_visibilities, 2)).astype(np.float64)
+    )
+    noise_map = aa.VisibilitiesNoiseMap(
+        visibilities=np.ones((n_visibilities, 2), dtype=np.float64)
+    )
+    uv_wavelengths = rng.normal(size=(n_visibilities, 2)).astype(np.float64)
+
+    dataset_dft = aa.Interferometer(
+        data=data,
+        noise_map=noise_map,
+        uv_wavelengths=uv_wavelengths,
+        real_space_mask=mask_2d_7x7,
+        transformer_class=transformer.TransformerDFT,
+    ).apply_sparse_operator(use_jax=False)
+
+    dataset_nufft = aa.Interferometer(
+        data=data,
+        noise_map=noise_map,
+        uv_wavelengths=uv_wavelengths,
+        real_space_mask=mask_2d_7x7,
+        transformer_class=transformer.TransformerNUFFT,
+    ).apply_sparse_operator(use_jax=False)
+
+    assert dataset_nufft.sparse_operator.dirty_image == pytest.approx(
+        dataset_dft.sparse_operator.dirty_image, 1.0e-4
+    )
+
+
 def test__different_interferometer_without_mock_objects__customize_constructor_inputs(
     mask_2d_7x7,
 ):

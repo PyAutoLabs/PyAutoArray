@@ -125,3 +125,75 @@ def test__curvature_matrix__interferometer_sparse_operator__delaunay__identical_
     assert inversion_sparse.curvature_matrix == pytest.approx(
         inversion_mapping.curvature_matrix, 1.0e-4
     )
+
+
+def test__curvature_matrix__interferometer_sparse_operator__delaunay__dft_and_nufft_match():
+    mask = aa.Mask2D(
+        mask=[
+            [True, True, True, True, True, True, True],
+            [True, True, True, True, True, True, True],
+            [True, True, True, False, True, True, True],
+            [True, True, False, False, False, True, True],
+            [True, True, True, False, True, True, True],
+            [True, True, True, True, True, True, True],
+            [True, True, True, True, True, True, True],
+        ],
+        pixel_scales=2.0,
+    )
+
+    grid = aa.Grid2D.from_mask(mask=mask, over_sample_size=1)
+
+    mesh = aa.mesh.Delaunay(pixels=9)
+    image_mesh = aa.image_mesh.Overlay(shape=(3, 3))
+    image_mesh_grid = image_mesh.image_plane_mesh_grid_from(
+        mask=mask, adapt_data=None
+    )
+
+    interpolator = mesh.interpolator_from(
+        source_plane_data_grid=grid,
+        source_plane_mesh_grid=image_mesh_grid,
+    )
+    mapper = aa.Mapper(interpolator=interpolator)
+
+    n_visibilities = 5
+    rng = np.random.default_rng(seed=0)
+    data = aa.Visibilities(
+        visibilities=rng.normal(size=(n_visibilities, 2)).astype(np.float64)
+    )
+    noise_map = aa.VisibilitiesNoiseMap(
+        visibilities=np.ones((n_visibilities, 2), dtype=np.float64)
+    )
+    uv_wavelengths = rng.normal(size=(n_visibilities, 2)).astype(np.float64)
+
+    dataset_dft = aa.Interferometer(
+        data=data,
+        noise_map=noise_map,
+        uv_wavelengths=uv_wavelengths,
+        real_space_mask=mask,
+        transformer_class=aa.TransformerDFT,
+    ).apply_sparse_operator(use_jax=False)
+
+    dataset_nufft = aa.Interferometer(
+        data=data,
+        noise_map=noise_map,
+        uv_wavelengths=uv_wavelengths,
+        real_space_mask=mask,
+        transformer_class=aa.TransformerNUFFT,
+    ).apply_sparse_operator(use_jax=False)
+
+    inversion_dft = aa.Inversion(
+        dataset=dataset_dft,
+        linear_obj_list=[mapper],
+    )
+
+    inversion_nufft = aa.Inversion(
+        dataset=dataset_nufft,
+        linear_obj_list=[mapper],
+    )
+
+    assert inversion_nufft.curvature_matrix == pytest.approx(
+        inversion_dft.curvature_matrix, 1.0e-4
+    )
+    assert inversion_nufft.data_vector == pytest.approx(
+        inversion_dft.data_vector, 1.0e-4
+    )
