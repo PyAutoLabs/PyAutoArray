@@ -41,6 +41,23 @@ class AbstractMaker:
             Any keyword arguments that are passed to the function when it is evaluated.
         """
 
+        # JAX-pairing-rule guard: if the caller declared xp=np but handed in a
+        # jnp-backed grid, that's almost always a user error inside an
+        # ``@jax.jit`` body — they forgot to pass ``xp=jnp`` to the library
+        # method. The function body would silently host-transfer the tracer
+        # through ``__array__()`` (slow) or fail at the JIT boundary because
+        # the ``if xp is np:`` guard would wrap the result in an ``aa.Array2D``.
+        # Raise here so the user discovers the pairing rule the first time
+        # they break it. See ``admin_jammy/notes/jax_interface.md`` §4.8.
+        if xp is np and getattr(grid, "use_jax", False):
+            raise ValueError(
+                f"Called {getattr(func, '__qualname__', repr(func))} with "
+                f"xp=np but the input grid is JAX-backed (grid.use_jax=True). "
+                f"Inside @jax.jit, pass xp=jnp explicitly to the library call. "
+                f"See the autolens_workspace `scripts/guides/lens_calc.py` "
+                f"`__JAX__` section (Phase 5d) for the JIT-it-yourself pattern."
+            )
+
         self.func = func
         self.obj = obj
         self.grid = grid
