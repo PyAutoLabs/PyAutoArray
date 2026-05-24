@@ -26,6 +26,7 @@ class SimulatorImaging:
         include_poisson_noise_in_noise_map: bool = True,
         noise_if_add_noise_false: float = 0.1,
         noise_seed: int = -1,
+        use_jax: bool = False,
     ):
         """
         Simulates observations of `Imaging` data, including simulating the image, noise, blurring due to the telescope
@@ -88,6 +89,20 @@ class SimulatorImaging:
             the value of noise assigned to every pixel in the noise-map.
         noise_seed
             The random seed used to add random noise, where -1 corresponds to a random seed every run.
+        use_jax
+            If ``True``, ``via_image_from`` defaults ``xp`` to ``jax.numpy`` and the
+            simulator's internal noise generation routes through ``jax.random``.
+            The returned ``Imaging`` carries ``jax.Array`` data — useful for
+            JAX-eager batched simulation (parameter sweeps, mock-data studies).
+            Defaults to ``False``.
+
+            Note: ``@jax.jit`` wrapping of ``via_tracer_from`` /
+            ``via_galaxies_from`` is currently blocked by an unrelated
+            pre-existing limitation — ``Array2D.native`` is not jit-traceable
+            because it goes through indexed assignment in
+            ``array_2d_via_indexes_from``. A separate PyAutoArray task is
+            needed to refactor the slim/native reshape to be jit-friendly.
+            Eager JAX usage works today.
         """
 
         if psf is not None:
@@ -105,12 +120,24 @@ class SimulatorImaging:
         self.include_poisson_noise_in_noise_map = include_poisson_noise_in_noise_map
         self.noise_if_add_noise_false = noise_if_add_noise_false
         self.noise_seed = noise_seed
+        self.use_jax = use_jax
+
+    @property
+    def _xp(self):
+        """The array module the simulator runs against by default. ``jnp`` when
+        ``use_jax=True``, ``np`` otherwise. ``via_image_from`` falls back to this
+        when the caller does not pass ``xp=`` explicitly."""
+        if self.use_jax:
+            import jax.numpy as jnp
+
+            return jnp
+        return np
 
     def via_image_from(
         self,
         image: Array2D,
         over_sample_size: Optional[Union[int, np.ndarray]] = None,
-        xp=np,
+        xp=None,
     ) -> Imaging:
         """
         Simulate an `Imaging` dataset from an input image.
@@ -127,13 +154,17 @@ class SimulatorImaging:
             If provided, the returned dataset has its over-sampling updated via `apply_over_sampling`.
             Should be an `Array2D` of integer sub-grid sizes with the same shape as the image.
         xp
-            The array module to use for PSF convolution (default `np` for NumPy, or `jnp` for JAX).
+            The array module to use for PSF convolution. When ``None`` (the default),
+            falls back to ``self._xp`` — which is ``jnp`` if the simulator was constructed
+            with ``use_jax=True`` and ``np`` otherwise. Pass explicitly to override.
 
         Returns
         -------
         Imaging
             The simulated imaging dataset with PSF convolution, noise and background sky applied.
         """
+        if xp is None:
+            xp = self._xp
 
         exposure_time_map = Array2D.full(
             fill_value=self.exposure_time,
@@ -164,6 +195,7 @@ class SimulatorImaging:
             data_eps=image,
             exposure_time_map=exposure_time_map,
             seed=self.noise_seed,
+            xp=xp,
         )
 
         if self.add_poisson_noise_to_data:
@@ -181,7 +213,11 @@ class SimulatorImaging:
                 pixel_scales=image.pixel_scales,
             )
 
-        if np.isnan(noise_map.array).any():
+        # NaN-noise guard is a NumPy-side runtime check (Python `if` on a JAX
+        # tracer triggers TracerBoolConversionError). Under JAX it is the user's
+        # responsibility to confirm exposure_time / background_sky_level are
+        # large enough — JAX silently propagates NaN through the trace.
+        if xp is np and np.isnan(noise_map.array).any():
             raise exc.DatasetException(
                 "The noise-map has NaN values in it. This suggests your exposure time and / or"
                 "background sky levels are too low, creating signal counts at or close to 0.0."
@@ -196,7 +232,16 @@ class SimulatorImaging:
             origin=image.origin,
         )
 
-        image = Array2D(values=image.native, mask=mask)
+        # Re-wrap the image against the all-false mask. Use ``.array`` rather
+        # than ``.native`` on the JAX path: ``.native`` routes through
+        # ``array_2d_via_indexes_from`` which is not jit-safe (it builds a
+        # native-shape array by Python-iterating an index tuple). ``.array``
+        # returns the raw backing array which the ``Array2D`` constructor
+        # accepts in either slim or native shape.
+        if xp is np:
+            image = Array2D(values=image.native, mask=mask)
+        else:
+            image = Array2D(values=image.array, mask=mask)
 
         dataset = Imaging(
             data=image,
