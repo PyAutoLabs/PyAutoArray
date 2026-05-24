@@ -17,6 +17,7 @@ class SimulatorInterferometer:
         noise_sigma=0.1,
         noise_if_add_noise_false=0.1,
         noise_seed=-1,
+        use_jax: bool = False,
     ):
         """
         Simulates observations of `Interferometer` data, including transforming a real-space image to
@@ -59,6 +60,14 @@ class SimulatorInterferometer:
         noise_seed
             The random seed used for noise generation. A value of -1 uses a different random seed
             on every run, producing different noise realisations each time.
+        use_jax
+            If ``True``, ``via_image_from`` defaults ``xp`` to ``jax.numpy`` and
+            the simulator's internal complex-Gaussian noise generation routes
+            through ``jax.random``. The returned ``Interferometer`` carries
+            ``jax.Array`` visibilities. Mirror of ``SimulatorImaging.use_jax``;
+            same caveat applies — ``@jax.jit`` wrapping is currently blocked
+            by autoarray's pre-existing ``.native`` reshape limitation in the
+            transformer / dataset construction path. Eager JAX usage works.
         """
 
         self.uv_wavelengths = uv_wavelengths
@@ -67,8 +76,20 @@ class SimulatorInterferometer:
         self.noise_sigma = noise_sigma
         self.noise_if_add_noise_false = noise_if_add_noise_false
         self.noise_seed = noise_seed
+        self.use_jax = use_jax
 
-    def via_image_from(self, image):
+    @property
+    def _xp(self):
+        """The array module the simulator runs against by default. ``jnp`` when
+        ``use_jax=True``, ``np`` otherwise. ``via_image_from`` falls back to
+        this when the caller does not pass ``xp=`` explicitly."""
+        if self.use_jax:
+            import jax.numpy as jnp
+
+            return jnp
+        return np
+
+    def via_image_from(self, image, xp=None):
         """
         Simulate an `Interferometer` dataset from an input real-space image.
 
@@ -83,6 +104,10 @@ class SimulatorInterferometer:
             The 2D real-space image from which the interferometer dataset is simulated (e.g. the
             surface brightness of a galaxy or lens system). Must be an `Array2D` with an associated
             mask that defines the real-space region used for the Fourier transform.
+        xp
+            The array module. When ``None`` (the default), falls back to ``self._xp`` —
+            ``jnp`` if the simulator was constructed with ``use_jax=True``, ``np``
+            otherwise. Pass explicitly to override.
 
         Returns
         -------
@@ -90,6 +115,8 @@ class SimulatorInterferometer:
             The simulated interferometer dataset containing visibilities, noise map, uv_wavelengths
             and the real-space mask derived from the input image.
         """
+        if xp is None:
+            xp = self._xp
 
         transformer = self.transformer_class(
             uv_wavelengths=self.uv_wavelengths, real_space_mask=image.mask
@@ -99,7 +126,7 @@ class SimulatorInterferometer:
 
         if self.noise_sigma is not None:
             visibilities = preprocess.data_with_complex_gaussian_noise_added(
-                data=visibilities, sigma=self.noise_sigma, seed=self.noise_seed
+                data=visibilities, sigma=self.noise_sigma, seed=self.noise_seed, xp=xp
             )
             noise_map = VisibilitiesNoiseMap.full(
                 fill_value=self.noise_sigma, shape_slim=(visibilities.shape[0],)
@@ -110,7 +137,10 @@ class SimulatorInterferometer:
                 shape_slim=(visibilities.shape[0],),
             )
 
-        if np.isnan(noise_map).any():
+        # NaN-noise guard is NumPy-side only — Python `if <tracer>:` triggers
+        # TracerBoolConversionError under JAX. JAX users must confirm
+        # noise_sigma is positive themselves.
+        if xp is np and np.isnan(noise_map).any():
             raise exc.DatasetException(
                 "The noise-map has NaN values in it. This suggests your exposure time and / or"
                 "background sky levels are too low, creating signal counts at or close to 0.0."

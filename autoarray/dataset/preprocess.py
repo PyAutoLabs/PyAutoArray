@@ -525,7 +525,7 @@ def data_eps_with_poisson_noise_added(data_eps, exposure_time_map, seed=-1, xp=n
     )
 
 
-def gaussian_noise_via_shape_and_sigma_from(shape, sigma, seed=-1):
+def gaussian_noise_via_shape_and_sigma_from(shape, sigma, seed=-1, xp=np):
     """Generate a two-dimensional read noises-map, generating values from a Gaussian distribution with mean 0.0.
 
     Params
@@ -536,24 +536,35 @@ def gaussian_noise_via_shape_and_sigma_from(shape, sigma, seed=-1):
         Standard deviation of the 1D Gaussian that each noises value is drawn from
     seed
         The seed of the random number generator, used for the random noises maps.
+    xp
+        The array module (``numpy`` or ``jax.numpy``). On the JAX path the seed
+        is used to construct a ``jax.random.PRNGKey``; ``seed=-1`` (random per
+        call) falls back to a time-derived 32-bit integer key.
     """
-    if seed == -1:
-        # Use one seed, so all regions have identical column non-uniformity.
-        seed = np.random.randint(0, int(1e9))
-    np.random.seed(seed)
-    read_noise_map = np.random.normal(loc=0.0, scale=sigma, size=shape)
-    return read_noise_map
+    if xp is np:
+        if seed == -1:
+            # Use one seed, so all regions have identical column non-uniformity.
+            seed = np.random.randint(0, int(1e9))
+        np.random.seed(seed)
+        read_noise_map = np.random.normal(loc=0.0, scale=sigma, size=shape)
+        return read_noise_map
+
+    import jax.random
+
+    effective_seed = seed if seed != -1 else int(time.time() * 1e6) & 0xFFFFFFFF
+    key = jax.random.PRNGKey(effective_seed)
+    return sigma * jax.random.normal(key, shape)
 
 
-def data_with_gaussian_noise_added(data, sigma, seed=-1):
+def data_with_gaussian_noise_added(data, sigma, seed=-1, xp=np):
     return data + gaussian_noise_via_shape_and_sigma_from(
-        shape=data.shape, sigma=sigma, seed=seed
+        shape=data.shape, sigma=sigma, seed=seed, xp=xp
     )
 
 
-def data_with_complex_gaussian_noise_added(data, sigma, seed=-1):
+def data_with_complex_gaussian_noise_added(data, sigma, seed=-1, xp=np):
     gaussian_noise = gaussian_noise_via_shape_and_sigma_from(
-        shape=(data.shape[0], 2), sigma=sigma, seed=seed
+        shape=(data.shape[0], 2), sigma=sigma, seed=seed, xp=xp
     )
 
     return data + gaussian_noise[:, 0] + 1.0j * gaussian_noise[:, 1]
