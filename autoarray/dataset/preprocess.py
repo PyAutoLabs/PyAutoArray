@@ -1,3 +1,5 @@
+import time
+
 import numpy as np
 
 from autoarray import exc
@@ -450,7 +452,7 @@ def setup_random_seed(seed):
     np.random.seed(seed)
 
 
-def poisson_noise_via_data_eps_from(data_eps, exposure_time_map, seed=-1):
+def poisson_noise_via_data_eps_from(data_eps, exposure_time_map, seed=-1, xp=np):
     """
     Generate a two-dimensional poisson noise_maps-mappers from an image.
 
@@ -464,23 +466,38 @@ def poisson_noise_via_data_eps_from(data_eps, exposure_time_map, seed=-1):
         2D array of the exposure time in each pixel used to convert to / from counts and electrons per second.
     seed
         The seed of the random number generator, used for the random noise_maps maps.
+    xp
+        The array module (``numpy`` or ``jax.numpy``). On the JAX path the seed is
+        used to construct a ``jax.random.PRNGKey``; ``seed=-1`` (random per call)
+        falls back to a time-derived 32-bit integer key so the JAX draw is fresh
+        each invocation just like the NumPy path.
 
     Returns
     -------
-    poisson_noise_map: np.ndarray
-        An array describing simulated poisson noise_maps
+    poisson_noise_map
+        An array describing simulated poisson noise_maps. NumPy-backed on the NumPy
+        path, ``jax.Array``-backed on the JAX path.
     """
-    setup_random_seed(seed)
-
     image_counts = data_eps.array * exposure_time_map.array
-    noisy_eps_array = (
-        np.random.poisson(image_counts, data_eps.shape) / exposure_time_map.array
-    )
+
+    if xp is np:
+        setup_random_seed(seed)
+        noisy_eps_array = (
+            np.random.poisson(image_counts, data_eps.shape) / exposure_time_map.array
+        )
+    else:
+        import jax.random
+
+        effective_seed = seed if seed != -1 else int(time.time() * 1e6) & 0xFFFFFFFF
+        key = jax.random.PRNGKey(effective_seed)
+        noisy_eps_array = (
+            jax.random.poisson(key, image_counts) / exposure_time_map.array
+        )
 
     return data_eps.with_new_array(noisy_eps_array) - data_eps
 
 
-def data_eps_with_poisson_noise_added(data_eps, exposure_time_map, seed=-1):
+def data_eps_with_poisson_noise_added(data_eps, exposure_time_map, seed=-1, xp=np):
     """
     Generate a two-dimensional poisson noise_maps-mappers from an image.
 
@@ -494,14 +511,17 @@ def data_eps_with_poisson_noise_added(data_eps, exposure_time_map, seed=-1):
         2D array of the exposure time in each pixel used to convert to / from counts and electrons per second.
     seed
         The seed of the random number generator, used for the random noise_maps maps.
+    xp
+        The array module (``numpy`` or ``jax.numpy``). Threaded through to
+        ``poisson_noise_via_data_eps_from`` to pick the matching RNG.
 
     Returns
     -------
-    poisson_noise_map: np.ndarray
-        An array describing simulated poisson noise_maps
+    poisson_noise_map
+        An array describing simulated poisson noise_maps.
     """
     return data_eps + poisson_noise_via_data_eps_from(
-        data_eps=data_eps, exposure_time_map=exposure_time_map, seed=seed
+        data_eps=data_eps, exposure_time_map=exposure_time_map, seed=seed, xp=xp
     )
 
 
