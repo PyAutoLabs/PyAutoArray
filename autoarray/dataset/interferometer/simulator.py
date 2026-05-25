@@ -64,10 +64,7 @@ class SimulatorInterferometer:
             If ``True``, ``via_image_from`` defaults ``xp`` to ``jax.numpy`` and
             the simulator's internal complex-Gaussian noise generation routes
             through ``jax.random``. The returned ``Interferometer`` carries
-            ``jax.Array`` visibilities. Mirror of ``SimulatorImaging.use_jax``;
-            same caveat applies — ``@jax.jit`` wrapping is currently blocked
-            by autoarray's pre-existing ``.native`` reshape limitation in the
-            transformer / dataset construction path. Eager JAX usage works.
+            ``jax.Array`` visibilities. Mirror of ``SimulatorImaging.use_jax``.
         """
 
         self.uv_wavelengths = uv_wavelengths
