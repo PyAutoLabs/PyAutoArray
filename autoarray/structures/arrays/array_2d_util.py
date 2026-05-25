@@ -557,7 +557,10 @@ def array_2d_via_indexes_from(
     array = xp.zeros(shape, dtype=array_2d_slim.dtype)
 
     if xp.__name__.startswith("jax"):
-        array = array.at[tuple(native_index_for_slim_index_2d.T)].set(array_2d_slim)
+        array = array.at[
+            native_index_for_slim_index_2d[:, 0],
+            native_index_for_slim_index_2d[:, 1],
+        ].set(array_2d_slim)
     else:
         array[tuple(native_index_for_slim_index_2d.T)] = array_2d_slim
 

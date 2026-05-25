@@ -95,14 +95,6 @@ class SimulatorImaging:
             The returned ``Imaging`` carries ``jax.Array`` data — useful for
             JAX-eager batched simulation (parameter sweeps, mock-data studies).
             Defaults to ``False``.
-
-            Note: ``@jax.jit`` wrapping of ``via_tracer_from`` /
-            ``via_galaxies_from`` is currently blocked by an unrelated
-            pre-existing limitation — ``Array2D.native`` is not jit-traceable
-            because it goes through indexed assignment in
-            ``array_2d_via_indexes_from``. A separate PyAutoArray task is
-            needed to refactor the slim/native reshape to be jit-friendly.
-            Eager JAX usage works today.
         """
 
         if psf is not None:
@@ -232,16 +224,7 @@ class SimulatorImaging:
             origin=image.origin,
         )
 
-        # Re-wrap the image against the all-false mask. Use ``.array`` rather
-        # than ``.native`` on the JAX path: ``.native`` routes through
-        # ``array_2d_via_indexes_from`` which is not jit-safe (it builds a
-        # native-shape array by Python-iterating an index tuple). ``.array``
-        # returns the raw backing array which the ``Array2D`` constructor
-        # accepts in either slim or native shape.
-        if xp is np:
-            image = Array2D(values=image.native, mask=mask)
-        else:
-            image = Array2D(values=image.array, mask=mask)
+        image = Array2D(values=image.native, mask=mask)
 
         dataset = Imaging(
             data=image,
