@@ -1,3 +1,4 @@
+import functools
 import warnings
 from abc import ABC
 from abc import abstractmethod
@@ -36,7 +37,7 @@ class AbstractFit(ABC):
         Overwrite this method so it returns the model-data which is fitted to the input data.
         """
 
-    @property
+    @functools.cached_property
     def signal_to_noise_map(self) -> ty.DataLike:
         """
         The signal-to-noise_map of the dataset and noise-map which are fitted.
@@ -47,7 +48,7 @@ class AbstractFit(ABC):
         signal_to_noise_map[signal_to_noise_map < 0] = 0
         return signal_to_noise_map
 
-    @property
+    @functools.cached_property
     def residual_map(self) -> ty.DataLike:
         """
         Returns the residual-map between the masked dataset and model data, where:
@@ -56,7 +57,7 @@ class AbstractFit(ABC):
         """
         return fit_util.residual_map_from(data=self.data, model_data=self.model_data)
 
-    @property
+    @functools.cached_property
     def normalized_residual_map(self) -> ty.DataLike:
         """
         Returns the normalized residual-map between the masked dataset and model data, where:
@@ -67,7 +68,7 @@ class AbstractFit(ABC):
             residual_map=self.residual_map, noise_map=self.noise_map
         )
 
-    @property
+    @functools.cached_property
     def chi_squared_map(self) -> ty.DataLike:
         """
         Returns the chi-squared-map between the residual-map and noise-map, where:
@@ -78,7 +79,7 @@ class AbstractFit(ABC):
             residual_map=self.residual_map, noise_map=self.noise_map
         )
 
-    @property
+    @functools.cached_property
     def chi_squared(self) -> float:
         """
         Returns the chi-squared terms of the model data's fit to an dataset, by summing the chi-squared-map.
@@ -87,7 +88,7 @@ class AbstractFit(ABC):
             chi_squared_map=self.chi_squared_map.array, xp=self._xp
         )
 
-    @property
+    @functools.cached_property
     def noise_normalization(self) -> float:
         """
         Returns the noise-map normalization term of the noise-map, summing the noise_map value in every pixel as:
@@ -98,7 +99,7 @@ class AbstractFit(ABC):
             noise_map=self.noise_map.array, xp=self._xp
         )
 
-    @property
+    @functools.cached_property
     def log_likelihood(self) -> float:
         """
         Returns the log likelihood of each model data point's fit to the dataset, where:
@@ -182,7 +183,7 @@ class FitDataset(AbstractFit):
         """
         return self.dataset.mask
 
-    @property
+    @functools.cached_property
     def grids(self) -> GridsInterface:
         """
         The grids of (y,x) coordinates associated with the dataset, adjusted by any `grid_offset` and
@@ -224,7 +225,7 @@ class FitDataset(AbstractFit):
         """
         return self.dataset.noise_map
 
-    @property
+    @functools.cached_property
     def residual_map(self) -> ty.DataLike:
         """
         Returns the residual-map between the masked dataset and model data, where:
@@ -238,7 +239,7 @@ class FitDataset(AbstractFit):
             )
         return super().residual_map
 
-    @property
+    @functools.cached_property
     def normalized_residual_map(self) -> ty.DataLike:
         """
         Returns the normalized residual-map between the masked dataset and model data, where:
@@ -254,7 +255,7 @@ class FitDataset(AbstractFit):
             )
         return super().normalized_residual_map
 
-    @property
+    @functools.cached_property
     def chi_squared_map(self) -> ty.DataLike:
         """
         Returns the chi-squared-map between the residual-map and noise-map, where:
@@ -270,7 +271,7 @@ class FitDataset(AbstractFit):
             )
         return super().chi_squared_map
 
-    @property
+    @functools.cached_property
     def chi_squared(self) -> float:
         """
         Returns the chi-squared terms of the model data's fit to an dataset, by summing the chi-squared-map.
@@ -291,7 +292,7 @@ class FitDataset(AbstractFit):
             )
         return super().chi_squared
 
-    @property
+    @functools.cached_property
     def noise_normalization(self) -> float:
         """
         Returns the noise-map normalization term of the noise-map, summing the noise_map value in every pixel as:
@@ -304,7 +305,7 @@ class FitDataset(AbstractFit):
             )
         return super().noise_normalization
 
-    @property
+    @functools.cached_property
     def log_likelihood_with_regularization(self) -> float:
         """
         Returns the log likelihood of an inversion's fit to the dataset, including a regularization term which \
@@ -319,7 +320,7 @@ class FitDataset(AbstractFit):
                 noise_normalization=self.noise_normalization,
             )
 
-    @property
+    @functools.cached_property
     def log_evidence(self) -> float:
         """
         Returns the log Bayesian evidence of the inversion's fit to a dataset, which extends the log likelihood by
@@ -348,7 +349,7 @@ class FitDataset(AbstractFit):
                 noise_normalization=self.noise_normalization,
             )
 
-    @property
+    @functools.cached_property
     def figure_of_merit(self) -> float:
         """
         The overall goodness-of-fit of the model to the dataset.
@@ -363,7 +364,7 @@ class FitDataset(AbstractFit):
         except AttributeError:
             return self.log_likelihood
 
-    @property
+    @functools.cached_property
     def residual_flux_fraction_map(self) -> ty.DataLike:
         """
         Returns the residual flux fraction map, which shows the fraction of signal in each pixel that is not fitted
@@ -389,7 +390,7 @@ class FitDataset(AbstractFit):
         """
         return None
 
-    @property
+    @functools.cached_property
     def reduced_chi_squared(self) -> float:
         """
         The reduced chi-squared of the model's fit to the dataset, defined as:
