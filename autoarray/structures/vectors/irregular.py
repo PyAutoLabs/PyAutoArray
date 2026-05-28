@@ -55,6 +55,13 @@ class VectorYX2DIrregular(AbstractVectorYX2D):
             self.grid = obj.grid
 
     @property
+    def values(self) -> np.ndarray:
+        """
+        The raw underlying ndarray of (y, x) vector components, with shape [total_vectors, 2].
+        """
+        return self.array
+
+    @property
     def slim(self) -> np.ndarray:
         """
         The vector-field in its 1D representation, an ndarray of shape [total_vectors, 2].

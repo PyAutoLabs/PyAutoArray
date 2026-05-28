@@ -96,3 +96,20 @@ def test__vectors_within_radius():
 
     with pytest.raises(exc.VectorYXException):
         vectors.vectors_within_radius(radius=0.0, centre=(0.0, 0.0))
+
+
+def test__json_round_trip(tmp_path):
+    from autoconf.dictable import output_to_json, from_json
+
+    vectors = aa.VectorYX2DIrregular(
+        values=[(0.1, 0.2), (0.3, 0.4)],
+        grid=[(0.0, 0.0), (1.0, 1.0)],
+    )
+
+    file_path = tmp_path / "vectors.json"
+    output_to_json(obj=vectors, file_path=file_path)
+    loaded = from_json(file_path=file_path)
+
+    assert isinstance(loaded, aa.VectorYX2DIrregular)
+    assert np.allclose(loaded.array, vectors.array)
+    assert np.allclose(loaded.grid.array, vectors.grid.array)
