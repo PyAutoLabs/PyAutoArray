@@ -102,8 +102,14 @@ def register_instance_pytree(cls, no_flatten=()):
     if cls in _pytree_registered_classes:
         return
     from autoconf.jax_wrapper import register_pytree_node
+    from autoconf.tools.decorators import cached_property_names
 
-    no_flatten_set = frozenset(no_flatten)
+    # Extend the caller-supplied no_flatten set with every
+    # ``cached_property``-style descriptor on ``cls`` so derived caches
+    # (e.g. heavy plotting/aggregator @cached_property values) never reach
+    # the pytree leaves and break ``jax.jit``. Mirrors the PyAutoFit-side
+    # defense; see PyAutoFit#1300 for the diagnosed class of bug.
+    no_flatten_set = frozenset(no_flatten) | cached_property_names(cls)
 
     def flatten(instance):
         dyn: list = []
@@ -174,12 +180,19 @@ class AbstractNDArray(ABC):
         """
         Flatten an instance of an autoarray class into a tuple of its attributes (i.e.. a pytree)
         """
+        from autoconf.tools.decorators import cached_property_names
+
+        # Union the class-level ``__no_flatten__`` opt-out with any
+        # ``cached_property`` descriptor names so derived caches don't
+        # surface as pytree leaves. Mirrors the defense in
+        # ``_register_as_pytree`` (PyAutoFit#1300 follow-up).
+        excluded = set(cls.__no_flatten__) | cached_property_names(cls)
         keys, values = zip(
             *sorted(
                 {
                     key: value
                     for key, value in instance.__dict__.items()
-                    if key not in cls.__no_flatten__
+                    if key not in excluded
                 }.items()
             )
         )
