@@ -197,3 +197,87 @@ def test__curvature_matrix__interferometer_sparse_operator__delaunay__dft_and_nu
     assert inversion_nufft.data_vector == pytest.approx(
         inversion_dft.data_vector, 1.0e-4
     )
+
+
+def test__preloads_interferometer__curvature_matrix_returned_directly_and_skips_rebuild():
+    """
+    A `PreloadsInterferometer` injects a pre-computed `curvature_matrix` (`F`) — e.g. the datacube
+    shared-state path where `F` is identical across channels. The sparse interferometer inversion
+    must return it verbatim (skipping the dominant `F = LᵀW̃L` build) while leaving the per-channel
+    `data_vector` unchanged.
+    """
+    mask = aa.Mask2D(
+        mask=[
+            [True, True, True, True, True, True, True],
+            [True, True, True, True, True, True, True],
+            [True, True, True, False, True, True, True],
+            [True, True, False, False, False, True, True],
+            [True, True, True, False, True, True, True],
+            [True, True, True, True, True, True, True],
+            [True, True, True, True, True, True, True],
+        ],
+        pixel_scales=2.0,
+    )
+
+    grid = aa.Grid2D.from_mask(mask=mask, over_sample_size=1)
+
+    mesh = aa.mesh.Delaunay(pixels=9)
+    image_mesh = aa.image_mesh.Overlay(shape=(3, 3))
+    image_mesh_grid = image_mesh.image_plane_mesh_grid_from(mask=mask, adapt_data=None)
+
+    interpolator = mesh.interpolator_from(
+        source_plane_data_grid=grid,
+        source_plane_mesh_grid=image_mesh_grid,
+    )
+    mapper = aa.Mapper(interpolator=interpolator)
+
+    n_visibilities = 5
+    rng = np.random.default_rng(seed=0)
+    data = aa.Visibilities(
+        visibilities=rng.normal(size=(n_visibilities, 2)).astype(np.float64)
+    )
+    noise_map = aa.VisibilitiesNoiseMap(
+        visibilities=np.ones((n_visibilities, 2), dtype=np.float64)
+    )
+    uv_wavelengths = rng.normal(size=(n_visibilities, 2)).astype(np.float64)
+
+    dataset = aa.Interferometer(
+        data=data,
+        noise_map=noise_map,
+        uv_wavelengths=uv_wavelengths,
+        real_space_mask=mask,
+        transformer_class=aa.TransformerDFT,
+    )
+
+    dataset_sparse = dataset.apply_sparse_operator(use_jax=False)
+
+    inversion = aa.Inversion(dataset=dataset_sparse, linear_obj_list=[mapper])
+    curvature_matrix = inversion.curvature_matrix
+
+    # A sentinel injected via the shared `curvature_matrix` is returned verbatim, proving the
+    # expensive `curvature_matrix_diag` build is skipped (else the real F would be returned).
+    sentinel = np.full_like(curvature_matrix, 7.0)
+    inversion_sentinel = aa.Inversion(
+        dataset=dataset_sparse,
+        linear_obj_list=[mapper],
+        preloads=aa.PreloadsInterferometer(curvature_matrix=sentinel),
+    )
+    assert inversion_sentinel.curvature_matrix is sentinel
+
+    # An empty `PreloadsInterferometer` (curvature_matrix left None) falls back to the standard build.
+    inversion_empty_preloads = aa.Inversion(
+        dataset=dataset_sparse,
+        linear_obj_list=[mapper],
+        preloads=aa.PreloadsInterferometer(),
+    )
+    assert inversion_empty_preloads.curvature_matrix == pytest.approx(curvature_matrix)
+
+    # Preloading the real F reproduces the un-preloaded curvature matrix and leaves the per-channel
+    # data_vector (which does not depend on the preloaded F) unchanged.
+    inversion_preloaded = aa.Inversion(
+        dataset=dataset_sparse,
+        linear_obj_list=[mapper],
+        preloads=aa.PreloadsInterferometer(curvature_matrix=curvature_matrix),
+    )
+    assert inversion_preloaded.curvature_matrix is curvature_matrix
+    assert inversion_preloaded.data_vector == pytest.approx(inversion.data_vector)

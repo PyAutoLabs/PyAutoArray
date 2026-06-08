@@ -27,6 +27,7 @@ class AbstractInversion:
         linear_obj_list: List[LinearObj],
         settings: Settings = None,
         xp=np,
+        preloads=None,
     ):
         """
         An `Inversion` reconstructs an input dataset using a list of linear objects (e.g. a list of analytic functions
@@ -65,6 +66,14 @@ class AbstractInversion:
             Settings controlling how an inversion is fitted, for example which linear algebra formalism is used.
         xp
             The array module to use (`numpy` by default; pass `jax.numpy` for JAX support).
+        preloads
+            An optional `AbstractPreloads` (e.g. a `PreloadsInterferometer`) carrying pre-computed
+            inversion quantities (e.g. the `curvature_matrix` `F`). When a quantity is invariant
+            across the evaluations reusing this inversion — a fixed pixelization across a search, or
+            the channel-invariant quantities of a datacube `FactorGraphModel` — it is computed once
+            and preloaded here so the inversion reuses it instead of rebuilding the dominant
+            inversion-setup cost. `None` (the default) leaves the standard behaviour unchanged, as
+            does any individual preload field left `None`.
         """
 
         self.dataset = dataset
@@ -74,6 +83,8 @@ class AbstractInversion:
         self.settings = settings or Settings()
 
         self.use_jax = xp is not np
+
+        self._preloads = preloads
 
     @property
     def _xp(self):

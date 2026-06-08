@@ -20,6 +20,7 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
         linear_obj_list: List[LinearObj],
         settings: Settings = None,
         xp=np,
+        preloads=None,
     ):
         """
         Constructs linear equations (via vectors and matrices) which allow for sets of simultaneous linear equations
@@ -49,6 +50,7 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
             linear_obj_list=linear_obj_list,
             settings=settings,
             xp=xp,
+            preloads=preloads,
         )
 
         self.settings = settings
@@ -83,7 +85,16 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
         If there are multiple linear objects their `operated_mapping_matrix` properties will have already been
         concatenated ensuring their `curvature_matrix` values are solved for simultaneously. This includes all
         diagonal and off-diagonal terms describing the covariances between linear objects.
+
+        If a `preloads.curvature_matrix` was injected (e.g. the datacube shared-state path, where `F` is
+        identical for every channel) it is returned directly, so the dominant `F = LᵀW̃L` build is skipped.
+        This is the only invariant inversion-setup quantity that must be preloaded explicitly: the mapper
+        (and therefore `mapping_matrix` and `regularization_matrix`) is already reused by passing the same
+        `linear_obj_list` to every channel's inversion.
         """
+        if self._preloads is not None and self._preloads.curvature_matrix is not None:
+            return self._preloads.curvature_matrix
+
         return self.curvature_matrix_diag
 
     @property
