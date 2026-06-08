@@ -2,7 +2,7 @@ from autoarray.preloads.abstract import AbstractPreloads
 
 
 class PreloadsInterferometer(AbstractPreloads):
-    def __init__(self, curvature_matrix=None):
+    def __init__(self, curvature_matrix=None, mapper_galaxy_dict=None):
         """
         Preloaded quantities for an interferometer fit / inversion (see `AbstractPreloads`).
 
@@ -20,5 +20,9 @@ class PreloadsInterferometer(AbstractPreloads):
         ----------
         curvature_matrix
             The pre-computed curvature matrix `F = LᵀW̃L`. See `AbstractPreloads`.
+        mapper_galaxy_dict
+            The pre-computed mapper(s) and their source association. See `AbstractPreloads`.
         """
-        super().__init__(curvature_matrix=curvature_matrix)
+        super().__init__(
+            curvature_matrix=curvature_matrix, mapper_galaxy_dict=mapper_galaxy_dict
+        )

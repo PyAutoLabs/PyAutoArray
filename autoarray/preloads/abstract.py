@@ -1,5 +1,5 @@
 class AbstractPreloads:
-    def __init__(self, curvature_matrix=None):
+    def __init__(self, curvature_matrix=None, mapper_galaxy_dict=None):
         """
         Container for quantities that are *preloaded* into a fit / inversion: computed once and
         injected so that repeated evaluations reuse them instead of recomputing them.
@@ -36,5 +36,13 @@ class AbstractPreloads:
         curvature_matrix
             The pre-computed curvature matrix `F = LᵀW̃L` — the dominant inversion-setup cost. When
             provided, the inversion returns it directly instead of rebuilding it.
+        mapper_galaxy_dict
+            The pre-computed mapping between each pixelization mapper and the source it reconstructs.
+            Building a mapper is expensive (e.g. a Delaunay triangulation of the ray-traced source
+            plane); when invariant across evaluations it is built once and reused here, so the
+            `mapper` (and therefore the `mapping_matrix` and `regularization_matrix`) is not rebuilt.
+            Stored opaquely — the consumer (e.g. PyAutoLens's `TracerToInversion`) populates and
+            interprets it.
         """
         self.curvature_matrix = curvature_matrix
+        self.mapper_galaxy_dict = mapper_galaxy_dict
