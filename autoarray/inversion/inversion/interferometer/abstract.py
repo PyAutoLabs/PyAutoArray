@@ -19,6 +19,7 @@ class AbstractInversionInterferometer(AbstractInversion):
         linear_obj_list: List[LinearObj],
         settings: Settings = None,
         xp=np,
+        preloads=None,
     ):
         """
         Constructs linear equations (via vectors and matrices) which allow for sets of simultaneous linear equations
@@ -44,7 +45,11 @@ class AbstractInversionInterferometer(AbstractInversion):
         """
 
         super().__init__(
-            dataset=dataset, linear_obj_list=linear_obj_list, settings=settings, xp=xp
+            dataset=dataset,
+            linear_obj_list=linear_obj_list,
+            settings=settings,
+            xp=xp,
+            preloads=preloads,
         )
 
     @property

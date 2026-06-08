@@ -32,6 +32,7 @@ def inversion_from(
     linear_obj_list: List[LinearObj],
     settings: Settings = None,
     xp=np,
+    preloads=None,
 ):
     """
     Factory which given an input dataset and list of linear objects, creates an `Inversion`.
@@ -70,7 +71,11 @@ def inversion_from(
         )
 
     return inversion_interferometer_from(
-        dataset=dataset, linear_obj_list=linear_obj_list, settings=settings, xp=xp
+        dataset=dataset,
+        linear_obj_list=linear_obj_list,
+        settings=settings,
+        xp=xp,
+        preloads=preloads,
     )
 
 
@@ -152,6 +157,7 @@ def inversion_interferometer_from(
     linear_obj_list: List[LinearObj],
     settings: Settings = None,
     xp=np,
+    preloads=None,
 ):
     """
     Factory which given an input `Interferometer` dataset and list of linear objects, creates
@@ -201,6 +207,7 @@ def inversion_interferometer_from(
             linear_obj_list=linear_obj_list,
             settings=settings,
             xp=xp,
+            preloads=preloads,
         )
 
     return InversionInterferometerMapping(

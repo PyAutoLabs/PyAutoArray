@@ -28,6 +28,8 @@ from .inversion.mesh import image_mesh
 from .inversion import regularization as reg
 from .settings import Settings
 from .inversion.inversion.abstract import AbstractInversion
+from .preloads import AbstractPreloads
+from .preloads import PreloadsInterferometer
 from .inversion.regularization.abstract import AbstractRegularization
 from .inversion.inversion.factory import inversion_from as Inversion
 from .inversion.inversion.dataset_interface import DatasetInterface
