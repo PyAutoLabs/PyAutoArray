@@ -23,6 +23,14 @@ Shared utilities (e.g. `test_mode`, `jax_wrapper`) belong in autoconf.
   **autolens_workspace_test**.
 - **docs/** — Sphinx source; published to ReadTheDocs.
 
+## Architecture
+
+- `autoarray/structures/` — `Array2D`, `Grid2D`, `Grid2DIrregular`, `VectorYX2D`, and the grid decorators.
+- `autoarray/dataset/` — `Imaging` / `Interferometer` dataset containers.
+- `autoarray/inversion/` — pixelizations and linear inversion machinery.
+- `autoarray/operators/` — `Convolver`, over-sampling, and related operators.
+- `test_autoarray/` — test suite.
+
 ## Quick commands
 
 ```bash
