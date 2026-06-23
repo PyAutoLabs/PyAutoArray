@@ -1,0 +1,15 @@
+# PyAutoArray
+
+> PyAutoArray (package `autoarray`) is the foundational data-structure and numerical layer of the PyAuto ecosystem — masks, arrays, (y,x) grids, imaging/interferometer datasets, inversions/pixelizations, and the canonical home of the grid-decorator system and JAX `xp` internals that PyAutoGalaxy and PyAutoLens inherit. This file is a signpost: it points you to the right resource by intent — see where it is used, or work on the library itself.
+
+## Where it's used
+
+- PyAutoArray has no standalone workspace or tutorial series; it provides the data structures the science libraries build on. You meet it in practice through [PyAutoGalaxy](https://github.com/PyAutoLabs/PyAutoGalaxy) and [PyAutoLens](https://github.com/PyAutoLabs/PyAutoLens) (and their workspaces), which consume its arrays, grids and inversions directly.
+
+## Work on it (contributors / coding agents)
+
+- [AGENTS.md](./AGENTS.md): build, tests, architecture, and the JAX / grid-decorator conventions (deep reference in `docs/agents/jax_and_decorators.md`).
+
+## Ecosystem
+
+- Built on PyAutoConf (config); used by PyAutoGalaxy and PyAutoLens, which inherit its grid decorators and JAX `xp` backend.
