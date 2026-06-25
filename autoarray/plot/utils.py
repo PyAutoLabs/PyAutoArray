@@ -905,8 +905,9 @@ def _arcsec_labels(ticks) -> List[str]:
     Values that all end in ``.0`` are stripped of the decimal point before the
     ``"`` suffix is appended, so ``[-1.0, 0.0, 1.0]`` becomes
     ``['-1"', '0"', '1"']``.  By default decimal labels keep the suffix form
-    ``3.8"``.  When ``ticks.symbol_over_decimal`` is true, decimal labels place
-    the symbol over the decimal point, e.g. ``3."8``.
+    ``3.8"``.  When ``ticks.symbol_over_decimal`` is true, labels use the
+    double-prime arcsecond symbol and decimal labels place it over the decimal
+    point, e.g. ``3.″8``.
     """
     labels = [f'{v:g}' for v in ticks]
     if all(label.endswith(".0") for label in labels):
@@ -916,9 +917,9 @@ def _arcsec_labels(ticks) -> List[str]:
         for label in labels:
             if "." in label:
                 int_part, frac_part = label.split(".", 1)
-                symbol_labels.append(f'{int_part}."{frac_part}')
+                symbol_labels.append(f"{int_part}.″{frac_part}")
             else:
-                symbol_labels.append(f'{label}"')
+                symbol_labels.append(f"{label}″")
         return symbol_labels
     return [f'{label}"' for label in labels]
 

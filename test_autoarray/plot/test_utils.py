@@ -17,10 +17,10 @@ def test_arcsec_labels_symbol_over_decimal():
         ticks["symbol_over_decimal"] = True
 
         assert _arcsec_labels([-1.69, 0.13, 1.95]) == [
-            '-1."69',
-            '0."13',
-            '1."95',
+            "-1.″69",
+            "0.″13",
+            "1.″95",
         ]
-        assert _arcsec_labels([3.0]) == ['3"']
+        assert _arcsec_labels([3.0]) == ["3″"]
     finally:
         ticks["symbol_over_decimal"] = original
