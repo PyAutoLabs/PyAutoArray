@@ -864,6 +864,14 @@ def _conf_ticks(key: str, default: float) -> float:
         return default
 
 
+def _conf_ticks_flag(key: str, default: bool) -> bool:
+    try:
+        from autoconf import conf
+        return bool(conf.instance["visualize"]["general"]["ticks"][key])
+    except Exception:
+        return default
+
+
 def _inward_ticks(lo: float, hi: float, factor: float, n: int) -> np.ndarray:
     """Return *n* tick positions pulled inward from the extent edges by *factor*."""
     centre = (lo + hi) / 2.0
@@ -895,11 +903,23 @@ def _arcsec_labels(ticks) -> List[str]:
     """Format tick values as arcsecond coordinate strings.
 
     Values that all end in ``.0`` are stripped of the decimal point before the
-    ``"`` suffix is appended, so ``[-1.0, 0.0, 1.0]`` → ``['-1"', '0"', '1"']``.
+    ``"`` suffix is appended, so ``[-1.0, 0.0, 1.0]`` becomes
+    ``['-1"', '0"', '1"']``.  By default decimal labels keep the suffix form
+    ``3.8"``.  When ``ticks.symbol_over_decimal`` is true, decimal labels place
+    the symbol over the decimal point, e.g. ``3."8``.
     """
     labels = [f'{v:g}' for v in ticks]
     if all(label.endswith(".0") for label in labels):
         labels = [label[:-2] for label in labels]
+    if _conf_ticks_flag("symbol_over_decimal", False):
+        symbol_labels = []
+        for label in labels:
+            if "." in label:
+                int_part, frac_part = label.split(".", 1)
+                symbol_labels.append(f'{int_part}."{frac_part}')
+            else:
+                symbol_labels.append(f'{label}"')
+        return symbol_labels
     return [f'{label}"' for label in labels]
 
 

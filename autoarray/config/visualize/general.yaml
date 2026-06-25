@@ -21,6 +21,7 @@ colormap: autoarray               # Default colormap for 2D plots. Use any matpl
 ticks:
   extent_factor_2d: 0.75  # Fraction of half-extent used for 2D tick positions (< 1.0 pulls ticks inward from edges).
   number_of_ticks_2d: 3   # Number of ticks on each spatial axis of 2D plots.
+  symbol_over_decimal: false  # If true, place the arcsec symbol over the decimal point, e.g. 3."8, instead of after the value, e.g. 3.8".
 contour:
   total_contours: 10       # Number of contour levels drawn over log10 (and explicit linear) plots.
   include_values: true     # Whether to label each contour line with its value.
