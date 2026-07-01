@@ -105,4 +105,4 @@ from autoconf.fitsable import hdu_list_for_output_from
 
 conf.instance.register(__file__)
 
-__version__ = "2026.6.30.644"
+__version__ = "2026.7.1.646"
