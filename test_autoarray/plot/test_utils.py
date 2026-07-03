@@ -27,5 +27,26 @@ def test_arcsec_labels_symbol_over_decimal():
             "1.″95",
         ]
         assert _arcsec_labels([3.0]) == ["3″"]
+
+        # Mixed whole-number and decimal ticks: the whole-number tick gains a
+        # single decimal so it reads as 2.″0 rather than a bare 2″.
+        assert _arcsec_labels([-2.1, -0.044, 2.0]) == [
+            "-2.″1",
+            "-0.″044",
+            "2.″0",
+        ]
+    finally:
+        ticks["symbol_over_decimal"] = original
+
+
+def test_arcsec_labels_mixed_integer_and_decimal_default():
+    ticks = conf.instance["visualize"]["general"]["ticks"]
+    original = ticks.get("symbol_over_decimal", False)
+    try:
+        ticks["symbol_over_decimal"] = False
+
+        # All-integer sets stay integer; a mixed set pads the whole number.
+        assert _arcsec_labels([-1.0, 0.0, 1.0]) == ['-1"', '0"', '1"']
+        assert _arcsec_labels([-2.1, -0.044, 2.0]) == ['-2.1"', '-0.044"', '2.0"']
     finally:
         ticks["symbol_over_decimal"] = original

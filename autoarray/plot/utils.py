@@ -902,16 +902,21 @@ def _round_ticks(values: np.ndarray, sig: int = 2) -> np.ndarray:
 def _arcsec_labels(ticks) -> List[str]:
     """Format tick values as arcsecond coordinate strings.
 
-    Values that all end in ``.0`` are stripped of the decimal point before the
-    ``"`` suffix is appended, so ``[-1.0, 0.0, 1.0]`` becomes
-    ``['-1"', '0"', '1"']``.  By default decimal labels keep the suffix form
-    ``3.8"``.  When ``ticks.symbol_over_decimal`` is true, labels use the
-    double-prime arcsecond symbol and decimal labels place it over the decimal
-    point, e.g. ``3.″8``.
+    Whole-number tick sets render without a decimal point, so
+    ``[-1.0, 0.0, 1.0]`` becomes ``['-1"', '0"', '1"']``.  When whole-number and
+    decimal ticks are mixed, the whole-number ticks gain a single decimal place
+    (e.g. ``2`` -> ``2.0``) so a lone integer tick reads consistently with its
+    neighbours (``2.″0`` rather than ``2″`` beside ``-0.″044``).  By default
+    decimal labels keep the suffix form ``3.8"``.  When
+    ``ticks.symbol_over_decimal`` is true, labels use the double-prime arcsecond
+    symbol and decimal labels place it over the decimal point, e.g. ``3.″8``.
     """
     labels = [f'{v:g}' for v in ticks]
-    if all(label.endswith(".0") for label in labels):
-        labels = [label[:-2] for label in labels]
+    if any("." in label for label in labels):
+        labels = [
+            label if "." in label else f"{float(v):.1f}"
+            for label, v in zip(labels, ticks)
+        ]
     if _conf_ticks_flag("symbol_over_decimal", False):
         symbol_labels = []
         for label in labels:
@@ -948,3 +953,9 @@ def apply_extent(
     ax.set_yticks(yticks)
     ax.set_xticklabels(_arcsec_labels(xticks))
     ax.set_yticklabels(_arcsec_labels(yticks))
+
+    # The y-tick labels are rotated 90 degrees elsewhere; without an explicit
+    # centre alignment a rotated label anchors at its right edge and visually
+    # drops below the tick line. Centre them on the tick.
+    for label in ax.get_yticklabels():
+        label.set_verticalalignment("center")
