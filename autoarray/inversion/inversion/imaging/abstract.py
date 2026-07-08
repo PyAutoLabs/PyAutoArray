@@ -10,6 +10,7 @@ from autoarray.inversion.linear_obj.linear_obj import LinearObj
 from autoarray.settings import Settings
 
 from autoarray.inversion.inversion.imaging import inversion_imaging_util
+from autoarray import exc
 
 
 class AbstractInversionImaging(AbstractInversion):
@@ -73,6 +74,31 @@ class AbstractInversionImaging(AbstractInversion):
     def psf(self):
         return self.dataset.psf
 
+    def _mapping_matrix_for_convolution_from(self, linear_obj) -> np.ndarray:
+        """
+        The mapping matrix a linear object contributes to PSF convolution.
+
+        For a regular PSF this is the image-resolution `mapping_matrix`. For an
+        oversampled PSF (`convolve_over_sample_size > 1`) convolution must happen
+        before the sub-pixel fold, so a `Mapper` contributes its
+        `mapping_matrix_over_sampled`; linear function objects are evaluated at
+        image resolution and cannot be convolved at the fine resolution, so they
+        raise (deferred formalism — see the design approved in #353, phase 2b).
+        """
+        if self.psf.convolve_over_sample_size == 1:
+            return linear_obj.mapping_matrix
+
+        if isinstance(linear_obj, Mapper):
+            return linear_obj.mapping_matrix_over_sampled
+
+        raise exc.InversionException(
+            "Oversampled PSF convolution (convolve_over_sample_size > 1) currently "
+            "supports Mapper linear objects only. Linear function objects (e.g. "
+            "linear light profiles without an operated override) are evaluated at "
+            "image resolution and their fine-resolution convolution is deferred "
+            "future work."
+        )
+
     @property
     def mapping_matrix_list(self) -> List[np.ndarray]:
         """
@@ -104,7 +130,9 @@ class AbstractInversionImaging(AbstractInversion):
         return [
             (
                 self.psf.convolved_mapping_matrix_from(
-                    mapping_matrix=linear_obj.mapping_matrix,
+                    mapping_matrix=self._mapping_matrix_for_convolution_from(
+                        linear_obj
+                    ),
                     mask=self.mask,
                     use_mixed_precision=self.settings.use_mixed_precision,
                     xp=self._xp,
@@ -173,7 +201,9 @@ class AbstractInversionImaging(AbstractInversion):
                 operated_mapping_matrix = linear_func.operated_mapping_matrix_override
             else:
                 operated_mapping_matrix = self.psf.convolved_mapping_matrix_from(
-                    mapping_matrix=linear_func.mapping_matrix,
+                    mapping_matrix=self._mapping_matrix_for_convolution_from(
+                        linear_func
+                    ),
                     mask=self.mask,
                     xp=self._xp,
                 )
@@ -214,6 +244,13 @@ class AbstractInversionImaging(AbstractInversion):
             A matrix of shape [data_pixels, total_fixed_linear_functions] that for each data pixel, maps it to the sum
             of the values of a linear object function convolved with the PSF kernel at the data pixel.
         """
+        if self.psf.convolve_over_sample_size > 1:
+            raise exc.InversionException(
+                "The data_linear_func_matrix preload consumes the PSF kernel at "
+                "image resolution and is incompatible with an oversampled PSF "
+                "(convolve_over_sample_size > 1)."
+            )
+
         linear_func_list = self.cls_list_from(cls=AbstractLinearObjFuncList)
 
         data_linear_func_matrix_dict = {}
@@ -255,7 +292,9 @@ class AbstractInversionImaging(AbstractInversion):
 
         for mapper in self.cls_list_from(cls=Mapper):
             operated_mapping_matrix = self.psf.convolved_mapping_matrix_from(
-                mapping_matrix=mapper.mapping_matrix, mask=self.mask, xp=self._xp
+                mapping_matrix=self._mapping_matrix_for_convolution_from(mapper),
+                mask=self.mask,
+                xp=self._xp,
             )
 
             mapper_operated_mapping_matrix_dict[mapper] = operated_mapping_matrix
