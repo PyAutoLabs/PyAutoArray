@@ -129,6 +129,7 @@ class SimulatorImaging:
         self,
         image: Array2D,
         over_sample_size: Optional[Union[int, np.ndarray]] = None,
+        image_is_convolved: bool = False,
         xp=None,
     ) -> Imaging:
         """
@@ -145,6 +146,9 @@ class SimulatorImaging:
         over_sample_size
             If provided, the returned dataset has its over-sampling updated via `apply_over_sampling`.
             Should be an `Array2D` of integer sub-grid sizes with the same shape as the image.
+        image_is_convolved
+            If True, the input image has already been convolved with the PSF (e.g. at the fine resolution
+            by an oversampled Convolver) and the simulator's own convolution step is skipped.
         xp
             The array module to use for PSF convolution. When ``None`` (the default),
             falls back to ``self._xp`` — which is ``jnp`` if the simulator was constructed
@@ -170,7 +174,9 @@ class SimulatorImaging:
             pixel_scales=image.pixel_scales,
         )
 
-        if self.use_real_space_convolution:
+        if image_is_convolved:
+            pass
+        elif self.use_real_space_convolution:
             image = self.psf.convolved_image_via_real_space_from(
                 image=image,
                 blurring_image=None,
