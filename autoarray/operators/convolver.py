@@ -722,6 +722,7 @@ class Convolver:
         axis_ratio: float = 1.0,
         angle: float = 0.0,
         normalize: bool = False,
+        convolve_over_sample_size: int = 1,
     ) -> "Convolver":
         """
         Setup the Convolver as a 2D symmetric elliptical Gaussian profile, according to the equation:
@@ -746,6 +747,9 @@ class Convolver:
             The rotational angle of the Gaussian's ellipse defined counter clockwise from the positive x-axis.
         normalize
             If True, the Convolver's array values are normalized such that they sum to 1.0.
+        convolve_over_sample_size
+            The over sample size of the PSF (see ``Convolver.__init__``). When above 1 the
+            ``pixel_scales`` input should be the fine resolution (image pixel scale divided by this size).
         """
 
         grid = Grid2D.uniform(shape_native=shape_native, pixel_scales=pixel_scales)
@@ -780,6 +784,7 @@ class Convolver:
         return Convolver(
             kernel=gaussian,
             normalize=normalize,
+            convolve_over_sample_size=convolve_over_sample_size,
         )
 
     @classmethod
