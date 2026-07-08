@@ -125,6 +125,111 @@ def sub_slim_to_fine_slim_from(mask_2d: Mask2D, over_sample_size: int) -> np.nda
     return fine_slim_index_native[rows, cols].reshape(-1)
 
 
+def convolve_bin_segment_ids_from(
+    sub_size: np.ndarray, convolve_over_sample_size: int
+) -> np.ndarray:
+    """
+    Returns the segment ids mapping every over-sampled evaluation sample to its cell on the uniform
+    fine grid used by oversampled PSF convolution.
+
+    Evaluation over sampling and convolution over sampling compose via the k x s coupling: each pixel is
+    evaluated on its own (possibly adaptive) sub-grid of size ``sub_size_i = k_i * s`` and the evaluated
+    values are partially binned down to the uniform ``s x s`` block the oversampled Convolver requires
+    (see ``binned_to_convolve_size_from``).
+
+    Samples are in per-pixel sub-block order (row-major within each pixel's block). Within pixel ``p``'s
+    block, the sample at (row, col) belongs to fine cell ``(row // k_p) * s + (col // k_p)``, and its
+    global segment id is ``p * s**2 +`` that cell.
+
+    Parameters
+    ----------
+    sub_size
+        The per-pixel evaluation sub-grid sizes (slim, one entry per unmasked pixel). Every entry must be
+        divisible by ``convolve_over_sample_size``.
+    convolve_over_sample_size
+        The uniform over sample size ``s`` of the PSF convolution.
+
+    Returns
+    -------
+    An integer array of shape [total evaluation samples] of segment ids into the uniform fine grid
+    (``total_unmasked_pixels * s**2`` segments).
+    """
+    from autoarray import exc
+
+    s = int(convolve_over_sample_size)
+    sub_size = np.asarray(sub_size).astype("int")
+
+    if np.any(sub_size % s != 0):
+        raise exc.GridException(
+            f"Every over_sample_size entry must be divisible by "
+            f"convolve_over_sample_size={s} for oversampled PSF convolution, but "
+            f"sizes {np.unique(sub_size[sub_size % s != 0])} are not."
+        )
+
+    segment_ids = np.empty(int(np.sum(sub_size**2)), dtype="int64")
+
+    offset = 0
+    for p, n in enumerate(sub_size):
+        k = n // s
+        rows, cols = np.divmod(np.arange(n * n), n)
+        segment_ids[offset : offset + n * n] = p * s**2 + (rows // k) * s + (cols // k)
+        offset += n * n
+
+    return segment_ids
+
+
+def binned_to_convolve_size_from(
+    values, sub_size: np.ndarray, convolve_over_sample_size: int, xp=np
+):
+    """
+    Partially bin over-sampled evaluation values down to the uniform resolution required by oversampled
+    PSF convolution (the k x s coupling).
+
+    Each pixel's evaluated block (size ``k_i * s`` per side, per-pixel sub-block order) is reduced to an
+    ``s x s`` block by the mean of each ``k_i x k_i`` group, producing values of length
+    ``total_unmasked_pixels * s**2`` in the per-pixel sub-block order the oversampled Convolver expects.
+    Trailing dimensions (e.g. the source axis of a mapping matrix) are supported.
+
+    When every entry of ``sub_size`` equals ``convolve_over_sample_size`` the input is already at the
+    convolution resolution and is returned unchanged (the existing equal-sizes behaviour, byte-identical).
+
+    Parameters
+    ----------
+    values
+        The evaluated values, one per over-sampled sample in per-pixel sub-block order, with optional
+        trailing dimensions.
+    sub_size
+        The per-pixel evaluation sub-grid sizes (slim). Every entry must be divisible by
+        ``convolve_over_sample_size``.
+    convolve_over_sample_size
+        The uniform over sample size ``s`` of the PSF convolution.
+    """
+    s = int(convolve_over_sample_size)
+    sub_size = np.asarray(sub_size).astype("int")
+
+    if np.all(sub_size == s):
+        return values
+
+    segment_ids = convolve_bin_segment_ids_from(
+        sub_size=sub_size, convolve_over_sample_size=s
+    )
+    n_segments = sub_size.shape[0] * s**2
+
+    counts = np.bincount(segment_ids, minlength=n_segments).astype("float")
+    trailing_shape = values.shape[1:]
+    counts = counts.reshape((n_segments,) + (1,) * len(trailing_shape))
+
+    if xp.__name__.startswith("jax"):
+        import jax
+
+        sums = jax.ops.segment_sum(values, segment_ids, n_segments)
+        return sums / counts
+
+    sums = np.zeros((n_segments,) + trailing_shape)
+    np.add.at(sums, segment_ids, np.asarray(values))
+    return sums / counts
+
+
 def total_sub_pixels_2d_from(sub_size: np.ndarray) -> int:
     """
     Returns the total number of sub-pixels in unmasked pixels in a mask.

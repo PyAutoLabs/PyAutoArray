@@ -28,10 +28,11 @@ def _validate_convolve_over_sample_size(
 ) -> None:
     """
     Validate a `convolve_over_sample_size` input against its matching
-    `over_sample_size`: it must be a plain int >= 1, and when above 1 the matching
-    over sample size must be uniform and equal to it, because the values convolved at
-    the fine resolution must first be evaluated at exactly that resolution (adaptive
-    over sampling makes 2D convolution ill-defined).
+    `over_sample_size`: it must be a plain int >= 1, and when above 1 every entry of
+    the matching over sample size (int or adaptive Array2D) must be divisible by it —
+    the k x s coupling, whereby values evaluated at per-pixel sizes k_i * s are
+    partially binned to the uniform s the convolution requires (see
+    `over_sample_util.binned_to_convolve_size_from`).
     """
     if isinstance(convolve_over_sample_size, bool) or not isinstance(
         convolve_over_sample_size, (int, np.integer)
@@ -51,24 +52,12 @@ def _validate_convolve_over_sample_size(
     if convolve_over_sample_size == 1:
         return
 
-    if isinstance(over_sample_size, (int, np.integer)) and not isinstance(
-        over_sample_size, bool
-    ):
-        if over_sample_size == convolve_over_sample_size:
-            return
+    if not np.all(np.mod(np.array(over_sample_size), convolve_over_sample_size) == 0):
         raise exc.DatasetException(
             f"convolve_over_sample_size_{name}={convolve_over_sample_size} requires "
-            f"over_sample_size_{name} to be equal to it, but "
-            f"{over_sample_size} was input. The values convolved at the fine "
-            f"resolution must be evaluated at that same resolution."
-        )
-
-    if not np.all(np.array(over_sample_size) == convolve_over_sample_size):
-        raise exc.DatasetException(
-            f"convolve_over_sample_size_{name}={convolve_over_sample_size} requires "
-            f"a uniform over_sample_size_{name} equal to it, but a non-uniform or "
-            f"unequal array was input. Adaptive over sampling makes 2D PSF "
-            f"convolution ill-defined."
+            f"every over_sample_size_{name} entry to be divisible by it (the k x s "
+            f"coupling: evaluate at k_i * s per pixel, partially bin to s, convolve), "
+            f"but {over_sample_size} was input."
         )
 
 

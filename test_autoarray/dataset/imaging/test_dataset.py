@@ -428,26 +428,39 @@ def test__convolve_over_sample_size__validation_and_plumbing():
             convolve_over_sample_size_lp=2.0,
         )
 
-    # over_sample_size must equal the convolve size when the latter is above 1.
+    # k x s coupling: every over_sample_size entry must be divisible by the
+    # convolve size — a non-divisible int raises, divisible ints and adaptive
+    # arrays are legal.
     with pytest.raises(aa.exc.DatasetException):
         aa.Imaging(
             data=data,
             noise_map=noise_map,
             psf=psf,
-            over_sample_size_lp=4,
+            over_sample_size_lp=3,
             convolve_over_sample_size_lp=2,
         )
 
-    # Adaptive (non-uniform) over sampling is incompatible with oversampled convolution.
     sub_size_adaptive = np.full(fill_value=2, shape=data.shape_slim)
     sub_size_adaptive[0] = 4
+
+    dataset_adaptive = aa.Imaging(
+        data=data,
+        noise_map=noise_map,
+        psf=psf,
+        over_sample_size_lp=aa.Array2D(values=sub_size_adaptive, mask=data.mask),
+        convolve_over_sample_size_lp=2,
+    )
+    assert dataset_adaptive.convolve_over_sample_size_lp == 2
+
+    sub_size_bad = np.full(fill_value=2, shape=data.shape_slim)
+    sub_size_bad[0] = 3
 
     with pytest.raises(aa.exc.DatasetException):
         aa.Imaging(
             data=data,
             noise_map=noise_map,
             psf=psf,
-            over_sample_size_lp=aa.Array2D(values=sub_size_adaptive, mask=data.mask),
+            over_sample_size_lp=aa.Array2D(values=sub_size_bad, mask=data.mask),
             convolve_over_sample_size_lp=2,
         )
 
