@@ -60,3 +60,31 @@ def test__in_grid_2d__over_sample_uniform__out_ndarray_1d():
 
     assert isinstance(ndarray_1d, aa.Array2D)
     assert (ndarray_1d == ndarray_1d_via_grid).all()
+
+
+def test__in_grid_2d__over_sample_uniform__binned_false_returns_sub_values():
+    mask = aa.Mask2D(
+        mask=[
+            [True, True, True, True],
+            [True, False, False, True],
+            [True, False, False, True],
+            [True, True, True, True],
+        ],
+        pixel_scales=(1.0, 1.0),
+    )
+
+    grid_2d = aa.Grid2D.from_mask(mask=mask, over_sample_size=2)
+
+    obj = aa.m.MockGrid2DLikeObj()
+
+    values_sub = obj.ndarray_1d_from(grid=grid_2d, binned=False)
+
+    assert values_sub.shape[0] == mask.pixels_in_mask * 4
+
+    # Binning the unbinned values by the mean of each sub-block reproduces the
+    # decorator's binned output.
+    binned = obj.ndarray_1d_from(grid=grid_2d)
+
+    assert values_sub.reshape(mask.pixels_in_mask, 4).mean(axis=1) == pytest.approx(
+        np.array(binned), abs=1.0e-14
+    )

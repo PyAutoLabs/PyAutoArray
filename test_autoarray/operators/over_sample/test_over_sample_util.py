@@ -266,3 +266,73 @@ def test__from_adapt():
     )
 
     assert sub_size == pytest.approx([4, 4, 4], 1.0e-4)
+
+
+def test__mask_2d_upscaled_from():
+    mask = aa.Mask2D(
+        mask=[[True, False], [False, True]],
+        pixel_scales=(1.0, 1.0),
+        origin=(1.0, 1.0),
+    )
+
+    mask_fine = util.over_sample.mask_2d_upscaled_from(mask_2d=mask, over_sample_size=2)
+
+    assert mask_fine.shape_native == (4, 4)
+    assert mask_fine.pixel_scales == (0.5, 0.5)
+    assert mask_fine.origin == (1.0, 1.0)
+    assert (
+        np.array(mask_fine)
+        == np.array(
+            [
+                [True, True, False, False],
+                [True, True, False, False],
+                [False, False, True, True],
+                [False, False, True, True],
+            ]
+        )
+    ).all()
+
+
+def test__mask_2d_upscaled_from__size_one_is_identity():
+    mask = aa.Mask2D(mask=[[True, False], [False, True]], pixel_scales=(1.0, 1.0))
+
+    mask_fine = util.over_sample.mask_2d_upscaled_from(mask_2d=mask, over_sample_size=1)
+
+    assert (np.array(mask_fine) == np.array(mask)).all()
+    assert mask_fine.pixel_scales == (1.0, 1.0)
+
+
+def test__sub_slim_to_fine_slim_from():
+    # Two unmasked pixels side by side: their 2x2 sub-blocks interleave row-wise
+    # on the fine grid, so the permutation is not the identity.
+    mask = aa.Mask2D(mask=[[False, False]], pixel_scales=(1.0, 1.0))
+
+    perm = util.over_sample.sub_slim_to_fine_slim_from(mask_2d=mask, over_sample_size=2)
+
+    assert (perm == np.array([0, 1, 4, 5, 2, 3, 6, 7])).all()
+
+
+def test__sub_slim_to_fine_slim_from__size_one_is_identity():
+    mask = aa.Mask2D(
+        mask=[[True, False, True], [False, False, False], [True, False, True]],
+        pixel_scales=(1.0, 1.0),
+    )
+
+    perm = util.over_sample.sub_slim_to_fine_slim_from(mask_2d=mask, over_sample_size=1)
+
+    assert (perm == np.arange(5)).all()
+
+
+def test__sub_slim_to_fine_slim_from__is_bijection_and_round_trips():
+    mask = aa.Mask2D.circular(shape_native=(7, 7), pixel_scales=1.0, radius=2.5)
+
+    perm = util.over_sample.sub_slim_to_fine_slim_from(mask_2d=mask, over_sample_size=3)
+
+    assert perm.size == mask.pixels_in_mask * 9
+    assert np.array_equal(np.sort(perm), np.arange(perm.size))
+
+    values_sub = np.arange(perm.size, dtype="float")
+    fine_slim = np.zeros(perm.size)
+    fine_slim[perm] = values_sub
+
+    assert (fine_slim[perm] == values_sub).all()

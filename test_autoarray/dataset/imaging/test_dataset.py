@@ -410,3 +410,104 @@ def test__psf_not_odd_x_odd_kernel__raises_error():
             noise_map=noise_map,
             psf=psf,
         )
+
+
+def test__convolve_over_sample_size__validation_and_plumbing():
+    data = aa.Array2D.no_mask(values=np.ones((11, 11)), pixel_scales=1.0)
+    noise_map = aa.Array2D.no_mask(values=np.ones((11, 11)), pixel_scales=1.0)
+    kernel_fine = aa.Array2D.no_mask(values=np.ones((9, 9)), pixel_scales=0.5)
+    psf = aa.Convolver(kernel=kernel_fine)
+
+    # convolve size must be a plain int.
+    with pytest.raises(TypeError):
+        aa.Imaging(
+            data=data,
+            noise_map=noise_map,
+            psf=psf,
+            over_sample_size_lp=2,
+            convolve_over_sample_size_lp=2.0,
+        )
+
+    # over_sample_size must equal the convolve size when the latter is above 1.
+    with pytest.raises(aa.exc.DatasetException):
+        aa.Imaging(
+            data=data,
+            noise_map=noise_map,
+            psf=psf,
+            over_sample_size_lp=4,
+            convolve_over_sample_size_lp=2,
+        )
+
+    # Adaptive (non-uniform) over sampling is incompatible with oversampled convolution.
+    sub_size_adaptive = np.full(fill_value=2, shape=data.shape_slim)
+    sub_size_adaptive[0] = 4
+
+    with pytest.raises(aa.exc.DatasetException):
+        aa.Imaging(
+            data=data,
+            noise_map=noise_map,
+            psf=psf,
+            over_sample_size_lp=aa.Array2D(values=sub_size_adaptive, mask=data.mask),
+            convolve_over_sample_size_lp=2,
+        )
+
+    # Differing lp / pixelization convolve sizes are not supported (single PSF kernel).
+    with pytest.raises(aa.exc.DatasetException):
+        aa.Imaging(
+            data=data,
+            noise_map=noise_map,
+            psf=psf,
+            over_sample_size_lp=2,
+            over_sample_size_pixelization=4,
+            convolve_over_sample_size_lp=2,
+            convolve_over_sample_size_pixelization=4,
+        )
+
+    # Valid dataset: the psf carries the convolve size and apply_mask preserves it,
+    # precomputing the fine state and building the blurring grid at the fine resolution.
+    dataset = aa.Imaging(
+        data=data,
+        noise_map=noise_map,
+        psf=psf,
+        over_sample_size_lp=2,
+        convolve_over_sample_size_lp=2,
+    )
+
+    assert dataset.convolve_over_sample_size_lp == 2
+    assert dataset.psf.convolve_over_sample_size == 2
+
+    mask = aa.Mask2D.circular(shape_native=(11, 11), pixel_scales=1.0, radius=3.5)
+    masked = dataset.apply_mask(mask=mask)
+
+    assert masked.convolve_over_sample_size_lp == 2
+    assert masked.psf.convolve_over_sample_size == 2
+    assert masked.psf._state is not None
+    assert masked.psf._state.sub_slim_to_fine_slim is not None
+
+    # The blurring grid footprint uses the kernel's image-resolution shape (5x5 for a
+    # 9x9 fine kernel at s=2) and is evaluated at the fine resolution.
+    blurring_mask = mask.derive_mask.blurring_from(
+        kernel_shape_native=(5, 5), allow_padding=True
+    )
+    assert np.array(masked.grids.blurring.over_sampled).shape == (
+        blurring_mask.pixels_in_mask * 4,
+        2,
+    )
+
+
+def test__convolve_over_sample_size__sparse_operator_guard():
+    data = aa.Array2D.no_mask(values=np.ones((11, 11)), pixel_scales=1.0)
+    noise_map = aa.Array2D.no_mask(values=np.ones((11, 11)), pixel_scales=1.0)
+    kernel_fine = aa.Array2D.no_mask(values=np.ones((9, 9)), pixel_scales=0.5)
+    psf = aa.Convolver(kernel=kernel_fine)
+
+    dataset = aa.Imaging(
+        data=data,
+        noise_map=noise_map,
+        psf=psf,
+        over_sample_size_pixelization=2,
+        convolve_over_sample_size_pixelization=2,
+    )
+
+    with pytest.raises(aa.exc.DatasetException):
+        dataset.apply_sparse_operator()
