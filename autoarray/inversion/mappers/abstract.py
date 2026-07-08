@@ -278,6 +278,36 @@ class Mapper(LinearObj):
         )
 
     @cached_property
+    def mapping_matrix_over_sampled(self) -> np.ndarray:
+        """
+        The `mapping_matrix` at the over-sampled (sub-pixel) resolution: one row per
+        data sub-pixel in per-pixel sub-block order, with no `sub_fraction` fold.
+
+        The regular `mapping_matrix` sums each pixel's sub-pixel contributions
+        (weighted by `sub_fraction = 1/sub_size^2`) down to image resolution before
+        any PSF operation. Oversampled PSF convolution
+        (`Convolver.convolve_over_sample_size > 1`) must convolve *before* that fold,
+        so it consumes this matrix instead; binning its rows by the mean of each
+        sub-block reproduces `mapping_matrix` exactly.
+
+        The matrix has shape [total_sub_pixels, source_pixels] and is the input
+        format of `Convolver.convolved_mapping_matrix_from` when oversampled.
+        """
+        total_sub_pixels = int(self.over_sampler.sub_total)
+
+        return mapper_util.mapping_matrix_from(
+            pix_indexes_for_sub_slim_index=self.pix_indexes_for_sub_slim_index,
+            pix_size_for_sub_slim_index=self.pix_sizes_for_sub_slim_index,
+            pix_weights_for_sub_slim_index=self.pix_weights_for_sub_slim_index,
+            pixels=self.pixels,
+            total_mask_pixels=total_sub_pixels,
+            slim_index_for_sub_slim_index=np.arange(total_sub_pixels),
+            sub_fraction=np.ones(total_sub_pixels),
+            use_mixed_precision=self.settings.use_mixed_precision,
+            xp=self._xp,
+        )
+
+    @cached_property
     def sparse_triplets_data(self):
         """
         Sparse triplet representation of the (unblurred) mapping operator on the *slim data grid*.

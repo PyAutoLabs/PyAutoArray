@@ -13,6 +13,7 @@ from autoarray.inversion.mappers.abstract import Mapper
 from autoarray.structures.arrays.uniform_2d import Array2D
 
 from autoarray.inversion.inversion.imaging import inversion_imaging_util
+from autoarray import exc
 
 
 class InversionImagingSparse(AbstractInversionImaging):
@@ -52,6 +53,13 @@ class InversionImagingSparse(AbstractInversionImaging):
 
     @cached_property
     def psf_weighted_data(self):
+        if self.psf.convolve_over_sample_size > 1:
+            raise exc.InversionException(
+                "The sparse linear algebra formalism precomputes PSF products at "
+                "image resolution and is incompatible with an oversampled PSF "
+                "(convolve_over_sample_size > 1)."
+            )
+
         return inversion_imaging_util.psf_weighted_data_from(
             weight_map_native=self.dataset.sparse_operator.weight_map.array,
             kernel_native=self.psf.kernel.native,

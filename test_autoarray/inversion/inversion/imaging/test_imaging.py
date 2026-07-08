@@ -132,3 +132,113 @@ def test__curvature_matrix(rectangular_mapper_7x7_3x3):
 
     assert inversion.curvature_matrix[0, 0] - 10.0 > 0.0
     assert inversion.curvature_matrix[3, 3] - 2.0 < 1.0e-12
+
+
+def test__mapping_matrix_over_sampled__delta_kernel_bins_to_mapping_matrix(
+    rectangular_mapper_7x7_3x3,
+):
+    # Binning the sub-resolution mapping matrix rows by the mean of each sub-block
+    # must reproduce the regular (sub_fraction folded) mapping matrix exactly.
+    mapper = rectangular_mapper_7x7_3x3
+    s = 2
+
+    mapping_matrix = np.array(mapper.mapping_matrix)
+    mapping_matrix_sub = np.array(mapper.mapping_matrix_over_sampled)
+
+    assert mapping_matrix_sub.shape == (
+        mapper.mask.pixels_in_mask * s**2,
+        mapping_matrix.shape[1],
+    )
+
+    binned = mapping_matrix_sub.reshape(
+        mapper.mask.pixels_in_mask, s**2, mapping_matrix.shape[1]
+    ).mean(axis=1)
+
+    assert binned == pytest.approx(mapping_matrix, abs=1.0e-14)
+
+
+def _oversampled_psf_for(mask, s, kernel_n=5, sigma_frac=0.4):
+    ps = mask.pixel_scales[0]
+    c = (np.arange(kernel_n) - (kernel_n - 1) / 2.0) * (ps / s)
+    yy, xx = np.meshgrid(-c, c, indexing="ij")
+    kernel = np.exp(-0.5 * (yy**2 + xx**2) / (sigma_frac * ps) ** 2)
+    kernel = kernel / kernel.sum()
+    kernel = aa.Array2D.no_mask(values=kernel, pixel_scales=ps / s)
+    return aa.Convolver(kernel=kernel, convolve_over_sample_size=s)
+
+
+def test__operated_mapping_matrix__oversampled_psf__matches_brute_force(
+    rectangular_mapper_7x7_3x3,
+):
+    # End-to-end mapping-formalism check: the oversampled operated mapping matrix
+    # equals an independent brute-force fine-raster convolution + mean bin-down of
+    # the sub-resolution mapping matrix (implemented with plain loops, not the
+    # Convolver's own indexing).
+    from scipy.signal import convolve as scipy_convolve
+
+    mapper = rectangular_mapper_7x7_3x3
+    mask = mapper.mask
+    s = 2
+
+    psf = _oversampled_psf_for(mask=mask, s=s)
+
+    inversion = aa.m.MockInversionImaging(
+        mask=mask, psf=psf, linear_obj_list=[mapper]
+    )
+
+    operated = np.array(inversion.operated_mapping_matrix_list[0])
+
+    mapping_matrix_sub = np.array(mapper.mapping_matrix_over_sampled)
+    n_src = mapping_matrix_sub.shape[1]
+
+    mask_arr = np.array(mask)
+    ny, nx = mask_arr.shape
+    ys, xs = np.where(~mask_arr)
+
+    native = np.zeros((ny * s, nx * s, n_src))
+    k = 0
+    for yi, xi in zip(ys, xs):
+        for iy in range(s):
+            for ix in range(s):
+                native[yi * s + iy, xi * s + ix, :] = mapping_matrix_sub[k]
+                k += 1
+
+    kernel_fine = np.array(psf.kernel.native)
+    convolved = np.zeros_like(native)
+    for j in range(n_src):
+        convolved[:, :, j] = scipy_convolve(
+            native[:, :, j], kernel_fine, mode="same"
+        )
+
+    brute = convolved.reshape(ny, s, nx, s, n_src).mean(axis=(1, 3))[~mask_arr]
+
+    assert operated == pytest.approx(brute, abs=1.0e-12)
+
+
+def test__oversampled_psf__linear_func_and_preload_guards(
+    rectangular_mapper_7x7_3x3,
+):
+    mapper = rectangular_mapper_7x7_3x3
+    mask = mapper.mask
+
+    psf = _oversampled_psf_for(mask=mask, s=2)
+
+    linear_obj = aa.m.MockLinearObjFuncList(
+        parameters=1, grid=None, mapping_matrix=np.ones((9, 1))
+    )
+
+    inversion = aa.m.MockInversionImaging(
+        mask=mask, psf=psf, linear_obj_list=[linear_obj]
+    )
+
+    # Linear function objects are image-resolution; the oversampled path raises.
+    with pytest.raises(exc.InversionException):
+        inversion.operated_mapping_matrix_list
+
+    inversion = aa.m.MockInversionImaging(
+        mask=mask, psf=psf, linear_obj_list=[mapper]
+    )
+
+    # The kernel-native preload fast path raises too.
+    with pytest.raises(exc.InversionException):
+        inversion.data_linear_func_matrix_dict
