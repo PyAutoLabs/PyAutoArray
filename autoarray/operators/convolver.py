@@ -451,157 +451,165 @@ class Convolver:
             f"{self.convolve_over_sample_size})."
         )
 
-    def _convolved_image_over_sampled_np_from(self, image, blurring_image, mask=None):
+    @staticmethod
+    def _values_from(values):
+        return values.array if hasattr(values, "array") else values
+
+    def _over_sampled_binned_from(self, fine_slim, perm, trailing: tuple):
         """
-        Real-space numpy convolution of over-sampled inputs: scatter the sub-gridded
-        image (and blurring image) onto the fine FFT frame via the cached
-        permutations, convolve with the fine kernel, and bin the result back to
-        image resolution by the mean of each sub-block.
+        Bin a fine-mask slim array (row-major order) back to image resolution:
+        reorder to per-pixel sub-block order via the permutation and take the mean
+        of each sub-block. ``trailing`` is the shape of any extra axes (e.g. the
+        source axis of a mapping matrix).
+        """
+        s = self.convolve_over_sample_size
+        return fine_slim[perm].reshape((-1, s**2) + trailing).mean(axis=1)
+
+    def _convolved_over_sampled_np_from(self, values, blurring_values, state):
+        """
+        Real-space numpy convolution of over-sampled inputs (a 1D image or a 2D
+        mapping matrix, per-pixel sub-block order): scatter onto the fine FFT frame
+        via the cached permutations, convolve with the fine kernel, and bin the
+        result back to image resolution by the mean of each sub-block.
         """
         from scipy.signal import convolve as scipy_convolve
 
-        s = self.convolve_over_sample_size
-        state = self._over_sampled_state_from(mask=mask)
-
-        values = image.array if hasattr(image, "array") else np.asarray(image)
         perm = state.sub_slim_to_fine_slim
         self._check_over_sampled_length(n=values.shape[0], perm=perm)
 
+        trailing = values.shape[1:]
         rows, cols = state.mask.slim_to_native_tuple
 
-        image_native = np.zeros(state.fft_shape)
-        image_native[rows[perm], cols[perm]] = values
+        native = np.zeros(state.fft_shape + trailing)
+        native[rows[perm], cols[perm]] = values
 
-        if blurring_image is not None:
-            blurring_values = (
-                blurring_image.array
-                if hasattr(blurring_image, "array")
-                else np.asarray(blurring_image)
-            )
+        if blurring_values is not None:
             bperm = state.blurring_sub_slim_to_fine_slim
             self._check_over_sampled_length(n=blurring_values.shape[0], perm=bperm)
             brows, bcols = state.blurring_mask.slim_to_native_tuple
-            image_native[brows[bperm], bcols[bperm]] = blurring_values
-        else:
-            warnings.warn(
-                "No blurring_image provided. Only the direct image will be convolved. "
-                "This may change the correctness of the PSF convolution."
+            native[brows[bperm], bcols[bperm]] = blurring_values
+
+        kernel = self.kernel.native.array
+        if trailing:
+            kernel = kernel[..., None]
+
+        convolved_native = scipy_convolve(native, kernel, mode="same", method="auto")
+
+        fine_slim = convolved_native[state.mask.slim_to_native_tuple]
+        return self._over_sampled_binned_from(fine_slim, perm, trailing)
+
+    def _convolved_over_sampled_jax_from(
+        self, values, blurring_values, state, fft_kernel, dtype, xp
+    ):
+        """
+        FFT (JAX) convolution of over-sampled inputs (a 1D image or a 2D mapping
+        matrix): the body mirrors the s=1 FFT paths on the fine-mask state, with
+        the scatter indices permuted from sub-block order and a mean bin-down
+        appended. ``fft_kernel`` and ``dtype`` carry the caller's mixed-precision
+        semantics (the image path casts the kernel, the mapping path keeps it
+        complex128 — see ``convolved_mapping_matrix_from``).
+        """
+        import jax
+        import jax.numpy as jnp
+
+        perm = state.sub_slim_to_fine_slim
+        self._check_over_sampled_length(n=values.shape[0], perm=perm)
+
+        trailing = values.shape[1:]
+        rows, cols = state.mask.slim_to_native_tuple
+
+        native = xp.zeros(state.fft_shape + trailing, dtype=dtype)
+        native = native.at[rows[perm], cols[perm]].set(jnp.asarray(values, dtype=dtype))
+
+        if blurring_values is not None:
+            bperm = state.blurring_sub_slim_to_fine_slim
+            self._check_over_sampled_length(n=blurring_values.shape[0], perm=bperm)
+            brows, bcols = state.blurring_mask.slim_to_native_tuple
+            native = native.at[brows[bperm], bcols[bperm]].set(
+                jnp.asarray(blurring_values, dtype=dtype)
             )
 
-        convolve_native = scipy_convolve(
-            image_native, self.kernel.native.array, mode="same", method="auto"
+        fft_native = xp.fft.rfft2(native, s=state.fft_shape, axes=(0, 1))
+
+        blurred_full = xp.fft.irfft2(
+            fft_kernel * fft_native, s=state.fft_shape, axes=(0, 1)
         )
 
-        fine_slim = convolve_native[state.mask.slim_to_native_tuple]
-        binned = fine_slim[perm].reshape(-1, s**2).mean(axis=1)
+        ky, kx = self.kernel.shape_native
+        off_y = (ky - 1) // 2
+        off_x = (kx - 1) // 2
+
+        blurred_full = xp.roll(blurred_full, shift=(-off_y, -off_x), axis=(0, 1))
+
+        blurred_native = jax.lax.dynamic_slice(
+            blurred_full,
+            (off_y, off_x) + (0,) * len(trailing),
+            state.fft_shape + trailing,
+        )
+
+        fine_slim = blurred_native[state.mask.slim_to_native_tuple]
+        return self._over_sampled_binned_from(fine_slim, perm, trailing)
+
+    @staticmethod
+    def _warn_no_blurring_image():
+        warnings.warn(
+            "No blurring_image provided. Only the direct image will be convolved. "
+            "This may change the correctness of the PSF convolution."
+        )
+
+    def _convolved_image_over_sampled_np_from(self, image, blurring_image, mask=None):
+        state = self._over_sampled_state_from(mask=mask)
+
+        if blurring_image is None:
+            self._warn_no_blurring_image()
+
+        binned = self._convolved_over_sampled_np_from(
+            values=np.asarray(self._values_from(image)),
+            blurring_values=(
+                np.asarray(self._values_from(blurring_image))
+                if blurring_image is not None
+                else None
+            ),
+            state=state,
+        )
 
         return Array2D(values=binned, mask=state.image_mask)
 
     def _convolved_mapping_matrix_over_sampled_np_from(
         self, mapping_matrix, mask, blurring_mapping_matrix=None
     ):
-        """
-        Real-space numpy convolution of an over-sampled mapping matrix (one row per
-        sub-pixel, per-pixel sub-block order): scatter each source column onto the
-        fine FFT frame, convolve, and bin rows back to image resolution.
-        """
-        from scipy.signal import convolve as scipy_convolve
-
-        s = self.convolve_over_sample_size
         state = self._over_sampled_state_from(mask=mask)
 
-        perm = state.sub_slim_to_fine_slim
-        self._check_over_sampled_length(n=mapping_matrix.shape[0], perm=perm)
-
-        n_src = mapping_matrix.shape[1]
-        rows, cols = state.mask.slim_to_native_tuple
-
-        native = np.zeros(state.fft_shape + (n_src,))
-        native[rows[perm], cols[perm], :] = mapping_matrix
-
-        if blurring_mapping_matrix is not None:
-            bperm = state.blurring_sub_slim_to_fine_slim
-            self._check_over_sampled_length(
-                n=blurring_mapping_matrix.shape[0], perm=bperm
-            )
-            brows, bcols = state.blurring_mask.slim_to_native_tuple
-            native[brows[bperm], bcols[bperm], :] = blurring_mapping_matrix
-
-        blurred_native = scipy_convolve(
-            native, self.kernel.native.array[..., None], mode="same"
+        return self._convolved_over_sampled_np_from(
+            values=mapping_matrix,
+            blurring_values=blurring_mapping_matrix,
+            state=state,
         )
-
-        fine_slim = blurred_native[state.mask.slim_to_native_tuple]
-        return fine_slim[perm].reshape(-1, s**2, n_src).mean(axis=1)
 
     def _convolved_image_over_sampled_jax_from(
         self, image, blurring_image, mask=None, use_mixed_precision: bool = False, xp=np
     ):
-        """
-        FFT (JAX) convolution of over-sampled inputs: the body mirrors the s=1 FFT
-        path of ``convolved_image_from`` on the fine-mask state, with the scatter
-        indices permuted from sub-block order and a mean bin-down appended.
-        """
-        import jax
         import jax.numpy as jnp
 
-        s = self.convolve_over_sample_size
         state = self._over_sampled_state_from(mask=mask)
 
-        values = image.array if hasattr(image, "array") else image
-        perm = state.sub_slim_to_fine_slim
-        self._check_over_sampled_length(n=values.shape[0], perm=perm)
+        if blurring_image is None:
+            self._warn_no_blurring_image()
 
-        real_dtype = jnp.float32 if use_mixed_precision else jnp.float64
-
-        rows, cols = state.mask.slim_to_native_tuple
-
-        image_both_native = xp.zeros(state.fft_shape, dtype=real_dtype)
-        image_both_native = image_both_native.at[rows[perm], cols[perm]].set(
-            jnp.asarray(values, dtype=real_dtype)
+        binned = self._convolved_over_sampled_jax_from(
+            values=self._values_from(image),
+            blurring_values=(
+                self._values_from(blurring_image)
+                if blurring_image is not None
+                else None
+            ),
+            state=state,
+            fft_kernel=(
+                state.fft_kernel_c64 if use_mixed_precision else state.fft_kernel
+            ),
+            dtype=jnp.float32 if use_mixed_precision else jnp.float64,
+            xp=xp,
         )
-
-        if blurring_image is not None:
-            blurring_values = (
-                blurring_image.array
-                if hasattr(blurring_image, "array")
-                else blurring_image
-            )
-            bperm = state.blurring_sub_slim_to_fine_slim
-            self._check_over_sampled_length(n=blurring_values.shape[0], perm=bperm)
-            brows, bcols = state.blurring_mask.slim_to_native_tuple
-            image_both_native = image_both_native.at[brows[bperm], bcols[bperm]].set(
-                jnp.asarray(blurring_values, dtype=real_dtype)
-            )
-        else:
-            warnings.warn(
-                "No blurring_image provided. Only the direct image will be convolved. "
-                "This may change the correctness of the PSF convolution."
-            )
-
-        fft_image_native = xp.fft.rfft2(
-            image_both_native, s=state.fft_shape, axes=(0, 1)
-        )
-
-        fft_kernel = state.fft_kernel_c64 if use_mixed_precision else state.fft_kernel
-
-        blurred_image_full = xp.fft.irfft2(
-            fft_kernel * fft_image_native, s=state.fft_shape, axes=(0, 1)
-        )
-        ky, kx = self.kernel.shape_native
-        off_y = (ky - 1) // 2
-        off_x = (kx - 1) // 2
-
-        blurred_image_full = xp.roll(
-            blurred_image_full, shift=(-off_y, -off_x), axis=(0, 1)
-        )
-
-        blurred_image_native = jax.lax.dynamic_slice(
-            blurred_image_full, (off_y, off_x), state.fft_shape
-        )
-
-        fine_slim = blurred_image_native[state.mask.slim_to_native_tuple]
-        binned = fine_slim[perm].reshape(-1, s**2).mean(axis=1)
 
         return Array2D(values=binned, mask=state.image_mask)
 
@@ -613,60 +621,18 @@ class Convolver:
         use_mixed_precision: bool = False,
         xp=np,
     ):
-        """
-        FFT (JAX) convolution of an over-sampled mapping matrix, mirroring the s=1
-        FFT path of ``convolved_mapping_matrix_from`` on the fine-mask state with
-        permuted scatter and a mean bin-down of the rows.
-        """
-        import jax
         import jax.numpy as jnp
 
-        s = self.convolve_over_sample_size
         state = self._over_sampled_state_from(mask=mask)
 
-        perm = state.sub_slim_to_fine_slim
-        self._check_over_sampled_length(n=mapping_matrix.shape[0], perm=perm)
-
-        n_src = mapping_matrix.shape[1]
-        dtype_native = jnp.float32 if use_mixed_precision else jnp.float64
-
-        rows, cols = state.mask.slim_to_native_tuple
-
-        native = xp.zeros(state.fft_shape + (n_src,), dtype=dtype_native)
-        native = native.at[rows[perm], cols[perm], :].set(
-            jnp.asarray(mapping_matrix, dtype=dtype_native)
+        return self._convolved_over_sampled_jax_from(
+            values=mapping_matrix,
+            blurring_values=blurring_mapping_matrix,
+            state=state,
+            fft_kernel=state.fft_kernel_mapping,
+            dtype=jnp.float32 if use_mixed_precision else jnp.float64,
+            xp=xp,
         )
-
-        if blurring_mapping_matrix is not None:
-            bperm = state.blurring_sub_slim_to_fine_slim
-            self._check_over_sampled_length(
-                n=blurring_mapping_matrix.shape[0], perm=bperm
-            )
-            brows, bcols = state.blurring_mask.slim_to_native_tuple
-            native = native.at[brows[bperm], bcols[bperm], :].set(
-                jnp.asarray(blurring_mapping_matrix, dtype=dtype_native)
-            )
-
-        fft_native = xp.fft.rfft2(native, s=state.fft_shape, axes=(0, 1))
-
-        blurred_full = xp.fft.irfft2(
-            state.fft_kernel_mapping * fft_native, s=state.fft_shape, axes=(0, 1)
-        )
-
-        ky, kx = self.kernel.shape_native
-        off_y = (ky - 1) // 2
-        off_x = (kx - 1) // 2
-
-        blurred_full = xp.roll(blurred_full, shift=(-off_y, -off_x), axis=(0, 1))
-
-        out_shape = state.fft_shape + (n_src,)
-
-        blurred_native = jax.lax.dynamic_slice(
-            blurred_full, (off_y, off_x, 0), out_shape
-        )
-
-        fine_slim = blurred_native[state.mask.slim_to_native_tuple]
-        return fine_slim[perm].reshape(-1, s**2, n_src).mean(axis=1)
 
     @property
     def use_fft(self):
