@@ -293,16 +293,47 @@ class Mapper(LinearObj):
         The matrix has shape [total_sub_pixels, source_pixels] and is the input
         format of `Convolver.convolved_mapping_matrix_from` when oversampled.
         """
-        total_sub_pixels = int(self.over_sampler.sub_total)
+        return self.mapping_matrix_over_sampled_for(
+            convolve_over_sample_size=int(self.over_sampler.sub_size[0])
+        )
+
+    def mapping_matrix_over_sampled_for(
+        self, convolve_over_sample_size: int
+    ) -> np.ndarray:
+        """
+        The mapping matrix at the uniform convolution resolution ``s`` under the
+        k x s coupling: each data pixel's (possibly adaptive) k_i * s sub-samples
+        scatter directly into that pixel's s x s fine cells with fraction 1/k_i^2 —
+        the exact linear map from source pixels to the partially-binned fine image,
+        built without materialising the k_i * s resolution intermediate (linearity
+        makes scatter-then-nothing equal bin-after-build).
+
+        With every evaluation size equal to s (k_i = 1) the parents are the identity
+        and the fractions unity, reproducing `mapping_matrix_over_sampled` exactly.
+        """
+        from autoarray.operators.over_sampling.over_sample_util import (
+            convolve_bin_segment_ids_from,
+        )
+
+        s = int(convolve_over_sample_size)
+        sub_size = np.array(self.over_sampler.sub_size).astype("int")
+
+        parents = convolve_bin_segment_ids_from(
+            sub_size=sub_size, convolve_over_sample_size=s
+        )
+
+        n_fine = self.over_sampler.mask.pixels_in_mask * s**2
+        k = sub_size // s
+        fraction = np.repeat(1.0 / k.astype("float") ** 2, s**2)
 
         return mapper_util.mapping_matrix_from(
             pix_indexes_for_sub_slim_index=self.pix_indexes_for_sub_slim_index,
             pix_size_for_sub_slim_index=self.pix_sizes_for_sub_slim_index,
             pix_weights_for_sub_slim_index=self.pix_weights_for_sub_slim_index,
             pixels=self.pixels,
-            total_mask_pixels=total_sub_pixels,
-            slim_index_for_sub_slim_index=np.arange(total_sub_pixels),
-            sub_fraction=np.ones(total_sub_pixels),
+            total_mask_pixels=n_fine,
+            slim_index_for_sub_slim_index=parents,
+            sub_fraction=fraction,
             use_mixed_precision=self.settings.use_mixed_precision,
             xp=self._xp,
         )

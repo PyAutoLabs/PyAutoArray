@@ -89,7 +89,9 @@ class AbstractInversionImaging(AbstractInversion):
             return linear_obj.mapping_matrix
 
         if isinstance(linear_obj, Mapper):
-            return linear_obj.mapping_matrix_over_sampled
+            return linear_obj.mapping_matrix_over_sampled_for(
+                convolve_over_sample_size=self.psf.convolve_over_sample_size
+            )
 
         raise exc.InversionException(
             "Oversampled PSF convolution (convolve_over_sample_size > 1) currently "

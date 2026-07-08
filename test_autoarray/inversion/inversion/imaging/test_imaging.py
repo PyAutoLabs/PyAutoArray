@@ -242,3 +242,28 @@ def test__oversampled_psf__linear_func_and_preload_guards(
     # The kernel-native preload fast path raises too.
     with pytest.raises(exc.InversionException):
         inversion.data_linear_func_matrix_dict
+
+
+def test__mapping_matrix_over_sampled_for__kxs__full_bin_reproduces_mapping_matrix(
+    rectangular_mapper_7x7_3x3,
+):
+    # By linearity, the k x s matrix mean-binned s^2 -> 1 must equal the regular
+    # (sub_fraction folded) mapping matrix exactly: the fold of the folds is the
+    # full fold. The fixture's over sampler is uniform size 2, so s=1 puts k=2
+    # (adaptive-free k x s) and s=2 puts k=1 (the 2b identity).
+    mapper = rectangular_mapper_7x7_3x3
+    mapping_matrix = np.array(mapper.mapping_matrix)
+    n_pix = mapper.mask.pixels_in_mask
+
+    # k=1 (s equals the evaluation size): identical to the 2b property.
+    m_s2 = np.array(mapper.mapping_matrix_over_sampled_for(convolve_over_sample_size=2))
+    assert m_s2 == pytest.approx(np.array(mapper.mapping_matrix_over_sampled), abs=0)
+
+    # k=2 (s=1): one row per image pixel — must equal mapping_matrix exactly.
+    m_s1 = np.array(mapper.mapping_matrix_over_sampled_for(convolve_over_sample_size=1))
+    assert m_s1.shape == mapping_matrix.shape
+    assert m_s1 == pytest.approx(mapping_matrix, abs=1.0e-14)
+
+    # s=2 rows mean-binned to image resolution also reproduce mapping_matrix.
+    binned = m_s2.reshape(n_pix, 4, mapping_matrix.shape[1]).mean(axis=1)
+    assert binned == pytest.approx(mapping_matrix, abs=1.0e-14)

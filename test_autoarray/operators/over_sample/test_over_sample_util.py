@@ -336,3 +336,60 @@ def test__sub_slim_to_fine_slim_from__is_bijection_and_round_trips():
     fine_slim[perm] = values_sub
 
     assert (fine_slim[perm] == values_sub).all()
+
+
+def test__binned_to_convolve_size_from__uniform_k__equals_manual_reshape_mean():
+    # 3 pixels, evaluation size 4 (k=2, s=2): each pixel's 4x4 block bins to 2x2
+    # by the mean of each 2x2 group.
+    s, n = 2, 4
+    rng = np.random.default_rng(5)
+    values = rng.random(3 * n * n)
+
+    binned = util.over_sample.binned_to_convolve_size_from(
+        values=values, sub_size=np.full(3, n), convolve_over_sample_size=s
+    )
+
+    manual = (
+        values.reshape(3, n, n)
+        .reshape(3, s, n // s, s, n // s)
+        .mean(axis=(2, 4))
+        .reshape(-1)
+    )
+
+    assert binned == pytest.approx(manual, abs=1.0e-14)
+
+
+def test__binned_to_convolve_size_from__adaptive_k__and_identity_fast_path():
+    s = 2
+    sub_size = np.array([4, 2])  # k = [2, 1]
+    values = np.arange(16 + 4, dtype="float")
+
+    binned = util.over_sample.binned_to_convolve_size_from(
+        values=values, sub_size=sub_size, convolve_over_sample_size=s
+    )
+
+    manual_p0 = values[:16].reshape(2, 2, 2, 2).mean(axis=(1, 3)).reshape(-1)
+    manual_p1 = values[16:]
+
+    assert binned == pytest.approx(np.concatenate([manual_p0, manual_p1]), abs=1.0e-14)
+
+    # equal sizes: returned unchanged (identity object, byte-identical behaviour)
+    same = util.over_sample.binned_to_convolve_size_from(
+        values=values[:8], sub_size=np.full(2, s), convolve_over_sample_size=s
+    )
+    assert same is values[:8] or (same == values[:8]).all()
+
+    # trailing dims (mapping-matrix rows)
+    values_2d = np.stack([values, 2 * values], axis=1)
+    binned_2d = util.over_sample.binned_to_convolve_size_from(
+        values=values_2d, sub_size=sub_size, convolve_over_sample_size=s
+    )
+    assert binned_2d[:, 0] == pytest.approx(binned, abs=1.0e-14)
+    assert binned_2d[:, 1] == pytest.approx(2 * binned, abs=1.0e-14)
+
+
+def test__convolve_bin_segment_ids_from__divisibility_guard():
+    with pytest.raises(aa.exc.GridException):
+        util.over_sample.convolve_bin_segment_ids_from(
+            sub_size=np.array([4, 3]), convolve_over_sample_size=2
+        )
