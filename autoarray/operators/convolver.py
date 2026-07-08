@@ -22,6 +22,7 @@ class ConvolverState:
         self,
         kernel: Array2D,
         mask: Mask2D,
+        blurring_mask: Optional["Mask2D"] = None,
     ):
         """
         Compute and store the padded shapes and masks required for FFT-based convolution
@@ -80,6 +81,12 @@ class ConvolverState:
             A 2D boolean mask where False values indicate unmasked (valid) pixels and
             True values indicate masked pixels. The spatial extent of False pixels
             defines the region of the image that is embedded into FFT space.
+        blurring_mask
+            Optional explicit blurring mask (same shape as ``mask``, before FFT
+            resizing). If omitted it is derived from the resized mask and kernel shape
+            as before. Oversampled convolution passes the upscaled image-resolution
+            blurring mask here, because the region a caller evaluates blurring flux on
+            is defined at image resolution, not by the fine kernel's reach.
 
         Attributes
         ----------
@@ -118,7 +125,16 @@ class ConvolverState:
         import scipy.fft
         from autoarray.mask.mask_2d_util import required_shape_for_kernel
 
-        min_blur_shape = required_shape_for_kernel(mask, self.kernel.shape_native)
+        if blurring_mask is None:
+            min_blur_shape = required_shape_for_kernel(mask, self.kernel.shape_native)
+        else:
+            # The explicit blurring region can extend further than the kernel's own
+            # reach (its footprint is defined at image resolution and upscaled), so
+            # the FFT frame must be sized to keep every blurring pixel after resizing.
+            combined_mask = np.array(mask) & np.array(blurring_mask)
+            min_blur_shape = required_shape_for_kernel(
+                combined_mask, self.kernel.shape_native
+            )
 
         fft_shape = tuple(
             scipy.fft.next_fast_len(max(s, r), real=True)
@@ -127,9 +143,22 @@ class ConvolverState:
 
         self.fft_shape = fft_shape
         self.mask = mask.resized_from(self.fft_shape, pad_value=1)
-        self.blurring_mask = self.mask.derive_mask.blurring_from(
-            kernel_shape_native=self.kernel.shape_native
-        )
+
+        if blurring_mask is None:
+            self.blurring_mask = self.mask.derive_mask.blurring_from(
+                kernel_shape_native=self.kernel.shape_native
+            )
+        else:
+            self.blurring_mask = blurring_mask.resized_from(
+                self.fft_shape, pad_value=1
+            )
+
+        # Set by Convolver.state_from when convolve_over_sample_size > 1: the
+        # permutations from per-pixel sub-block ordering to the fine mask's
+        # row-major slim ordering, for the image and blurring regions.
+        self.sub_slim_to_fine_slim = None
+        self.blurring_sub_slim_to_fine_slim = None
+        self.image_mask = None
 
         self.fft_kernel = np.fft.rfft2(self.kernel.native.array, s=self.fft_shape)
         self.fft_kernel_mapping = np.expand_dims(self.fft_kernel, 2)
@@ -149,6 +178,7 @@ class Convolver:
         state: Optional[ConvolverState] = None,
         normalize: bool = False,
         use_fft: Optional[bool] = None,
+        convolve_over_sample_size: int = 1,
         *args,
         **kwargs,
     ):
@@ -200,6 +230,16 @@ class Convolver:
             ``ConvolverState``.
             If False, convolution is performed in real space.
             If None, the default behaviour specified in the configuration is used.
+        convolve_over_sample_size
+            The integer over sample size of the PSF. If above 1, the ``kernel`` is the
+            PSF sampled at ``over_sample_size`` times the image resolution (e.g. a
+            value of 2 means the PSF has a resolution 2x higher than the image, with
+            pixel scales half the image's). Convolution is then performed on a grid
+            upscaled by this factor and the result binned back to image resolution by
+            the mean of each block, improving the accuracy of the blurring. The
+            convolution methods then expect over-sampled (sub-gridded) inputs rather
+            than image-resolution arrays. A value of 1 (default) leaves all behaviour
+            unchanged.
         *args, **kwargs
             Passed to the ``Array2D`` constructor.
 
@@ -230,9 +270,49 @@ class Convolver:
             ):
                 raise exc.KernelException("Convolver Convolver must be odd")
 
+        if isinstance(convolve_over_sample_size, bool) or not isinstance(
+            convolve_over_sample_size, (int, np.integer)
+        ):
+            raise TypeError(
+                f"convolve_over_sample_size must be a plain int (adaptive over "
+                f"sampling is not supported for PSF convolution), but a "
+                f"{type(convolve_over_sample_size).__name__} was input."
+            )
+
+        if convolve_over_sample_size < 1:
+            raise exc.KernelException(
+                f"convolve_over_sample_size must be >= 1, but "
+                f"{convolve_over_sample_size} was input."
+            )
+
+        self.convolve_over_sample_size = int(convolve_over_sample_size)
+
         self._state = state
 
+    @property
+    def kernel_shape_image_resolution(self) -> Tuple[int, int]:
+        """
+        The shape of the kernel's footprint in image-resolution pixels.
+
+        For ``convolve_over_sample_size=1`` this is the kernel's native shape. For an
+        oversampled kernel it is the (odd) number of image pixels the fine kernel
+        reaches, used e.g. to derive the image-resolution blurring mask.
+        """
+        s = self.convolve_over_sample_size
+
+        if s == 1:
+            return self.kernel.shape_native
+
+        return tuple(2 * int(np.ceil((k // 2) / s)) + 1 for k in self.kernel.shape_native)
+
     def state_from(self, mask):
+
+        if self.convolve_over_sample_size > 1:
+
+            if self._state is not None:
+                return self._state
+
+            return self._fine_state_from(mask=mask)
 
         if (
             mask.shape_native[0] != self.kernel.shape_native[0]
@@ -244,6 +324,325 @@ class Convolver:
             return ConvolverState(kernel=self.kernel, mask=mask)
 
         return self._state
+
+    def _fine_state_from(self, mask) -> ConvolverState:
+        """
+        Build the ``ConvolverState`` for oversampled convolution: the input
+        image-resolution mask is upscaled by ``convolve_over_sample_size`` and the
+        existing state machinery runs on the fine mask, with the sub-block <-> fine
+        slim permutations cached on the state.
+
+        Parameters
+        ----------
+        mask
+            The image-resolution mask the over-sampled inputs are defined on.
+        """
+        from autoarray.operators.over_sampling.over_sample_util import (
+            mask_2d_upscaled_from,
+            sub_slim_to_fine_slim_from,
+        )
+
+        s = self.convolve_over_sample_size
+
+        expected_pixel_scales = (
+            mask.pixel_scales[0] / s,
+            mask.pixel_scales[1] / s,
+        )
+
+        if not np.allclose(
+            self.kernel.pixel_scales, expected_pixel_scales, rtol=1.0e-4
+        ):
+            raise exc.KernelException(
+                f"The kernel's pixel scales {self.kernel.pixel_scales} do not match "
+                f"the mask's pixel scales divided by convolve_over_sample_size="
+                f"{s} ({expected_pixel_scales}). An oversampled Convolver requires "
+                f"the PSF sampled at the fine resolution."
+            )
+
+        mask_fine = mask_2d_upscaled_from(mask_2d=mask, over_sample_size=s)
+
+        blurring_mask = mask.derive_mask.blurring_from(
+            kernel_shape_native=self.kernel_shape_image_resolution,
+            allow_padding=True,
+        )
+        blurring_mask_fine = mask_2d_upscaled_from(
+            mask_2d=blurring_mask, over_sample_size=s
+        )
+
+        state = ConvolverState(
+            kernel=self.kernel, mask=mask_fine, blurring_mask=blurring_mask_fine
+        )
+
+        state.sub_slim_to_fine_slim = sub_slim_to_fine_slim_from(
+            mask_2d=mask, over_sample_size=s
+        )
+        state.blurring_sub_slim_to_fine_slim = sub_slim_to_fine_slim_from(
+            mask_2d=blurring_mask, over_sample_size=s
+        )
+        state.image_mask = mask
+
+        return state
+
+    def _over_sampled_state_from(self, mask=None) -> ConvolverState:
+        """
+        Resolve the fine ``ConvolverState`` for oversampled convolution: the
+        precomputed state if one was supplied (e.g. via ``Imaging(psf_setup_state=True)``),
+        else built from an explicit image-resolution mask. Over-sampled inputs cannot
+        carry the image mask themselves, so having neither is an error.
+        """
+        if self._state is not None:
+            return self._state
+
+        if mask is not None:
+            return self._fine_state_from(mask=mask)
+
+        raise exc.KernelException(
+            "Oversampled convolution (convolve_over_sample_size > 1) requires either "
+            "a precomputed ConvolverState or an explicit image-resolution mask, "
+            "because over-sampled input arrays do not carry the mask."
+        )
+
+    def _check_over_sampled_length(self, n: int, perm: np.ndarray) -> None:
+        """
+        Validate the length of an over-sampled input against the cached permutation;
+        a binned (image-resolution) input is a distinct, explicit error.
+        """
+        if n == perm.size:
+            return
+
+        s = self.convolve_over_sample_size
+
+        if n * s**2 == perm.size:
+            raise exc.KernelException(
+                f"An image-resolution (binned) array of length {n} was input to an "
+                f"oversampled Convolver (convolve_over_sample_size={s}), which "
+                f"requires the over-sampled values of length {perm.size} in "
+                f"per-pixel sub-block order (evaluate on the over-sampled grid "
+                f"without binning)."
+            )
+
+        raise exc.KernelException(
+            f"The input array length {n} does not match the expected over-sampled "
+            f"length {perm.size} (convolve_over_sample_size="
+            f"{self.convolve_over_sample_size})."
+        )
+
+    def _convolved_image_over_sampled_np_from(self, image, blurring_image, mask=None):
+        """
+        Real-space numpy convolution of over-sampled inputs: scatter the sub-gridded
+        image (and blurring image) onto the fine FFT frame via the cached
+        permutations, convolve with the fine kernel, and bin the result back to
+        image resolution by the mean of each sub-block.
+        """
+        from scipy.signal import convolve as scipy_convolve
+
+        s = self.convolve_over_sample_size
+        state = self._over_sampled_state_from(mask=mask)
+
+        values = image.array if hasattr(image, "array") else np.asarray(image)
+        perm = state.sub_slim_to_fine_slim
+        self._check_over_sampled_length(n=values.shape[0], perm=perm)
+
+        rows, cols = state.mask.slim_to_native_tuple
+
+        image_native = np.zeros(state.fft_shape)
+        image_native[rows[perm], cols[perm]] = values
+
+        if blurring_image is not None:
+            blurring_values = (
+                blurring_image.array
+                if hasattr(blurring_image, "array")
+                else np.asarray(blurring_image)
+            )
+            bperm = state.blurring_sub_slim_to_fine_slim
+            self._check_over_sampled_length(n=blurring_values.shape[0], perm=bperm)
+            brows, bcols = state.blurring_mask.slim_to_native_tuple
+            image_native[brows[bperm], bcols[bperm]] = blurring_values
+        else:
+            warnings.warn(
+                "No blurring_image provided. Only the direct image will be convolved. "
+                "This may change the correctness of the PSF convolution."
+            )
+
+        convolve_native = scipy_convolve(
+            image_native, self.kernel.native.array, mode="same", method="auto"
+        )
+
+        fine_slim = convolve_native[state.mask.slim_to_native_tuple]
+        binned = fine_slim[perm].reshape(-1, s**2).mean(axis=1)
+
+        return Array2D(values=binned, mask=state.image_mask)
+
+    def _convolved_mapping_matrix_over_sampled_np_from(
+        self, mapping_matrix, mask, blurring_mapping_matrix=None
+    ):
+        """
+        Real-space numpy convolution of an over-sampled mapping matrix (one row per
+        sub-pixel, per-pixel sub-block order): scatter each source column onto the
+        fine FFT frame, convolve, and bin rows back to image resolution.
+        """
+        from scipy.signal import convolve as scipy_convolve
+
+        s = self.convolve_over_sample_size
+        state = self._over_sampled_state_from(mask=mask)
+
+        perm = state.sub_slim_to_fine_slim
+        self._check_over_sampled_length(n=mapping_matrix.shape[0], perm=perm)
+
+        n_src = mapping_matrix.shape[1]
+        rows, cols = state.mask.slim_to_native_tuple
+
+        native = np.zeros(state.fft_shape + (n_src,))
+        native[rows[perm], cols[perm], :] = mapping_matrix
+
+        if blurring_mapping_matrix is not None:
+            bperm = state.blurring_sub_slim_to_fine_slim
+            self._check_over_sampled_length(
+                n=blurring_mapping_matrix.shape[0], perm=bperm
+            )
+            brows, bcols = state.blurring_mask.slim_to_native_tuple
+            native[brows[bperm], bcols[bperm], :] = blurring_mapping_matrix
+
+        blurred_native = scipy_convolve(
+            native, self.kernel.native.array[..., None], mode="same"
+        )
+
+        fine_slim = blurred_native[state.mask.slim_to_native_tuple]
+        return fine_slim[perm].reshape(-1, s**2, n_src).mean(axis=1)
+
+    def _convolved_image_over_sampled_jax_from(
+        self, image, blurring_image, mask=None, use_mixed_precision: bool = False, xp=np
+    ):
+        """
+        FFT (JAX) convolution of over-sampled inputs: the body mirrors the s=1 FFT
+        path of ``convolved_image_from`` on the fine-mask state, with the scatter
+        indices permuted from sub-block order and a mean bin-down appended.
+        """
+        import jax
+        import jax.numpy as jnp
+
+        s = self.convolve_over_sample_size
+        state = self._over_sampled_state_from(mask=mask)
+
+        values = image.array if hasattr(image, "array") else image
+        perm = state.sub_slim_to_fine_slim
+        self._check_over_sampled_length(n=values.shape[0], perm=perm)
+
+        real_dtype = jnp.float32 if use_mixed_precision else jnp.float64
+
+        rows, cols = state.mask.slim_to_native_tuple
+
+        image_both_native = xp.zeros(state.fft_shape, dtype=real_dtype)
+        image_both_native = image_both_native.at[rows[perm], cols[perm]].set(
+            jnp.asarray(values, dtype=real_dtype)
+        )
+
+        if blurring_image is not None:
+            blurring_values = (
+                blurring_image.array
+                if hasattr(blurring_image, "array")
+                else blurring_image
+            )
+            bperm = state.blurring_sub_slim_to_fine_slim
+            self._check_over_sampled_length(n=blurring_values.shape[0], perm=bperm)
+            brows, bcols = state.blurring_mask.slim_to_native_tuple
+            image_both_native = image_both_native.at[brows[bperm], bcols[bperm]].set(
+                jnp.asarray(blurring_values, dtype=real_dtype)
+            )
+        else:
+            warnings.warn(
+                "No blurring_image provided. Only the direct image will be convolved. "
+                "This may change the correctness of the PSF convolution."
+            )
+
+        fft_image_native = xp.fft.rfft2(
+            image_both_native, s=state.fft_shape, axes=(0, 1)
+        )
+
+        fft_kernel = state.fft_kernel_c64 if use_mixed_precision else state.fft_kernel
+
+        blurred_image_full = xp.fft.irfft2(
+            fft_kernel * fft_image_native, s=state.fft_shape, axes=(0, 1)
+        )
+        ky, kx = self.kernel.shape_native
+        off_y = (ky - 1) // 2
+        off_x = (kx - 1) // 2
+
+        blurred_image_full = xp.roll(
+            blurred_image_full, shift=(-off_y, -off_x), axis=(0, 1)
+        )
+
+        blurred_image_native = jax.lax.dynamic_slice(
+            blurred_image_full, (off_y, off_x), state.fft_shape
+        )
+
+        fine_slim = blurred_image_native[state.mask.slim_to_native_tuple]
+        binned = fine_slim[perm].reshape(-1, s**2).mean(axis=1)
+
+        return Array2D(values=binned, mask=state.image_mask)
+
+    def _convolved_mapping_matrix_over_sampled_jax_from(
+        self,
+        mapping_matrix,
+        mask,
+        blurring_mapping_matrix=None,
+        use_mixed_precision: bool = False,
+        xp=np,
+    ):
+        """
+        FFT (JAX) convolution of an over-sampled mapping matrix, mirroring the s=1
+        FFT path of ``convolved_mapping_matrix_from`` on the fine-mask state with
+        permuted scatter and a mean bin-down of the rows.
+        """
+        import jax
+        import jax.numpy as jnp
+
+        s = self.convolve_over_sample_size
+        state = self._over_sampled_state_from(mask=mask)
+
+        perm = state.sub_slim_to_fine_slim
+        self._check_over_sampled_length(n=mapping_matrix.shape[0], perm=perm)
+
+        n_src = mapping_matrix.shape[1]
+        dtype_native = jnp.float32 if use_mixed_precision else jnp.float64
+
+        rows, cols = state.mask.slim_to_native_tuple
+
+        native = xp.zeros(state.fft_shape + (n_src,), dtype=dtype_native)
+        native = native.at[rows[perm], cols[perm], :].set(
+            jnp.asarray(mapping_matrix, dtype=dtype_native)
+        )
+
+        if blurring_mapping_matrix is not None:
+            bperm = state.blurring_sub_slim_to_fine_slim
+            self._check_over_sampled_length(
+                n=blurring_mapping_matrix.shape[0], perm=bperm
+            )
+            brows, bcols = state.blurring_mask.slim_to_native_tuple
+            native = native.at[brows[bperm], bcols[bperm], :].set(
+                jnp.asarray(blurring_mapping_matrix, dtype=dtype_native)
+            )
+
+        fft_native = xp.fft.rfft2(native, s=state.fft_shape, axes=(0, 1))
+
+        blurred_full = xp.fft.irfft2(
+            state.fft_kernel_mapping * fft_native, s=state.fft_shape, axes=(0, 1)
+        )
+
+        ky, kx = self.kernel.shape_native
+        off_y = (ky - 1) // 2
+        off_x = (kx - 1) // 2
+
+        blurred_full = xp.roll(blurred_full, shift=(-off_y, -off_x), axis=(0, 1))
+
+        out_shape = state.fft_shape + (n_src,)
+
+        blurred_native = jax.lax.dynamic_slice(
+            blurred_full, (off_y, off_x, 0), out_shape
+        )
+
+        fine_slim = blurred_native[state.mask.slim_to_native_tuple]
+        return fine_slim[perm].reshape(-1, s**2, n_src).mean(axis=1)
 
     @property
     def use_fft(self):
@@ -262,7 +661,12 @@ class Convolver:
         the normalized kernel.
         """
         kernel_copy = self.kernel.copy()
-        return Convolver(kernel=kernel_copy, state=None, normalize=True)
+        return Convolver(
+            kernel=kernel_copy,
+            state=None,
+            normalize=True,
+            convolve_over_sample_size=self.convolve_over_sample_size,
+        )
 
     @classmethod
     def no_blur(cls, pixel_scales):
@@ -480,6 +884,7 @@ class Convolver:
         blurring_image,
         jax_method="direct",
         use_mixed_precision: bool = False,
+        mask: Optional["Mask2D"] = None,
         xp=np,
     ):
         """
@@ -517,12 +922,36 @@ class Convolver:
         jax_method : {"direct", "fft"}
             Backend passed to ``jax.scipy.signal.convolve`` when in real-space mode.
             Ignored for FFT convolutions.
+        mask
+            The image-resolution mask, required when ``convolve_over_sample_size > 1``
+            and no precomputed state exists, because over-sampled inputs do not carry
+            the mask. Ignored otherwise.
 
         Returns
         -------
         Array2D
             The convolved image in slim (1D masked) format.
+
+        Notes
+        -----
+        When ``convolve_over_sample_size > 1`` the ``image`` and ``blurring_image``
+        must be the over-sampled (sub-gridded, per-pixel sub-block ordered) values —
+        evaluate on the over-sampled grid without binning. The returned image is at
+        image resolution. The oversampled JAX path always uses the FFT formalism.
         """
+        if self.convolve_over_sample_size > 1:
+            if xp is np:
+                return self._convolved_image_over_sampled_np_from(
+                    image=image, blurring_image=blurring_image, mask=mask
+                )
+            return self._convolved_image_over_sampled_jax_from(
+                image=image,
+                blurring_image=blurring_image,
+                mask=mask,
+                use_mixed_precision=use_mixed_precision,
+                xp=xp,
+            )
+
         if xp is np:
             return self.convolved_image_via_real_space_np_from(
                 image=image, blurring_image=blurring_image, xp=xp
@@ -654,9 +1083,20 @@ class Convolver:
         ndarray of shape (N_pix, N_src)
             Convolved mapping matrix in slim form.
         """
-        # -------------------------------------------------------------------------
-        # NumPy path unchanged
-        # -------------------------------------------------------------------------
+        if self.convolve_over_sample_size > 1:
+            if xp is np:
+                return self._convolved_mapping_matrix_over_sampled_np_from(
+                    mapping_matrix=mapping_matrix,
+                    mask=mask,
+                    blurring_mapping_matrix=blurring_mapping_matrix,
+                )
+            return self._convolved_mapping_matrix_over_sampled_jax_from(
+                mapping_matrix=mapping_matrix,
+                mask=mask,
+                blurring_mapping_matrix=blurring_mapping_matrix,
+                use_mixed_precision=use_mixed_precision,
+                xp=xp,
+            )
 
         # -------------------------------------------------------------------------
         # NumPy path unchanged
@@ -796,6 +1236,14 @@ class Convolver:
         Array2D
             Convolved image in slim format.
         """
+        if self.convolve_over_sample_size > 1:
+            if xp is np:
+                return self._convolved_image_over_sampled_np_from(
+                    image=image, blurring_image=blurring_image
+                )
+            return self._convolved_image_over_sampled_jax_from(
+                image=image, blurring_image=blurring_image, xp=xp
+            )
 
         if xp is np:
             return self.convolved_image_via_real_space_np_from(
@@ -869,6 +1317,19 @@ class Convolver:
         ndarray (N_pix, N_src)
             Convolved mapping matrix in slim form.
         """
+        if self.convolve_over_sample_size > 1:
+            if xp is np:
+                return self._convolved_mapping_matrix_over_sampled_np_from(
+                    mapping_matrix=mapping_matrix,
+                    mask=mask,
+                    blurring_mapping_matrix=blurring_mapping_matrix,
+                )
+            return self._convolved_mapping_matrix_over_sampled_jax_from(
+                mapping_matrix=mapping_matrix,
+                mask=mask,
+                blurring_mapping_matrix=blurring_mapping_matrix,
+                xp=xp,
+            )
 
         if xp is np:
             return self.convolved_mapping_matrix_via_real_space_np_from(
@@ -902,7 +1363,11 @@ class Convolver:
         return blurred_mapping_matrix_native[state.mask.slim_to_native_tuple]
 
     def convolved_image_via_real_space_np_from(
-        self, image: np.ndarray, blurring_image: Optional[np.ndarray] = None, xp=np
+        self,
+        image: np.ndarray,
+        blurring_image: Optional[np.ndarray] = None,
+        mask: Optional["Mask2D"] = None,
+        xp=np,
     ):
         """
         Convolve an input masked image with this PSF in real space.
@@ -929,6 +1394,10 @@ class Convolver:
         Array2D
             Convolved image in slim format.
         """
+        if self.convolve_over_sample_size > 1:
+            return self._convolved_image_over_sampled_np_from(
+                image=image, blurring_image=blurring_image, mask=mask
+            )
 
         from scipy.signal import convolve as scipy_convolve
 
@@ -996,6 +1465,12 @@ class Convolver:
         ndarray (N_pix, N_src)
             Convolved mapping matrix in slim form.
         """
+        if self.convolve_over_sample_size > 1:
+            return self._convolved_mapping_matrix_over_sampled_np_from(
+                mapping_matrix=mapping_matrix,
+                mask=mask,
+                blurring_mapping_matrix=blurring_mapping_matrix,
+            )
 
         from scipy.signal import convolve as scipy_convolve
 

@@ -47,6 +47,84 @@ def over_sample_size_convert_to_array_2d_from(
     return Array2D(values=np.array(over_sample_size).astype("int"), mask=mask)
 
 
+def mask_2d_upscaled_from(mask_2d: Mask2D, over_sample_size: int) -> Mask2D:
+    """
+    Returns the input mask upscaled by an integer over sample size, where every unmasked pixel becomes an
+    unmasked block of over_sample_size x over_sample_size fine pixels.
+
+    The upscaled mask has pixel scales divided by the over sample size and the same origin, such that the
+    fine pixel centres coincide with the sub-pixel centres of a uniform over-sampled grid of the input mask.
+
+    This is used to perform PSF convolution at a higher resolution than the image (see the `Convolver`
+    object's `convolve_over_sample_size`), where the existing convolution machinery runs unchanged on the
+    upscaled mask.
+
+    Parameters
+    ----------
+    mask_2d
+        The mask defining the image-resolution grid which is upscaled.
+    over_sample_size
+        The integer factor by which the mask is upscaled in each dimension.
+
+    Returns
+    -------
+    The upscaled mask, of shape [total_y_pixels * over_sample_size, total_x_pixels * over_sample_size].
+    """
+    mask_fine = np.repeat(
+        np.repeat(np.array(mask_2d), over_sample_size, axis=0),
+        over_sample_size,
+        axis=1,
+    )
+
+    pixel_scales = (
+        mask_2d.pixel_scales[0] / over_sample_size,
+        mask_2d.pixel_scales[1] / over_sample_size,
+    )
+
+    return Mask2D(mask=mask_fine, pixel_scales=pixel_scales, origin=mask_2d.origin)
+
+
+def sub_slim_to_fine_slim_from(mask_2d: Mask2D, over_sample_size: int) -> np.ndarray:
+    """
+    Returns the permutation mapping every uniform over-sampled (sub-gridded) slim index of a mask to its slim
+    index on the upscaled mask returned by `mask_2d_upscaled_from`.
+
+    Over-sampled arrays are ordered as per-pixel sub-blocks: the s^2 sub-pixels of the first unmasked pixel
+    come first (row-major within the block), then the s^2 sub-pixels of the second unmasked pixel, and so on
+    (see `OverSampler`). The upscaled mask's slim ordering is instead row-major over the whole fine grid.
+    This permutation converts between the two: for a sub-gridded array `values` in sub-block order,
+    `fine_slim[perm] = values` scatters it into fine-mask slim order, and `fine_slim[perm]` gathers it back.
+
+    Parameters
+    ----------
+    mask_2d
+        The mask defining the image-resolution grid.
+    over_sample_size
+        The uniform integer over sample size of the sub-grid.
+
+    Returns
+    -------
+    An integer array of shape [total_unmasked_pixels * over_sample_size**2] whose k-th entry is the fine-mask
+    slim index of the k-th sub-pixel.
+    """
+    s = over_sample_size
+
+    mask = np.array(mask_2d)
+    ny, nx = mask.shape
+
+    fine_slim_index_native = np.full((ny * s, nx * s), -1, dtype="int")
+    mask_fine = np.repeat(np.repeat(mask, s, axis=0), s, axis=1)
+    fine_slim_index_native[~mask_fine] = np.arange(np.sum(~mask_fine))
+
+    ys, xs = np.where(~mask)
+
+    block = np.arange(s)
+    rows = ys[:, None, None] * s + block[None, :, None]
+    cols = xs[:, None, None] * s + block[None, None, :]
+
+    return fine_slim_index_native[rows, cols].reshape(-1)
+
+
 def total_sub_pixels_2d_from(sub_size: np.ndarray) -> int:
     """
     Returns the total number of sub-pixels in unmasked pixels in a mask.

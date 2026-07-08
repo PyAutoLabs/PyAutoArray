@@ -33,6 +33,7 @@ def over_sample(func):
         grid: Union[np.ndarray, Grid2D, Grid2DIrregular, Grid1D],
         xp=np,
         *args,
+        binned: bool = True,
         **kwargs,
     ) -> Union[np.ndarray, Array1D, Array2D, ArrayIrregular, List]:
         """
@@ -43,6 +44,10 @@ def over_sample(func):
             An object whose function uses grid_like inputs to compute quantities at every coordinate on the grid.
         grid
             A grid_like object of coordinates on which the function values are evaluated.
+        binned
+            If False, the values evaluated on the over-sampled grid are returned without binning, in per-pixel
+            sub-block order (the input format of oversampled PSF convolution, see
+            ``Convolver.convolve_over_sample_size``). Ignored for irregular / 1D grids, which are never binned.
 
         Returns
         -------
@@ -56,6 +61,9 @@ def over_sample(func):
             values = func(obj, grid.over_sampled, xp, *args, **kwargs)
         else:
             values = func(grid.over_sampled, xp, *args, **kwargs)
+
+        if not binned:
+            return values
 
         return grid.over_sampler.binned_array_2d_from(array=values, xp=xp)
 

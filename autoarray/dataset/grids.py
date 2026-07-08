@@ -135,13 +135,17 @@ class GridsDataset:
             self._blurring = None
         else:
 
+            # For an oversampled PSF the blurring mask footprint is defined at
+            # image resolution, and the blurring image must be evaluated on the
+            # fine grid so it can enter the oversampled convolution.
             blurring_mask = self.mask.derive_mask.blurring_from(
-                kernel_shape_native=self.psf.kernel.shape_native, allow_padding=True
+                kernel_shape_native=self.psf.kernel_shape_image_resolution,
+                allow_padding=True,
             )
 
             self._blurring = Grid2D.from_mask(
                 mask=blurring_mask,
-                over_sample_size=1,
+                over_sample_size=self.psf.convolve_over_sample_size,
             )
 
         return self._blurring
