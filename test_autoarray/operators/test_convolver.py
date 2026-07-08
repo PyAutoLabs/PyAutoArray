@@ -490,3 +490,38 @@ def test__kernel_shape_image_resolution():
     kernel_fine = aa.Array2D.no_mask(values=np.ones((15, 15)), pixel_scales=1.0 / 3.0)
     convolver = aa.Convolver(kernel=kernel_fine, convolve_over_sample_size=3)
     assert convolver.kernel_shape_image_resolution == (7, 7)
+
+
+def test__convolve_over_sample_size__blurring_mask_padding__delta_kernel_identity():
+    # A mask close to the image edge forces blurring_from to pad its output to a
+    # larger frame; the fine-state geometry must embed the image mask in that same
+    # frame. With a delta fine kernel, convolution then reduces to binning the
+    # over-sampled input — any frame/permutation misalignment breaks the identity.
+    import warnings
+
+    mask = aa.Mask2D.circular(shape_native=(11, 11), pixel_scales=1.0, radius=5.0)
+    s = 2
+
+    delta = np.zeros((9, 9))
+    delta[4, 4] = 1.0
+    kernel = aa.Array2D.no_mask(values=delta, pixel_scales=1.0 / s)
+    convolver = aa.Convolver(kernel=kernel, convolve_over_sample_size=s)
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        state = convolver.state_from(mask=mask)
+        assert any("Mask padded" in str(x.message) for x in w)
+
+    assert state.image_mask.shape_native == (11, 11)
+
+    rng = np.random.default_rng(2)
+    values_sub = rng.random(mask.pixels_in_mask * s**2)
+
+    convolver = aa.Convolver(kernel=kernel, state=state, convolve_over_sample_size=s)
+    convolved = convolver.convolved_image_from(
+        image=values_sub, blurring_image=None, mask=mask
+    )
+
+    binned = values_sub.reshape(mask.pixels_in_mask, s**2).mean(axis=1)
+
+    assert np.array(convolved) == pytest.approx(binned, abs=1.0e-14)
