@@ -1,4 +1,5 @@
 from __future__ import annotations
+from functools import lru_cache
 import numpy as np
 from typing import TYPE_CHECKING, Union
 from typing import List, Tuple
@@ -154,10 +155,24 @@ def convolve_bin_segment_ids_from(
     An integer array of shape [total evaluation samples] of segment ids into the uniform fine grid
     (``total_unmasked_pixels * s**2`` segments).
     """
-    from autoarray import exc
-
     s = int(convolve_over_sample_size)
     sub_size = np.asarray(sub_size).astype("int")
+
+    return _convolve_bin_segment_ids_cached(sub_size.tobytes(), sub_size.shape[0], s)
+
+
+@lru_cache(maxsize=16)
+def _convolve_bin_segment_ids_cached(
+    sub_size_bytes: bytes, n_pixels: int, s: int
+) -> np.ndarray:
+    """
+    Memoized body of `convolve_bin_segment_ids_from`. The segment ids are static per
+    (grid, s) pair but the partial bin runs once per likelihood evaluation in a fit,
+    so the per-pixel construction loop is cached on the sizes' bytes.
+    """
+    from autoarray import exc
+
+    sub_size = np.frombuffer(sub_size_bytes, dtype="int").reshape(n_pixels)
 
     if np.any(sub_size % s != 0):
         raise exc.GridException(
@@ -175,6 +190,7 @@ def convolve_bin_segment_ids_from(
         segment_ids[offset : offset + n * n] = p * s**2 + (rows // k) * s + (cols // k)
         offset += n * n
 
+    segment_ids.setflags(write=False)
     return segment_ids
 
 
