@@ -337,6 +337,7 @@ class Convolver:
         mask
             The image-resolution mask the over-sampled inputs are defined on.
         """
+        from autoarray.mask.mask_2d import Mask2D
         from autoarray.operators.over_sampling.over_sample_util import (
             mask_2d_upscaled_from,
             sub_slim_to_fine_slim_from,
@@ -359,12 +360,35 @@ class Convolver:
                 f"the PSF sampled at the fine resolution."
             )
 
-        mask_fine = mask_2d_upscaled_from(mask_2d=mask, over_sample_size=s)
-
         blurring_mask = mask.derive_mask.blurring_from(
             kernel_shape_native=self.kernel_shape_image_resolution,
             allow_padding=True,
         )
+
+        # When the mask sits close to the image edge, blurring_from pads its output
+        # to a larger frame (symmetric, parity-preserving). The fine geometry needs
+        # the image mask and blurring mask on one common frame, so the image mask is
+        # embedded with the same padding arithmetic; symmetric padding preserves the
+        # row-major slim ordering of the unmasked pixels, so the permutations and the
+        # original image mask (used to wrap outputs) remain valid.
+        if blurring_mask.shape_native != mask.shape_native:
+            dy = blurring_mask.shape_native[0] - mask.shape_native[0]
+            dx = blurring_mask.shape_native[1] - mask.shape_native[1]
+
+            mask_frame = Mask2D(
+                mask=np.pad(
+                    np.array(mask),
+                    ((dy // 2, dy - dy // 2), (dx // 2, dx - dx // 2)),
+                    constant_values=True,
+                ),
+                pixel_scales=mask.pixel_scales,
+                origin=mask.origin,
+            )
+        else:
+            mask_frame = mask
+
+        mask_fine = mask_2d_upscaled_from(mask_2d=mask_frame, over_sample_size=s)
+
         blurring_mask_fine = mask_2d_upscaled_from(
             mask_2d=blurring_mask, over_sample_size=s
         )
@@ -374,7 +398,7 @@ class Convolver:
         )
 
         state.sub_slim_to_fine_slim = sub_slim_to_fine_slim_from(
-            mask_2d=mask, over_sample_size=s
+            mask_2d=mask_frame, over_sample_size=s
         )
         state.blurring_sub_slim_to_fine_slim = sub_slim_to_fine_slim_from(
             mask_2d=blurring_mask, over_sample_size=s
