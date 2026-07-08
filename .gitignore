@@ -35,3 +35,6 @@ test_autoarray/unit/structures/files/array.fits
 test_autoarray/unit/structures/files/frame.fits
 test_autoarray/unit/structures/files/kernel.fits
 test_autoarray/unit/structures/grids/files/grid/grid.fits
+
+# Test-run output artifacts (search results written by cwd-sensitive test runs)
+test_autoarray/output/
