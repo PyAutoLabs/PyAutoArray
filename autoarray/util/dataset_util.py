@@ -71,3 +71,25 @@ def should_simulate(dataset_path):
             shutil.rmtree(dataset_path)
 
     return not Path(dataset_path).exists()
+
+SMALL_DATASETS_N_CATALOGUE = 25
+
+
+def cap_catalogue_size_for_small_datasets(n: int) -> int:
+    """
+    Cap a catalogue-style dataset size (e.g. the number of weak-lensing background
+    galaxies) to the small-datasets limit when ``PYAUTO_SMALL_DATASETS=1`` is active.
+
+    Catalogue datasets have no pixel grid, so the (15, 15) array cap above does not
+    apply to them; the number of catalogue entries is their size lever. Returns ``n``
+    unchanged when the env var is not set to ``"1"`` or ``n`` is already at-or-below
+    the cap (25).
+
+    Simulators should apply this to *generated* catalogue sizes only (e.g. a
+    requested number of random positions) — never to a user-provided grid or
+    catalogue, which must round-trip unmodified.
+    """
+    if os.environ.get("PYAUTO_SMALL_DATASETS") != "1":
+        return n
+
+    return min(n, SMALL_DATASETS_N_CATALOGUE)
