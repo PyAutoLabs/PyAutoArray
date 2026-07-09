@@ -63,35 +63,237 @@ def scipy_delaunay(points_np, query_points_np, areas_factor):
     return points, simplices_padded, mappings, split_points, splitted_mappings
 
 
-def jax_delaunay(points, query_points, areas_factor=0.5):
+# Query points are located in chunks of this size so the (chunk, N) distance
+# intermediate stays bounded on GPU when the likelihood is vmapped over many
+# live points.
+DELAUNAY_LOCATE_CHUNK = 1024
+
+# Iteration cap of the visibility walk. On production Hilbert/Delaunay meshes
+# every point resolves within ~64 steps from a nearest-vertex start; a query
+# still unresolved at the cap (a would-be fp cycle on degenerate slivers)
+# falls back to its nearest-vertex mapping, the outside-hull convention.
+DELAUNAY_WALK_STEPS = 128
+
+
+def scipy_delaunay_tri_only(points_np):
+    """Minimal host-side Delaunay callback: the qhull triangulation plus the
+    adjacency arrays the JAX-side visibility-walk point locator needs.
+
+    Unlike ``scipy_delaunay`` this does NOT run ``find_simplex`` or assemble
+    mappings — that work is fixed-shape array math once the simplices are
+    known, and runs inside the JIT program (on GPU, batched across vmap
+    lanes) instead of serializing per lane on the host.
+
+    Returns
+    -------
+    simplices_padded : (2N, 3) int32, -1 padded (same convention as
+        ``scipy_delaunay``).
+    simplex_neighbors : (2N, 3) int32, -1 padded — qhull's ``tri.neighbors``:
+        entry k of a row is the simplex opposite that row's vertex k, with
+        -1 at the convex hull.
+    vertex_simplex : (N,) int32 — one simplex incident to each vertex (the
+        walk's start simplex); -1 for the rare vertex qhull excluded as
+        coplanar/duplicate (the walk then starts from simplex 0 instead,
+        which is equally valid — the walk converges from any start).
+    """
+    from scipy.spatial import Delaunay
+
+    N = points_np.shape[0]
+    tri = Delaunay(points_np)
+    simplices = tri.simplices.astype(np.int32)  # (T, 3)
+    T = simplices.shape[0]
+
+    simplices_padded = -np.ones((2 * N, 3), dtype=np.int32)
+    simplices_padded[:T] = simplices
+
+    simplex_neighbors = -np.ones((2 * N, 3), dtype=np.int32)
+    simplex_neighbors[:T] = tri.neighbors.astype(np.int32)
+
+    vertex_simplex = -np.ones(N, dtype=np.int32)
+    simplex_ids = np.arange(T, dtype=np.int32)
+    for k in range(3):
+        vertex_simplex[simplices[:, k]] = simplex_ids
+
+    return simplices_padded, simplex_neighbors, vertex_simplex
+
+
+def _jax_delaunay_tables(points):
+    """Run the qhull-only callback with fixed output shapes."""
     import jax
     import jax.numpy as jnp
 
     N = points.shape[0]
-    Q = query_points.shape[0]
-    max_simplices = 2 * N
-
-    points_shape = jax.ShapeDtypeStruct((N, 2), points.dtype)
-    simplices_padded_shape = jax.ShapeDtypeStruct((max_simplices, 3), jnp.int32)
-    mappings_shape = jax.ShapeDtypeStruct((Q, 3), jnp.int32)
-    split_points_shape = jax.ShapeDtypeStruct((N * 4, 2), points.dtype)
-    splitted_mappings_shape = jax.ShapeDtypeStruct((N * 4, 3), jnp.int32)
-
     return jax.pure_callback(
-        lambda points, qpts: scipy_delaunay(
-            np.asarray(points), np.asarray(qpts), areas_factor
-        ),
+        lambda pts: scipy_delaunay_tri_only(np.asarray(pts)),
         (
-            points_shape,
-            simplices_padded_shape,
-            mappings_shape,
-            split_points_shape,
-            splitted_mappings_shape,
+            jax.ShapeDtypeStruct((2 * N, 3), jnp.int32),
+            jax.ShapeDtypeStruct((2 * N, 3), jnp.int32),
+            jax.ShapeDtypeStruct((N,), jnp.int32),
         ),
         points,
-        query_points,
         vmap_method="sequential",
     )
+
+
+def pix_indexes_delaunay_walk_from(
+    query_points,
+    points,
+    simplices_padded,
+    simplex_neighbors,
+    vertex_simplex,
+    xp=np,
+):
+    """JAX/NumPy point location replacing ``scipy.spatial.Delaunay.find_simplex``
+    on the JAX likelihood path, via the same visibility-walk algorithm
+    ``find_simplex`` itself uses — so the result is exact, not approximate.
+
+    For each query point: find the nearest mesh vertex (brute-force distance
+    argmin), start from a simplex incident to it, and walk: compute the
+    signed barycentric weights of the query in the current simplex; if all
+    are >= -1e-12 the simplex contains the point (done); otherwise step to
+    the neighbor simplex opposite the most-negative vertex. Crossing a hull
+    edge (neighbor -1) means the point is outside the triangulation and it
+    falls back to the nearest-vertex mapping ``[v, -1, -1]`` — the identical
+    convention ``scipy_delaunay`` applies via its KDTree.
+
+    The walk is bounded at DELAUNAY_WALK_STEPS (production meshes resolve in
+    <= ~64); the loop runs in lockstep over a chunk of queries with done/
+    outside masks, so it is fixed-shape and JIT/vmap-safe. Chunking over
+    query points bounds the (chunk, N) nearest-vertex intermediate under
+    vmap (JAX path; the NumPy path — used by the unit tests — processes the
+    whole array with early exit). Returns a (Q, 3) int32 mapping array with
+    the same semantics as ``pix_indexes_for_sub_slim_index_delaunay_from``.
+    """
+
+    def cross(u, v):
+        return u[..., 0] * v[..., 1] - u[..., 1] * v[..., 0]
+
+    def weights_of(cur, q_chunk):
+        verts = simplices_padded[cur]  # (chunk, 3)
+        a = points[verts[:, 0]]
+        b = points[verts[:, 1]]
+        c = points[verts[:, 2]]
+        den = cross(b - a, c - a)
+        den = xp.where(den != 0.0, den, 1.0)
+        w = (
+            xp.stack(
+                [
+                    cross(b - q_chunk, c - q_chunk),
+                    cross(c - q_chunk, a - q_chunk),
+                    cross(a - q_chunk, b - q_chunk),
+                ],
+                axis=1,
+            )
+            / den[:, None]
+        )
+        return verts, w
+
+    def walk_step(carry, q_chunk):
+        cur, done, outside = carry
+        _, w = weights_of(cur, q_chunk)
+        minw = w.min(axis=1)
+        opposite = w.argmin(axis=1)
+        done = done | (~outside & (minw >= -1.0e-12))
+        nxt = simplex_neighbors[cur, opposite]
+        outside = outside | (~done & (nxt < 0))
+        move = ~done & ~outside
+        cur = xp.where(move, nxt.clip(min=0), cur)
+        return cur, done, outside
+
+    def locate_chunk(q_chunk):
+        # nearest mesh vertex: (chunk, N) distance intermediate
+        d2 = ((q_chunk[:, None, :] - points[None, :, :]) ** 2).sum(-1)
+        seed = xp.argmin(d2, axis=1).astype(xp.int32)
+
+        cur = vertex_simplex[seed].clip(min=0).astype(xp.int32)
+        done = xp.zeros(q_chunk.shape[0], dtype=bool)
+        outside = xp.zeros(q_chunk.shape[0], dtype=bool)
+
+        if xp is np:
+            for _ in range(DELAUNAY_WALK_STEPS):
+                cur, done, outside = walk_step((cur, done, outside), q_chunk)
+                if (done | outside).all():
+                    break
+        else:
+            import jax
+
+            cur, done, outside = jax.lax.fori_loop(
+                0,
+                DELAUNAY_WALK_STEPS,
+                lambda _, carry: walk_step(carry, q_chunk),
+                (cur, done, outside),
+            )
+
+        verts = simplices_padded[cur]
+        fallback = xp.stack([seed, -xp.ones_like(seed), -xp.ones_like(seed)], axis=1)
+        return xp.where(done[:, None], verts, fallback).astype(xp.int32)
+
+    if xp is np:
+        return locate_chunk(query_points)
+
+    import jax
+
+    Q = query_points.shape[0]
+    chunk = DELAUNAY_LOCATE_CHUNK
+    pad = (-Q) % chunk
+    # pad rows sit far outside the mesh; their located rows are sliced away
+    q_padded = xp.concatenate(
+        [query_points, xp.full((pad, 2), 1.0e9, dtype=query_points.dtype)]
+    )
+    mappings = jax.lax.map(locate_chunk, q_padded.reshape(-1, chunk, 2)).reshape(-1, 3)
+    return mappings[:Q]
+
+
+def jax_delaunay(points, query_points, areas_factor=0.5):
+    """JAX-path Delaunay construction. Only the qhull triangulation runs on
+    the host (via ``pure_callback``); point location, dual areas and split
+    points run inside the JIT program. The return contract (values, shapes,
+    dtypes and -1 padding conventions) is identical to ``scipy_delaunay``.
+    """
+    import jax.numpy as jnp
+
+    simplices_padded, simplex_neighbors, vertex_simplex = _jax_delaunay_tables(points)
+
+    mappings = pix_indexes_delaunay_walk_from(
+        query_points=query_points,
+        points=points,
+        simplices_padded=simplices_padded,
+        simplex_neighbors=simplex_neighbors,
+        vertex_simplex=vertex_simplex,
+        xp=jnp,
+    )
+
+    # dual areas via masked scatter-add over the padded simplices
+    valid = simplices_padded[:, 0] >= 0
+    s = simplices_padded.clip(min=0)
+    p0, p1, p2 = points[s[:, 0]], points[s[:, 1]], points[s[:, 2]]
+    tri_cross = (p1[:, 0] - p0[:, 0]) * (p2[:, 1] - p0[:, 1]) - (
+        p1[:, 1] - p0[:, 1]
+    ) * (p2[:, 0] - p0[:, 0])
+    contrib = jnp.where(valid, 0.5 * jnp.abs(tri_cross) / 3.0, 0.0)
+    areas = jnp.zeros(points.shape[0], dtype=points.dtype)
+    for k in range(3):
+        areas = areas.at[s[:, k]].add(contrib)
+
+    split_points = split_points_from(
+        points=points,
+        area_weights=areas_factor * jnp.sqrt(areas),
+        xp=jnp,
+    )
+
+    # Split points are seeded at their own nearest vertex (not their parent
+    # vertex): a split point can land outside the hull, and the fallback must
+    # then match scipy_delaunay's KDTree nearest-vertex assignment.
+    splitted_mappings = pix_indexes_delaunay_walk_from(
+        query_points=split_points,
+        points=points,
+        simplices_padded=simplices_padded,
+        simplex_neighbors=simplex_neighbors,
+        vertex_simplex=vertex_simplex,
+        xp=jnp,
+    )
+
+    return points, simplices_padded, mappings, split_points, splitted_mappings
 
 
 def barycentric_dual_area_from(
@@ -231,28 +433,23 @@ def scipy_delaunay_matern(points_np, query_points_np):
 
 
 def jax_delaunay_matern(points, query_points):
-    """
-    JAX wrapper using pure_callback to run SciPy Delaunay on CPU,
-    returning only the minimal outputs needed for Matérn usage.
-    """
-    import jax
+    """JAX-path Matérn variant: qhull-only callback + JAX point location,
+    returning the same minimal (points, simplices_padded, mappings) contract
+    as ``scipy_delaunay_matern``."""
     import jax.numpy as jnp
 
-    N = points.shape[0]
-    Q = query_points.shape[0]
-    max_simplices = 2 * N
+    simplices_padded, simplex_neighbors, vertex_simplex = _jax_delaunay_tables(points)
 
-    points_shape = jax.ShapeDtypeStruct((N, 2), points.dtype)
-    simplices_padded_shape = jax.ShapeDtypeStruct((max_simplices, 3), jnp.int32)
-    mappings_shape = jax.ShapeDtypeStruct((Q, 3), jnp.int32)
-
-    return jax.pure_callback(
-        lambda pts, qpts: scipy_delaunay_matern(np.asarray(pts), np.asarray(qpts)),
-        (points_shape, simplices_padded_shape, mappings_shape),
-        points,
-        query_points,
-        vmap_method="sequential",
+    mappings = pix_indexes_delaunay_walk_from(
+        query_points=query_points,
+        points=points,
+        simplices_padded=simplices_padded,
+        simplex_neighbors=simplex_neighbors,
+        vertex_simplex=vertex_simplex,
+        xp=jnp,
     )
+
+    return points, simplices_padded, mappings
 
 
 def triangle_area_xp(c0, c1, c2, xp):
