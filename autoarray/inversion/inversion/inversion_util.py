@@ -274,8 +274,9 @@ def reconstruction_positive_only_from(
     """
     if xp.__name__.startswith("jax"):
 
-        import jaxnnls
         from autoconf import conf
+
+        from autoarray.util.jax_nnls import solve_nnls_primal
 
         try:
             use_jacobi = conf.instance["general"]["inversion"][
@@ -301,6 +302,14 @@ def reconstruction_positive_only_from(
             # magnitude in noise.
             target_kappa = 1.0e-11
 
+        # Per-fit solver knobs from the Settings class; the defaults (None)
+        # reproduce jaxnnls's own tolerance min(n * eps * 5e3, 1e-2) and its
+        # hard-coded 50-iteration cap exactly.
+        solver_tol = settings.nnls_solver_tol if settings is not None else None
+        max_iter = settings.nnls_max_iter if settings is not None else None
+        if max_iter is None:
+            max_iter = 50
+
         if use_jacobi:
             # Ill-conditioned Q makes jaxnnls's relaxed-KKT backward pass
             # produce NaN gradients. Rescale Q so its diagonal is unit:
@@ -312,12 +321,22 @@ def reconstruction_positive_only_from(
             Q_pc = (curvature_reg_matrix * D[:, None]) * D[None, :]
             q_pc = data_vector * D
             return (
-                jaxnnls.solve_nnls_primal(Q_pc, q_pc, target_kappa=target_kappa)
+                solve_nnls_primal(
+                    Q_pc,
+                    q_pc,
+                    target_kappa=target_kappa,
+                    solver_tol=solver_tol,
+                    max_iter=max_iter,
+                )
                 * D
             )
 
-        return jaxnnls.solve_nnls_primal(
-            curvature_reg_matrix, data_vector, target_kappa=target_kappa
+        return solve_nnls_primal(
+            curvature_reg_matrix,
+            data_vector,
+            target_kappa=target_kappa,
+            solver_tol=solver_tol,
+            max_iter=max_iter,
         )
 
     try:
