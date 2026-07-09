@@ -10,8 +10,9 @@ jaxnnls building block (``initialize``, ``pdip_pc_step``,
 backward pass. With the knobs at their defaults the solve and its gradients
 are identical to upstream jaxnnls.
 
-The knobs are read from ``general.yaml -> inversion -> nnls_solver_tol /
-nnls_max_iter`` by ``inversion_util.reconstruction_positive_only_from``.
+The knobs are exposed per-fit through the ``Settings`` class
+(``nnls_solver_tol`` / ``nnls_max_iter``, defaults ``None`` = upstream
+behaviour) and read by ``inversion_util.reconstruction_positive_only_from``.
 Measured motivation (PyAutoArray#369, real HST pixelization+MGE systems):
 each PDIP iteration is a fresh dense Cholesky of the (n, n) KKT system, so
 iterations are the whole cost; ``solver_tol=1e-6`` saves ~15-20% of solve

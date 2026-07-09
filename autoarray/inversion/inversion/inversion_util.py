@@ -302,17 +302,12 @@ def reconstruction_positive_only_from(
             # magnitude in noise.
             target_kappa = 1.0e-11
 
-        try:
-            solver_tol = conf.instance["general"]["inversion"]["nnls_solver_tol"]
-        except KeyError:
-            # Workspaces ship their own general.yaml that shadows autoarray's;
-            # None reproduces jaxnnls's own tolerance min(n * eps * 5e3, 1e-2).
-            solver_tol = None
-
-        try:
-            max_iter = conf.instance["general"]["inversion"]["nnls_max_iter"]
-        except KeyError:
-            # jaxnnls's own hard-coded iteration cap.
+        # Per-fit solver knobs from the Settings class; the defaults (None)
+        # reproduce jaxnnls's own tolerance min(n * eps * 5e3, 1e-2) and its
+        # hard-coded 50-iteration cap exactly.
+        solver_tol = settings.nnls_solver_tol if settings is not None else None
+        max_iter = settings.nnls_max_iter if settings is not None else None
+        if max_iter is None:
             max_iter = 50
 
         if use_jacobi:

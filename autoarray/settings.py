@@ -15,6 +15,8 @@ class Settings:
         use_edge_zeroed_pixels: Optional[bool] = None,
         use_border_relocator: Optional[bool] = None,
         no_regularization_add_to_curvature_diag_value: float = None,
+        nnls_solver_tol: Optional[float] = None,
+        nnls_max_iter: Optional[int] = None,
     ):
         """
         The settings of an Inversion, customizing how a linear set of equations are solved for.
@@ -80,8 +82,23 @@ class Settings:
         no_regularization_add_to_curvature_diag_value
             If a linear func object does not have a corresponding regularization, this value is added to its
             diagonal entries of the curvature regularization matrix to ensure the matrix is positive-definite.
+        nnls_solver_tol
+            Convergence tolerance (infinity-norm KKT residual) of the JAX positive-only (NNLS) interior-point
+            solve. `None` (default) uses jaxnnls's own tolerance ``min(n * eps * 5e3, 1e-2)`` (~1.7e-9 at
+            n=1500 fp64) — behaviour is identical to not having this setting. Each solver iteration is a fresh
+            dense Cholesky of the (n, n) system, so looser tolerances buy real speed: ``1e-6`` saves ~15-20% of
+            solve time with a log-evidence shift of order 1e-8 on production HST pixelization+MGE fits
+            (measured in https://github.com/PyAutoLabs/PyAutoArray/issues/369). Only the JAX (`xp=jnp`) path
+            honors this; the NumPy fnnls path is unaffected.
+        nnls_max_iter
+            Iteration cap of the JAX positive-only (NNLS) interior-point solve. `None` (default) uses
+            jaxnnls's own hard-coded cap of 50 (production HST pixelization+MGE systems converge in ~19-21
+            iterations). Under `vmap` the solve runs until the slowest lane in the batch converges, so this
+            also caps the worst-case batched cost. Only the JAX (`xp=jnp`) path honors this.
         """
         self.use_mixed_precision = use_mixed_precision
+        self.nnls_solver_tol = nnls_solver_tol
+        self.nnls_max_iter = nnls_max_iter
         self._use_positive_only_solver = use_positive_only_solver
         self._use_edge_zeroed_pixels = use_edge_zeroed_pixels
         self._use_border_relocator = use_border_relocator
