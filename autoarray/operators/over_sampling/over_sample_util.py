@@ -181,14 +181,22 @@ def _convolve_bin_segment_ids_cached(
             f"sizes {np.unique(sub_size[sub_size % s != 0])} are not."
         )
 
-    segment_ids = np.empty(int(np.sum(sub_size**2)), dtype="int64")
+    # Vectorized construction: for every sample, its pixel index p, position
+    # within the pixel's n_p x n_p block, and fine cell (row // k_p) * s + col // k_p.
+    counts = sub_size**2
+    n_samples = int(np.sum(counts))
 
-    offset = 0
-    for p, n in enumerate(sub_size):
-        k = n // s
-        rows, cols = np.divmod(np.arange(n * n), n)
-        segment_ids[offset : offset + n * n] = p * s**2 + (rows // k) * s + (cols // k)
-        offset += n * n
+    pixel_of_sample = np.repeat(np.arange(sub_size.shape[0]), counts)
+    block_starts = np.concatenate(([0], np.cumsum(counts)[:-1]))
+    within = np.arange(n_samples) - block_starts[pixel_of_sample]
+
+    n_of_sample = sub_size[pixel_of_sample]
+    k_of_sample = n_of_sample // s
+    rows, cols = np.divmod(within, n_of_sample)
+
+    segment_ids = (
+        pixel_of_sample * s**2 + (rows // k_of_sample) * s + (cols // k_of_sample)
+    )
 
     segment_ids.setflags(write=False)
     return segment_ids
