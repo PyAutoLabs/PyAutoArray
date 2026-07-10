@@ -526,16 +526,29 @@ class MeshGeometryRectangular(AbstractMeshGeometry):
     @property
     def edges_transformed(self):
         """
-        A class packing the ndarrays describing the neighbors of every pixel in the rectangular pixelization (see
-        `Neighbors` for a complete description of the neighboring scheme).
+        The source-plane cell edges of every mesh pixel, transformed through
+        the adaptive CDF — one more edge than pixels per axis, shape
+        ``(n + 1, 2)`` packing (y_edges, x_edges).
 
-        The neighbors of a rectangular pixelization are computed by exploiting the uniform and symmetric nature of the
-        rectangular grid, as described in the method `rectangular_neighbors_from`.
+        The interpolation mapper is node-based: reconstruction value
+        ``(row r, col c)`` lives at node ``U_y = (n_y - r - 1)/(n_y - 3)``,
+        ``U_x = (c - 1)/(n_x - 3)`` in unit CDF space (a guard ring occupies
+        the border; rows are flipped by the mapper's ``row = n - i``). The
+        cell edges are therefore the node midpoints — a uniform ``[0, 1]``
+        partition drew every cell up to ~1.5 mesh pixels away from where the
+        mapper scatters its flux (issue #372). Guard-node edges fall outside
+        the CDF domain and clamp to the data span in the inverse interp,
+        squashing the border guard cells to the region they actually cover.
         """
 
-        # edges defined in 0 -> 1 space, there is one more edge than pixel centers on each side
-        edges_y = self._xp.linspace(1, 0, self.shape_native[0] + 1)
-        edges_x = self._xp.linspace(0, 1, self.shape_native[1] + 1)
+        # Node-midpoint edges in unit CDF space (see docstring); the guard
+        # denominator keeps the degenerate n <= 3 meshes finite (their
+        # interpolator maps every point to the single interior node anyway).
+        n_y, n_x = self.shape_native
+        rows = self._xp.arange(n_y + 1)
+        cols = self._xp.arange(n_x + 1)
+        edges_y = (n_y - rows - 0.5) / max(n_y - 3, 1)
+        edges_x = (cols - 1.5) / max(n_x - 3, 1)
 
         edges_reshaped = self._xp.stack([edges_y, edges_x]).T
 

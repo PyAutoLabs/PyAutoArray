@@ -200,3 +200,53 @@ def test__edges_transformed(mask_2d_7x7):
         ),
         abs=1e-8,
     )
+
+
+def test__edges_transformed__aligned_with_interpolation_node_convention():
+    """
+    Regression test for issue #372: the pcolormesh plotting path draws value
+    (row r, col c) inside the cell bounded by edges_transformed — that cell
+    must be centred on the interpolation mapper's node for that value, not on
+    a uniform [0, 1] partition (which shifted plots by ~1.5 mesh pixels).
+
+    A delta function scattered through the mapper must land in plotted cells
+    whose weighted centroid matches the input point to sub-cell precision.
+    """
+    from autoarray.inversion.mesh.interpolator.rectangular import (
+        adaptive_rectangular_mappings_weights_via_interpolation_from,
+        adaptive_rectangular_transformed_grid_from,
+    )
+
+    n = 10
+    rng = np.random.default_rng(0)
+    data_grid = rng.uniform(-1.0, 1.0, (5000, 2))
+    test_point = np.array([[0.3, -0.2]])
+
+    flat_indices, weights = (
+        adaptive_rectangular_mappings_weights_via_interpolation_from(
+            source_grid_size=n,
+            data_grid=data_grid,
+            data_grid_over_sampled=test_point,
+        )
+    )
+
+    # The node-midpoint unit-space edges (what edges_transformed now builds),
+    # pushed through the same CDF transform.
+    rows = np.arange(n + 1)
+    edges_y = (n - rows - 0.5) / (n - 3)
+    edges_x = (rows - 1.5) / (n - 3)
+    edges = np.stack([edges_y, edges_x]).T
+    edges_t = adaptive_rectangular_transformed_grid_from(data_grid, edges)
+    y_edges, x_edges = edges_t.T
+
+    centroid_y = 0.0
+    centroid_x = 0.0
+    for flat, weight in zip(flat_indices[0], weights[0]):
+        r, c = flat // n, flat % n
+        centroid_y += weight * 0.5 * (y_edges[r] + y_edges[r + 1])
+        centroid_x += weight * 0.5 * (x_edges[c] + x_edges[c + 1])
+
+    # Half a mesh cell in these units is ~0.15; the pre-fix uniform edges
+    # missed by ~0.4 in y.
+    assert centroid_y == pytest.approx(test_point[0, 0], abs=0.1)
+    assert centroid_x == pytest.approx(test_point[0, 1], abs=0.1)
