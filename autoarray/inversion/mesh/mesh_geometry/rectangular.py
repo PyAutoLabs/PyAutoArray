@@ -473,7 +473,9 @@ class MeshGeometryRectangular(AbstractMeshGeometry):
 
         When ``spline_deg`` is set (spline-CDF meshes), routes through the
         polynomial+Hermite-spline variant to keep the areas consistent with
-        the mapper's CDF choice. Otherwise uses the linear-interp CDF.
+        the mapper's CDF choice; when ``kernel_bandwidth`` is set
+        (kernel-CDF meshes), through the kernel-density variant. Otherwise
+        uses the linear-interp CDF.
         """
         if self.spline_deg is not None:
             from autoarray.inversion.mesh.interpolator.rectangular_spline import (
@@ -485,6 +487,20 @@ class MeshGeometryRectangular(AbstractMeshGeometry):
                 data_grid=self.data_grid.over_sampled,
                 mesh_weight_map=self.mesh_weight_map,
                 deg=self.spline_deg,
+                xp=self._xp,
+            )
+
+        if self.kernel_bandwidth is not None:
+            from autoarray.inversion.mesh.interpolator.rectangular_kernel import (
+                adaptive_rectangular_areas_from_kernel,
+            )
+
+            return adaptive_rectangular_areas_from_kernel(
+                source_grid_shape=self.shape_native,
+                data_grid=self.data_grid.over_sampled,
+                mesh_weight_map=self.mesh_weight_map,
+                bandwidth=self.kernel_bandwidth,
+                n_knots=self.kernel_knots,
                 xp=self._xp,
             )
 
@@ -546,6 +562,21 @@ class MeshGeometryRectangular(AbstractMeshGeometry):
                 grid=edges_reshaped,
                 mesh_weight_map=self.mesh_weight_map,
                 deg=self.spline_deg,
+                xp=self._xp,
+            )
+
+        if self.kernel_bandwidth is not None:
+            from autoarray.inversion.mesh.interpolator.rectangular_kernel import (
+                adaptive_rectangular_transformed_grid_from_kernel,
+            )
+
+            return adaptive_rectangular_transformed_grid_from_kernel(
+                data_grid=self.data_grid.array,
+                grid=edges_reshaped,
+                mesh_pixels=self.shape_native[0],
+                mesh_weight_map=self.mesh_weight_map,
+                bandwidth=self.kernel_bandwidth,
+                n_knots=self.kernel_knots,
                 xp=self._xp,
             )
 
