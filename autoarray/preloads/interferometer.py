@@ -2,7 +2,13 @@ from autoarray.preloads.abstract import AbstractPreloads
 
 
 class PreloadsInterferometer(AbstractPreloads):
-    def __init__(self, curvature_matrix=None, mapper_galaxy_dict=None):
+    def __init__(
+        self,
+        curvature_matrix=None,
+        mapper_galaxy_dict=None,
+        source_plane_mesh_grid=None,
+        image_plane_mesh_grid=None,
+    ):
         """
         Preloaded quantities for an interferometer fit / inversion (see `AbstractPreloads`).
 
@@ -24,5 +30,8 @@ class PreloadsInterferometer(AbstractPreloads):
             The pre-computed mapper(s) and their source association. See `AbstractPreloads`.
         """
         super().__init__(
-            curvature_matrix=curvature_matrix, mapper_galaxy_dict=mapper_galaxy_dict
+            curvature_matrix=curvature_matrix,
+            mapper_galaxy_dict=mapper_galaxy_dict,
+            source_plane_mesh_grid=source_plane_mesh_grid,
+            image_plane_mesh_grid=image_plane_mesh_grid,
         )

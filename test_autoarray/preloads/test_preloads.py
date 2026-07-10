@@ -27,3 +27,9 @@ def test__preloads_interferometer__mesh_fields_available_via_abstract():
     assert preloads.curvature_matrix == "F"
     assert preloads.source_plane_mesh_grid is None
     assert preloads.image_plane_mesh_grid is None
+
+    preloads = aa.PreloadsInterferometer(
+        curvature_matrix="F", source_plane_mesh_grid=[["mesh"]], image_plane_mesh_grid=[["im"]]
+    )
+    assert preloads.source_plane_mesh_grid == [["mesh"]]
+    assert preloads.image_plane_mesh_grid == [["im"]]
