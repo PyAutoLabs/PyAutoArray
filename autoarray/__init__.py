@@ -29,6 +29,7 @@ from .inversion import regularization as reg
 from .settings import Settings
 from .inversion.inversion.abstract import AbstractInversion
 from .preloads import AbstractPreloads
+from .preloads import PreloadsImaging
 from .preloads import PreloadsInterferometer
 from .inversion.regularization.abstract import AbstractRegularization
 from .inversion.inversion.factory import inversion_from as Inversion

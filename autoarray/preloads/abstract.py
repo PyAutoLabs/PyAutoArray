@@ -1,5 +1,11 @@
 class AbstractPreloads:
-    def __init__(self, curvature_matrix=None, mapper_galaxy_dict=None):
+    def __init__(
+        self,
+        curvature_matrix=None,
+        mapper_galaxy_dict=None,
+        source_plane_mesh_grid=None,
+        image_plane_mesh_grid=None,
+    ):
         """
         Container for quantities that are *preloaded* into a fit / inversion: computed once and
         injected so that repeated evaluations reuse them instead of recomputing them.
@@ -42,7 +48,24 @@ class AbstractPreloads:
             plane); when invariant across evaluations it is built once and reused here, so the
             `mapper` (and therefore the `mapping_matrix` and `regularization_matrix`) is not rebuilt.
             Stored opaquely — the consumer (e.g. PyAutoLens's `TracerToInversion`) populates and
-            interprets it.
+            interprets it. Valid ONLY when the datasets sharing it have identical grids (e.g. the
+            channels of a datacube) — a mapper embeds a dataset's own data-grid mappings.
+        source_plane_mesh_grid
+            The pre-computed source-plane mesh geometry (e.g. the ray-traced centres a Delaunay
+            triangulation is built over), for consumers whose datasets share a lens model but NOT
+            their grids (e.g. multi-exposure imaging with per-exposure pixel offsets and PSFs).
+            Unlike `mapper_galaxy_dict`, this preloads only the mesh: each dataset still builds its
+            own mapper by mapping its own (offset) data grid onto this shared mesh. Stored opaquely
+            in the consumer's plane-grouped structure (PyAutoLens: the `traced_mesh_grid_pg_list`
+            of the lead dataset). The mapping matrix, curvature matrix, blurred mapping matrix and
+            regularization matrix are all deliberately NOT preloadable this way — offsets/PSFs make
+            the first three per-dataset, and regularization may be data-adaptive.
+        image_plane_mesh_grid
+            The image-plane counterpart of `source_plane_mesh_grid` (the mesh centres before
+            ray-tracing, in the lead dataset's frame), carried alongside it as metadata for
+            downstream consumers (e.g. mapper plotting). Same opaque plane-grouped structure.
         """
         self.curvature_matrix = curvature_matrix
         self.mapper_galaxy_dict = mapper_galaxy_dict
+        self.source_plane_mesh_grid = source_plane_mesh_grid
+        self.image_plane_mesh_grid = image_plane_mesh_grid
