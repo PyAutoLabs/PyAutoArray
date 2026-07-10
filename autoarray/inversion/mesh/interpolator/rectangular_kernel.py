@@ -57,6 +57,14 @@ from autoarray.inversion.mesh.interpolator.rectangular import (
 KERNEL_CDF_DEFAULT_BANDWIDTH: float = 1.0
 KERNEL_CDF_DEFAULT_KNOTS: int = 64
 
+# Queries per block of the forward-transform evaluation. The exact kernel sum
+# broadcasts an (M, N, 2) array; blocking the query dimension caps the peak at
+# (block, N, 2) — 512 queries × 15.4k points × 2 axes × 8 B ≈ 126 MB at
+# production imaging scale (previously ~60 GB unblocked at M ≈ 246k). Values
+# are identical to float precision: the sum over points is unchanged, blocks
+# only tile the query axis.
+KERNEL_FORWARD_BLOCK: int = 512
+
 _SQRT2 = np.sqrt(2.0)
 
 
@@ -119,9 +127,33 @@ def create_transforms_kernel(
     span = hi - lo
     h = bandwidth * span / mesh_pixels
 
-    def F_raw(q):
-        t = (q[:, None, :] - points[None, :, :]) / h[None, None, :]
+    def F_raw_block(q_block):
+        t = (q_block[:, None, :] - points[None, :, :]) / h[None, None, :]
         return xp.sum(w[None, :, None] * _norm_cdf(t, xp), axis=1)
+
+    if xp.__name__.startswith("jax"):
+
+        def F_raw(q):
+            import jax
+
+            M = q.shape[0]
+            n_blocks = -(-M // KERNEL_FORWARD_BLOCK)
+            pad = n_blocks * KERNEL_FORWARD_BLOCK - M
+            q_padded = xp.pad(q, ((0, pad), (0, 0)))
+            blocks = q_padded.reshape(n_blocks, KERNEL_FORWARD_BLOCK, 2)
+            out = jax.lax.map(F_raw_block, blocks)
+            return out.reshape(n_blocks * KERNEL_FORWARD_BLOCK, 2)[:M]
+
+    else:
+
+        def F_raw(q):
+            return np.concatenate(
+                [
+                    F_raw_block(q[i : i + KERNEL_FORWARD_BLOCK])
+                    for i in range(0, q.shape[0], KERNEL_FORWARD_BLOCK)
+                ],
+                axis=0,
+            )
 
     # The unit square maps onto the data bounding box exactly, matching the
     # linear variant's convention (its empirical-CDF knots end at the extreme

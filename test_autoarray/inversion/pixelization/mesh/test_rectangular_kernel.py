@@ -338,3 +338,25 @@ def test__InterpolatorRectangularKernel__mappings_sizes_weights_via_property():
     assert areas.shape == (36,)
     assert np.all(np.isfinite(areas))
     assert np.all(areas > 0.0)
+
+
+def test__create_transforms_kernel__chunked_forward_is_block_size_invariant():
+    """The forward transform blocks the query axis (KERNEL_FORWARD_BLOCK) to
+    cap peak memory; results must be identical to evaluating queries one at a
+    time — exercised across a query count spanning multiple blocks and not a
+    multiple of the block size."""
+    from autoarray.inversion.mesh.interpolator.rectangular_kernel import (
+        KERNEL_FORWARD_BLOCK,
+    )
+
+    rng = np.random.default_rng(7)
+    data_grid = rng.standard_normal((77, 2))
+
+    fwd, _ = create_transforms_kernel(data_grid, mesh_pixels=8, xp=np)
+
+    q = rng.standard_normal((KERNEL_FORWARD_BLOCK + 137, 2))
+    batched = fwd(q)
+    row_wise = np.vstack([fwd(q[i : i + 1]) for i in range(q.shape[0])])
+
+    assert batched.shape == (KERNEL_FORWARD_BLOCK + 137, 2)
+    assert batched == pytest.approx(row_wise, abs=0.0)
