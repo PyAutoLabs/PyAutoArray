@@ -1,8 +1,18 @@
+import importlib.util
+
 import numpy as np
 import pytest
 
 from autoarray.inversion.mesh.interpolator.knn import (
     barycentric_weights_from_3_nearest,
+)
+
+# The kNN weight computation is jax-backed; these tests need jax installed to
+# run (it ships via the `[optional]` extras). The NumPy-only Python-version
+# matrix has no jax, so skip there rather than fail.
+requires_jax = pytest.mark.skipif(
+    importlib.util.find_spec("jax") is None,
+    reason="requires jax (installed via the [optional] extras; absent on the NumPy-only matrix env)",
 )
 
 
@@ -129,6 +139,7 @@ def test__mesh_class__inherits_knn_knobs():
     assert mesh.split_neighbor_division == 2
 
 
+@requires_jax
 def test__interpolator__numpy_path_returns_writable_mappings_and_weights():
     """
     Regression guard: on the numpy path, `mappings` and `weights` must be
