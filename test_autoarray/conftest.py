@@ -280,3 +280,42 @@ def make_acs_ccd():
 @pytest.fixture(name="acs_quadrant")
 def make_acs_quadrant():
     return fixtures.make_acs_quadrant()
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip interferometer tests that need the default ``nufftax`` backend when
+    it is not installed.
+
+    The default ``Interferometer`` transformer is the JAX-native
+    ``TransformerNUFFT``, backed by ``nufftax`` — which is declared for Python
+    ``>= 3.12`` only (Python 3.9-3.11 are not officially supported). On those
+    interpreters the backend cannot be installed, so any test that builds a
+    default interferometer/transformer raises ``ModuleNotFoundError`` at
+    construction. Skip exactly those, while keeping the explicit ``DFT`` and
+    ``pynufft`` transformer tests, which have no ``nufftax`` dependency. On
+    3.12/3.13 (where ``nufftax`` is present) nothing is skipped.
+    """
+    try:
+        import nufftax  # noqa: F401
+
+        return
+    except ImportError:
+        pass
+
+    skip_nufftax = pytest.mark.skip(
+        reason="nufftax (default JAX interferometer backend) requires Python >= 3.12"
+    )
+    for item in items:
+        name = item.nodeid.rsplit("::", 1)[-1]
+        # Explicit DFT / pynufft backend tests do not use nufftax — keep them.
+        if "__dft__" in name or "pynufft" in name:
+            continue
+        nodeid = item.nodeid.replace("\\", "/")
+        needs_nufftax = (
+            "fit/test_fit_interferometer.py" in nodeid
+            or "dataset/interferometer/test_dataset.py" in nodeid
+            or "inversion/inversion/interferometer/test_interferometer.py" in nodeid
+            or ("operators/test_transformer.py" in nodeid and "__nufft__" in name)
+        )
+        if needs_nufftax:
+            item.add_marker(skip_nufftax)
