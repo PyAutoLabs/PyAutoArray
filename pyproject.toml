@@ -58,7 +58,13 @@ optional = [
     "numba",
     "nufftax>=0.4.0,<0.5.0; python_version >= '3.12'",
     "pynufft",
-    "tensorflow-probability==0.25.0"
+    # tfp provides the modified-Bessel `bessel_kve` used by the JAX Matern-kernel
+    # regularization path (autoarray/inversion/regularization/matern_kernel.py).
+    # The last *stable* release (tensorflow-probability==0.25.0) targets a JAX where
+    # `jax.interpreters.xla.pytype_aval_mappings` still existed; it crashes at import
+    # under the resolved `jax>=0.7` stack (autoconf[jax]). The nightly restores
+    # compatibility. Durable fix (vendor bessel_kve, drop tfp) tracked separately.
+    "tfp-nightly==0.26.0.dev20260713"
 ]
 test = ["pytest"]
 dev = ["pytest", "black", "numba", "nufftax>=0.4.0,<0.5.0; python_version >= '3.12'", "pynufft==2022.2.2"]
