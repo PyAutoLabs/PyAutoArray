@@ -17,8 +17,14 @@ def kv_xp(v, z, xp=np):
         -> scipy.special.kv
 
     JAX backend:
-        -> jax.scipy.special.kv if available
-        -> else tfp.substrates.jax.math.bessel_kve * exp(-|z|)
+        -> tensorflow_probability.substrates.jax.math.bessel_kve * exp(-|z|)
+
+    `jax.scipy.special` has no modified-Bessel-K (`kv`/`kve`) of arbitrary real
+    order, so the JAX path relies on tfp's `bessel_kve`. Note the tfp dependency
+    is the *nightly* build (`tfp-nightly`): the last stable release
+    (`tensorflow-probability==0.25.0`) crashes at import under the resolved
+    `jax>=0.7` stack (it references `jax.interpreters.xla.pytype_aval_mappings`,
+    removed from modern JAX).
     """
 
     # -------------------------
@@ -39,8 +45,10 @@ def kv_xp(v, z, xp=np):
             return tfp.math.bessel_kve(v, z) * xp.exp(-xp.abs(z))
         except ImportError:
             raise ImportError(
-                "To use the JAX backend with the Matérn kernel, "
-                "please install tensorflow-probability via `pip install tensorflow-probability==0.25.0`."
+                "To use the JAX backend with the Matérn kernel, install the "
+                "tensorflow-probability nightly via "
+                "`pip install tfp-nightly==0.26.0.dev20260713` "
+                "(the last stable release, 0.25.0, is incompatible with modern JAX)."
             )
 
 
