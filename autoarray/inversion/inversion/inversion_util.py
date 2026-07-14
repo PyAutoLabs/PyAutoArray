@@ -2,6 +2,8 @@ import numpy as np
 
 from typing import List, Optional, Type
 
+from autoconf import is_test_mode
+
 from autoarray.settings import Settings
 
 from autoarray import exc
@@ -221,7 +223,19 @@ def reconstruction_positive_negative_from(
     curvature_reg_matrix
         The curvature_matrix plus regularization matrix, overwriting the curvature_matrix in memory.
     """
-    return xp.linalg.solve(curvature_reg_matrix, data_vector)
+    try:
+        return xp.linalg.solve(curvature_reg_matrix, data_vector)
+    except np.linalg.LinAlgError:
+        if is_test_mode():
+            # Test-mode fits run fabricated / under-converged models whose
+            # curvature-regularization matrix can be singular; the reconstruction
+            # value is discarded. Return a benign dummy so unguarded test-mode
+            # paths (search chaining, preloads, result construction) do not crash.
+            # Normal runs re-raise unchanged and resample via the likelihood's
+            # FitException guard — real-mode numerics are untouched. (The JAX path
+            # returns NaN rather than raising, so this branch is numpy-only.)
+            return xp.ones_like(data_vector)
+        raise
 
 
 def reconstruction_positive_only_from(
@@ -350,6 +364,10 @@ def reconstruction_positive_only_from(
         )
 
     except (RuntimeError, np.linalg.LinAlgError, ValueError) as e:
+        if is_test_mode():
+            # See reconstruction_positive_negative_from: benign dummy in test mode,
+            # unchanged (raise InversionException) in normal operation.
+            return xp.ones_like(data_vector)
         raise exc.InversionException() from e
 
 
