@@ -911,6 +911,14 @@ def _arcsec_labels(ticks) -> List[str]:
     ``ticks.symbol_over_decimal`` is true, labels use the double-prime arcsecond
     symbol and decimal labels place it over the decimal point, e.g. ``3.″8``.
     """
+    minus_in_math = _conf_ticks_flag("minus_in_math", False)
+
+    def _fmt_minus(label: str) -> str:
+        # Replace the ASCII hyphen-minus (U+002D) with the Unicode/math minus
+        # (U+2212, matplotlib's own minus glyph) so negative arcsecond labels
+        # render with a proper minus sign rather than a hyphen.
+        return label.replace("-", "−") if minus_in_math else label
+
     labels = [f'{v:g}' for v in ticks]
     if any("." in label for label in labels):
         labels = [
@@ -922,11 +930,11 @@ def _arcsec_labels(ticks) -> List[str]:
         for label in labels:
             if "." in label:
                 int_part, frac_part = label.split(".", 1)
-                symbol_labels.append(f"{int_part}.″{frac_part}")
+                symbol_labels.append(_fmt_minus(f"{int_part}.″{frac_part}"))
             else:
-                symbol_labels.append(f"{label}″")
+                symbol_labels.append(_fmt_minus(f"{label}″"))
         return symbol_labels
-    return [f'{label}"' for label in labels]
+    return [_fmt_minus(f'{label}"') for label in labels]
 
 
 def apply_extent(
