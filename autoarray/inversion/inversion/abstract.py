@@ -3,7 +3,7 @@ import copy
 import numpy as np
 from typing import Dict, List, Optional, Type, Union
 
-from autoconf import cached_property
+from autoconf import cached_property, is_test_mode
 
 from autoarray.dataset.imaging.dataset import Imaging
 from autoarray.dataset.interferometer.dataset import Interferometer
@@ -712,13 +712,23 @@ class AbstractInversion:
         if not self.has(cls=AbstractRegularization):
             return 0.0
 
-        return 2.0 * self._xp.sum(
-            self._xp.log(
-                self._xp.diag(
-                    self._xp.linalg.cholesky(self.curvature_reg_matrix_reduced)
+        try:
+            return 2.0 * self._xp.sum(
+                self._xp.log(
+                    self._xp.diag(
+                        self._xp.linalg.cholesky(self.curvature_reg_matrix_reduced)
+                    )
                 )
             )
-        )
+        except np.linalg.LinAlgError:
+            if is_test_mode():
+                # Singular curvature-reg matrix from a fabricated test-mode model;
+                # this evidence term is discarded. Return a benign 0.0 so unguarded
+                # test-mode paths do not crash (matches the reconstruction guard in
+                # inversion_util). Normal runs re-raise unchanged. numpy-only: the
+                # JAX cholesky returns NaN rather than raising.
+                return 0.0
+            raise
 
     @property
     def log_det_regularization_matrix_term(self) -> float:
@@ -737,13 +747,21 @@ class AbstractInversion:
         if not self.has(cls=AbstractRegularization):
             return 0.0
 
-        return 2.0 * self._xp.sum(
-            self._xp.log(
-                self._xp.diag(
-                    self._xp.linalg.cholesky(self.regularization_matrix_reduced)
+        try:
+            return 2.0 * self._xp.sum(
+                self._xp.log(
+                    self._xp.diag(
+                        self._xp.linalg.cholesky(self.regularization_matrix_reduced)
+                    )
                 )
             )
-        )
+        except np.linalg.LinAlgError:
+            if is_test_mode():
+                # Singular regularization matrix from a fabricated test-mode model;
+                # this evidence term is discarded. Benign 0.0 in test mode, unchanged
+                # (raise) in normal operation. numpy-only (JAX cholesky returns NaN).
+                return 0.0
+            raise
 
     @property
     def reconstruction_noise_map_with_covariance(self) -> np.ndarray:

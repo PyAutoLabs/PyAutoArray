@@ -228,3 +228,56 @@ def test__preconditioner_matrix_via_mapping_matrix_from():
         preconditioner_matrix
         == np.array([[5.0, 2.0, 3.0], [4.0, 9.0, 6.0], [7.0, 8.0, 13.0]])
     ).all()
+
+
+def test__reconstruction_positive_negative_from__singular_matrix_test_mode_returns_dummy(
+    monkeypatch,
+):
+    # A rank-deficient curvature-regularization matrix makes np.linalg.solve
+    # raise a singular-matrix LinAlgError.
+    curvature_reg_matrix = np.array([[1.0, 1.0], [1.0, 1.0]])
+    data_vector = np.array([1.0, 2.0])
+
+    # Normal operation: the singular solve raises, so the search resamples.
+    monkeypatch.delenv("PYAUTO_TEST_MODE", raising=False)
+    with pytest.raises(np.linalg.LinAlgError):
+        aa.util.inversion.reconstruction_positive_negative_from(
+            data_vector=data_vector,
+            curvature_reg_matrix=curvature_reg_matrix,
+        )
+
+    # Test mode: the fabricated model's reconstruction is discarded, so a benign
+    # finite dummy is returned instead of crashing an unguarded test-mode path.
+    monkeypatch.setenv("PYAUTO_TEST_MODE", "1")
+    reconstruction = aa.util.inversion.reconstruction_positive_negative_from(
+        data_vector=data_vector,
+        curvature_reg_matrix=curvature_reg_matrix,
+    )
+    assert reconstruction.shape == data_vector.shape
+    assert np.all(np.isfinite(reconstruction))
+    assert (reconstruction == 1.0).all()
+
+
+def test__reconstruction_positive_only_from__singular_matrix_test_mode_returns_dummy(
+    monkeypatch,
+):
+    curvature_reg_matrix = np.array([[1.0, 1.0], [1.0, 1.0]])
+    data_vector = np.array([1.0, 2.0])
+
+    # Normal operation: the singular solve raises InversionException (resample).
+    monkeypatch.delenv("PYAUTO_TEST_MODE", raising=False)
+    with pytest.raises(aa.exc.InversionException):
+        aa.util.inversion.reconstruction_positive_only_from(
+            data_vector=data_vector,
+            curvature_reg_matrix=curvature_reg_matrix,
+        )
+
+    # Test mode: benign finite dummy instead of crashing.
+    monkeypatch.setenv("PYAUTO_TEST_MODE", "1")
+    reconstruction = aa.util.inversion.reconstruction_positive_only_from(
+        data_vector=data_vector,
+        curvature_reg_matrix=curvature_reg_matrix,
+    )
+    assert reconstruction.shape == data_vector.shape
+    assert np.all(np.isfinite(reconstruction))
+    assert (reconstruction == 1.0).all()
