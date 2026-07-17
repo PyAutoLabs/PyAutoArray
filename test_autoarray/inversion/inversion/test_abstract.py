@@ -613,6 +613,69 @@ def test__determinant_of_positive_definite_matrix_via_cholesky__tridiagonal_matr
     )
 
 
+def test__log_det_method__default_is_cholesky_and_matches_numpy_log_det():
+    # The default log_det_method must reproduce the historical Cholesky value exactly.
+    assert aa.Settings().log_det_method == "cholesky"
+
+    matrix = np.array([[2.0, -1.0, 0.0], [-1.0, 2.0, -1.0], [0.0, -1.0, 2.0]])
+
+    inversion = aa.m.MockInversion(
+        linear_obj_list=[aa.m.MockLinearObj(regularization=aa.m.MockRegularization())],
+        curvature_reg_matrix=matrix,
+    )
+
+    assert inversion.log_det_curvature_reg_matrix_term == pytest.approx(
+        np.log(np.linalg.det(matrix)), 1.0e-4
+    )
+
+
+def test__log_det_method__slogdet_matches_cholesky_on_positive_definite_matrix():
+    # Where the matrix is positive-definite, "slogdet" is identical to "cholesky".
+    matrix = np.array([[2.0, -1.0, 0.0], [-1.0, 2.0, -1.0], [0.0, -1.0, 2.0]])
+
+    cholesky_inversion = aa.m.MockInversion(
+        linear_obj_list=[aa.m.MockLinearObj(regularization=aa.m.MockRegularization())],
+        curvature_reg_matrix=matrix,
+        regularization_matrix=matrix,
+    )
+    slogdet_inversion = aa.m.MockInversion(
+        linear_obj_list=[aa.m.MockLinearObj(regularization=aa.m.MockRegularization())],
+        curvature_reg_matrix=matrix,
+        regularization_matrix=matrix,
+        settings=aa.Settings(log_det_method="slogdet"),
+    )
+
+    expected = np.log(np.linalg.det(matrix))
+
+    assert cholesky_inversion.log_det_curvature_reg_matrix_term == pytest.approx(
+        expected, 1.0e-8
+    )
+    assert slogdet_inversion.log_det_curvature_reg_matrix_term == pytest.approx(
+        cholesky_inversion.log_det_curvature_reg_matrix_term, 1.0e-8
+    )
+    assert slogdet_inversion.log_det_regularization_matrix_term == pytest.approx(
+        cholesky_inversion.log_det_regularization_matrix_term, 1.0e-8
+    )
+
+
+def test__log_det_method__slogdet_is_finite_where_cholesky_fails_on_non_positive_definite():
+    # A symmetric matrix with a negative eigenvalue: Cholesky cannot factor it (raises /
+    # returns NaN), but slogdet returns the finite log|det|. This is the property that
+    # keeps a gradient-based search from stalling (autolens_workspace_developer#104).
+    matrix = np.array([[1.0, 2.0, 0.0], [2.0, 1.0, 0.0], [0.0, 0.0, 3.0]])
+    assert np.linalg.eigvalsh(matrix).min() < 0.0  # confirm it is not positive-definite
+
+    inversion = aa.m.MockInversion(
+        linear_obj_list=[aa.m.MockLinearObj(regularization=aa.m.MockRegularization())],
+        curvature_reg_matrix=matrix,
+        settings=aa.Settings(log_det_method="slogdet"),
+    )
+
+    result = inversion.log_det_curvature_reg_matrix_term
+    assert np.isfinite(result)
+    assert result == pytest.approx(np.linalg.slogdet(matrix)[1], 1.0e-8)
+
+
 def test__reconstruction_noise_map__asymmetric_curvature_reg_matrix__correct_diagonal_noise_values():
     curvature_reg_matrix = np.array([[1.0, 1.0, 1.0], [1.0, 2.0, 1.0], [1.0, 1.0, 3.0]])
 

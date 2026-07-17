@@ -17,6 +17,7 @@ class Settings:
         no_regularization_add_to_curvature_diag_value: float = None,
         nnls_solver_tol: Optional[float] = None,
         nnls_max_iter: Optional[int] = None,
+        log_det_method: Optional[str] = None,
     ):
         """
         The settings of an Inversion, customizing how a linear set of equations are solved for.
@@ -95,6 +96,19 @@ class Settings:
             jaxnnls's own hard-coded cap of 50 (production HST pixelization+MGE systems converge in ~19-21
             iterations). Under `vmap` the solve runs until the slowest lane in the batch converges, so this
             also caps the worst-case batched cost. Only the JAX (`xp=jnp`) path honors this.
+        log_det_method
+            Which computation is used for the two Bayesian-evidence log-determinant terms
+            (``log_det_curvature_reg_matrix_term`` and ``log_det_regularization_matrix_term``). `None`
+            (default) reads the packaged value ``"cholesky"``.
+
+            - ``"cholesky"`` (default) — ``2 * sum(log(diag(cholesky(M))))``, the historical computation.
+              On a non-positive-definite matrix the NumPy backend raises and the JAX backend returns NaN.
+            - ``"slogdet"`` — the ``logabsdet`` of ``xp.linalg.slogdet(M)``. Where ``M`` is positive-definite
+              this equals the Cholesky value exactly; where the Cholesky would NaN it returns a finite,
+              differentiable value instead, so it never stalls a gradient-based search
+              (autolens_workspace_developer#104). This is an **opt-in, non-default** alternative intended for
+              gradient-based work and for comparison against the Cholesky evidence — it is not a replacement
+              for the default and the default evidence path is unchanged. See PyAutoArray#391.
         """
         self.use_mixed_precision = use_mixed_precision
         self.nnls_solver_tol = nnls_solver_tol
@@ -105,6 +119,7 @@ class Settings:
         self._no_regularization_add_to_curvature_diag_value = (
             no_regularization_add_to_curvature_diag_value
         )
+        self._log_det_method = log_det_method
 
     @property
     def use_positive_only_solver(self):
@@ -135,3 +150,10 @@ class Settings:
             ]
 
         return self._no_regularization_add_to_curvature_diag_value
+
+    @property
+    def log_det_method(self):
+        if self._log_det_method is None:
+            return conf.instance["general"]["inversion"]["log_det_method"]
+
+        return self._log_det_method
