@@ -702,33 +702,51 @@ class AbstractInversion:
             ),
         )
 
+    def _log_det_symmetric_from(self, matrix) -> float:
+        """
+        Log determinant of a symmetric positive-(semi)definite ``matrix``, used by the two evidence log-det terms.
+
+        The method is selected by ``self.settings.log_det_method`` (see :class:`Settings`):
+
+        - ``"cholesky"`` (default) — ``2 * sum(log(diag(cholesky(matrix))))``. This is the historical
+          computation and is byte-for-byte unchanged, including the test-mode ``LinAlgError`` guard. On the
+          NumPy backend a non-positive-definite matrix raises; on the JAX backend the Cholesky returns NaN,
+          which propagates as a non-finite figure of merit and can stall gradient-based searches
+          (autolens_workspace_developer#104).
+        - ``"slogdet"`` — the ``logabsdet`` from ``xp.linalg.slogdet(matrix)``. Wherever ``matrix`` is
+          positive-definite this equals the Cholesky value exactly (the sign is +1), but where the Cholesky
+          would NaN it returns a finite, differentiable value instead, so it never stalls a gradient search.
+          It is **opt-in and non-default** — intended for gradient-based work and for comparison against the
+          Cholesky evidence, not as a replacement for it. See PyAutoArray#391.
+        """
+        if self.settings.log_det_method == "slogdet":
+            return self._xp.linalg.slogdet(matrix)[1]
+
+        try:
+            return 2.0 * self._xp.sum(
+                self._xp.log(self._xp.diag(self._xp.linalg.cholesky(matrix)))
+            )
+        except np.linalg.LinAlgError:
+            if is_test_mode():
+                # Singular matrix from a fabricated test-mode model; this evidence term is discarded.
+                # Return a benign 0.0 so unguarded test-mode paths do not crash (matches the reconstruction
+                # guard in inversion_util). Normal runs re-raise unchanged. numpy-only: the JAX cholesky
+                # returns NaN rather than raising (which is exactly what "slogdet" exists to avoid).
+                return 0.0
+            raise
+
     @property
     def log_det_curvature_reg_matrix_term(self) -> float:
         """
         The log determinant of [F + reg_coeff*H] is used to determine the Bayesian evidence of the solution.
 
-        This uses the Cholesky decomposition which is already computed before solving the reconstruction.
+        This uses the Cholesky decomposition which is already computed before solving the reconstruction
+        (or ``slogdet`` when ``Settings.log_det_method == "slogdet"`` — see :meth:`_log_det_symmetric_from`).
         """
         if not self.has(cls=AbstractRegularization):
             return 0.0
 
-        try:
-            return 2.0 * self._xp.sum(
-                self._xp.log(
-                    self._xp.diag(
-                        self._xp.linalg.cholesky(self.curvature_reg_matrix_reduced)
-                    )
-                )
-            )
-        except np.linalg.LinAlgError:
-            if is_test_mode():
-                # Singular curvature-reg matrix from a fabricated test-mode model;
-                # this evidence term is discarded. Return a benign 0.0 so unguarded
-                # test-mode paths do not crash (matches the reconstruction guard in
-                # inversion_util). Normal runs re-raise unchanged. numpy-only: the
-                # JAX cholesky returns NaN rather than raising.
-                return 0.0
-            raise
+        return self._log_det_symmetric_from(self.curvature_reg_matrix_reduced)
 
     @property
     def log_det_regularization_matrix_term(self) -> float:
@@ -737,7 +755,8 @@ class AbstractInversion:
         of regularization matrix, Log[Det[Lambda*H]].
 
         Unlike the determinant of the curvature reg matrix, which uses an existing preloading Cholesky decomposition
-        used for the source reconstruction, this uses scipy sparse linear algebra to solve the determinant efficiently.
+        used for the source reconstruction, this uses scipy sparse linear algebra to solve the determinant efficiently
+        (or ``slogdet`` when ``Settings.log_det_method == "slogdet"`` — see :meth:`_log_det_symmetric_from`).
 
         Returns
         -------
@@ -747,21 +766,7 @@ class AbstractInversion:
         if not self.has(cls=AbstractRegularization):
             return 0.0
 
-        try:
-            return 2.0 * self._xp.sum(
-                self._xp.log(
-                    self._xp.diag(
-                        self._xp.linalg.cholesky(self.regularization_matrix_reduced)
-                    )
-                )
-            )
-        except np.linalg.LinAlgError:
-            if is_test_mode():
-                # Singular regularization matrix from a fabricated test-mode model;
-                # this evidence term is discarded. Benign 0.0 in test mode, unchanged
-                # (raise) in normal operation. numpy-only (JAX cholesky returns NaN).
-                return 0.0
-            raise
+        return self._log_det_symmetric_from(self.regularization_matrix_reduced)
 
     @property
     def reconstruction_noise_map_with_covariance(self) -> np.ndarray:
