@@ -7,6 +7,8 @@ from .adapt import Adapt
 from .adapt_split import AdaptSplit
 from .brightness_zeroth import BrightnessZeroth
 from .adapt_split_zeroth import AdaptSplitZeroth
+from .curvature_mask import CurvatureMask
+from .fourth_order_mask import FourthOrderMask
 from .gaussian_kernel import GaussianKernel
 from .exponential_kernel import ExponentialKernel
 from .matern_kernel import MaternKernel
