@@ -6,7 +6,7 @@ import numpy as np
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Tuple, Union
 
-from autoconf import cached_property
+from autonerves import cached_property
 
 from autoarray.structures.abstract_structure import Structure
 
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from autoarray.structures.arrays.uniform_2d import Array2D
 
 
-from autoconf.fitsable import ndarray_via_fits_from
+from autonerves.fitsable import ndarray_via_fits_from
 
 from autoarray.mask.abstract_mask import Mask
 

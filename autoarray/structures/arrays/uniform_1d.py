@@ -2,7 +2,7 @@ import numpy as np
 from pathlib import Path
 from typing import Optional, Union, Tuple, List
 
-from autoconf.fitsable import ndarray_via_fits_from, header_obj_from
+from autonerves.fitsable import ndarray_via_fits_from, header_obj_from
 
 from autoarray.structures.header import Header
 

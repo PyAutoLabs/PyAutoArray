@@ -421,7 +421,7 @@ def test__from_fits__output_to_fits__roundtrip_preserves_values_pixel_scales_and
 
     os.makedirs(output_path)
 
-    from autoconf.fitsable import output_to_fits
+    from autonerves.fitsable import output_to_fits
     output_to_fits(
         values=mask.astype("float"),
         file_path=Path(output_path) / "mask.fits",

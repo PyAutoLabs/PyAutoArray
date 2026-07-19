@@ -2,7 +2,7 @@ import numpy as np
 import scipy.spatial
 from typing import Tuple
 
-from autoconf import cached_property
+from autonerves import cached_property
 
 from autoarray.geometry.geometry_2d_irregular import Geometry2DIrregular
 from autoarray.inversion.linear_obj.neighbors import Neighbors

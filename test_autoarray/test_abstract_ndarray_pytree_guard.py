@@ -42,7 +42,7 @@ class _FakeArray(AbstractNDArray):
 def test_instance_flatten_excludes_cached_property_names():
     """``AbstractNDArray.instance_flatten`` unions the class-level
     ``__no_flatten__`` with the result of
-    ``autoconf.tools.decorators.cached_property_names`` so derived
+    ``autonerves.tools.decorators.cached_property_names`` so derived
     cached strings stay out of the pytree leaves.
 
     This pins the structural defense that follows PyAutoFit#1300: the

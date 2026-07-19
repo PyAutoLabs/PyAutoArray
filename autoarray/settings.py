@@ -1,7 +1,7 @@
 import logging
 from typing import Optional
 
-from autoconf import conf
+from autonerves import conf
 
 logging.basicConfig()
 logger = logging.getLogger(__name__)

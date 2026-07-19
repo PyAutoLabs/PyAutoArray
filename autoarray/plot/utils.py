@@ -79,7 +79,7 @@ def auto_mask_edge(array) -> Optional[np.ndarray]:
 def zoom_array(array):
     """Crop *array* around its mask when ``zoom_around_mask`` is enabled in config.
 
-    Reads ``visualize/general/general/zoom_around_mask`` from the autoconf
+    Reads ``visualize/general/general/zoom_around_mask`` from the autonerves
     configuration.  When the flag is ``True`` and *array* carries a non-trivial
     mask the array is cropped via ``Zoom2D`` so that downstream ``imshow``
     calls fill the axes without empty black borders.
@@ -98,7 +98,7 @@ def zoom_array(array):
         unmodified.
     """
     try:
-        from autoconf import conf
+        from autonerves import conf
 
         zoom_around_mask = conf.instance["visualize"]["general"]["general"][
             "zoom_around_mask"
@@ -400,7 +400,7 @@ def conf_mat_plot_fontsize(section: str, default: int) -> int:
         The configured font size.
     """
     try:
-        from autoconf import conf
+        from autonerves import conf
 
         return int(
             conf.instance["visualize"]["general"]["mat_plot"][section]["fontsize"]
@@ -432,7 +432,7 @@ def conf_figsize(context: str = "figures") -> Tuple[int, int]:
         ``"figures"`` (single-panel) or ``"subplots"`` (multi-panel).
     """
     try:
-        from autoconf import conf
+        from autonerves import conf
 
         if context == "figures":
             raw = conf.instance["visualize"]["general"]["mat_plot"]["figure"]["figsize"]
@@ -450,7 +450,7 @@ def conf_subplot_figsize(rows: int, cols: int) -> Tuple[int, int]:
     ``(cols * fx, rows * fy)``.
     """
     try:
-        from autoconf import conf
+        from autonerves import conf
 
         raw = conf.instance["visualize"]["general"]["mat_plot"]["figure"][
             "subplot_shape_to_figsize_factor"
@@ -532,7 +532,7 @@ def save_figure(
         format = _conf_output_format()
 
     if dpi is None:
-        from autoconf import conf
+        from autonerves import conf
         dpi = int(conf.instance["visualize"]["general"]["general"]["dpi"])
 
     if _output_mode_save(fig, filename):
@@ -595,7 +595,7 @@ def plot_visibilities_1d(vis, ax, title: str = "") -> None:
 
 def _conf_colorbar(key: str, default):
     try:
-        from autoconf import conf
+        from autonerves import conf
         return conf.instance["visualize"]["general"]["colorbar"][key]
     except Exception:
         return default
@@ -663,7 +663,7 @@ def _colorbar_tick_labels(tick_values: List[float], cb_unit: Optional[str] = Non
     """
     if cb_unit is None:
         try:
-            from autoconf import conf
+            from autonerves import conf
             cb_unit = conf.instance["visualize"]["general"]["units"]["cb_unit"]
         except Exception:
             cb_unit = ""
@@ -763,7 +763,7 @@ def _apply_contours(
         the config value is used.
     """
     try:
-        from autoconf import conf
+        from autonerves import conf
         _c = conf.instance["visualize"]["general"]["contour"]
         total = int(n if n is not None else _c.get("total_contours", 10))
         include_values = bool(_c.get("include_values", True))
@@ -774,7 +774,7 @@ def _apply_contours(
     try:
         if use_log10:
             try:
-                from autoconf import conf
+                from autonerves import conf
                 log10_min = float(conf.instance["visualize"]["general"]["general"]["log10_min_value"])
             except Exception:
                 log10_min = 1.0e-4
@@ -828,7 +828,7 @@ def hide_unused_axes(axes) -> None:
 def _default_colormap() -> str:
     """Return the colormap name from config, registering the custom one if needed."""
     try:
-        from autoconf import conf
+        from autonerves import conf
         name = conf.instance["visualize"]["general"]["colormap"]
     except Exception:
         name = "autoarray"
@@ -841,7 +841,7 @@ def _default_colormap() -> str:
 def _conf_imshow_origin() -> str:
     """Return the imshow origin from config (``"upper"`` or ``"lower"``)."""
     try:
-        from autoconf import conf
+        from autonerves import conf
         return conf.instance["visualize"]["general"]["general"]["imshow_origin"]
     except Exception:
         return "upper"
@@ -850,7 +850,7 @@ def _conf_imshow_origin() -> str:
 def _conf_output_format() -> str:
     """Return the default output_format from config (``"show"``, ``"png"``, etc.)."""
     try:
-        from autoconf import conf
+        from autonerves import conf
         return conf.instance["visualize"]["general"]["general"]["output_format"]
     except Exception:
         return "show"
@@ -858,7 +858,7 @@ def _conf_output_format() -> str:
 
 def _conf_ticks(key: str, default: float) -> float:
     try:
-        from autoconf import conf
+        from autonerves import conf
         return float(conf.instance["visualize"]["general"]["ticks"][key])
     except Exception:
         return default
@@ -866,7 +866,7 @@ def _conf_ticks(key: str, default: float) -> float:
 
 def _conf_ticks_flag(key: str, default: bool) -> bool:
     try:
-        from autoconf import conf
+        from autonerves import conf
         return bool(conf.instance["visualize"]["general"]["ticks"][key])
     except Exception:
         return default

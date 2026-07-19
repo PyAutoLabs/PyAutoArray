@@ -1,6 +1,6 @@
 import numpy as np
 
-from autoconf import cached_property
+from autonerves import cached_property
 
 from autoarray.inversion.mesh.interpolator.delaunay import InterpolatorDelaunay
 

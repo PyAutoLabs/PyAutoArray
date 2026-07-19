@@ -4,7 +4,7 @@ import numpy as np
 from pathlib import Path
 from typing import Optional, Union
 
-from autoconf import conf
+from autonerves import conf
 
 from autoarray.inversion.mappers.abstract import Mapper
 from autoarray.plot.array import plot_array

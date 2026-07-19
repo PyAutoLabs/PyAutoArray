@@ -99,7 +99,7 @@ def test__vectors_within_radius():
 
 
 def test__json_round_trip(tmp_path):
-    from autoconf.dictable import output_to_json, from_json
+    from autonerves.dictable import output_to_json, from_json
 
     vectors = aa.VectorYX2DIrregular(
         values=[(0.1, 0.2), (0.3, 0.4)],

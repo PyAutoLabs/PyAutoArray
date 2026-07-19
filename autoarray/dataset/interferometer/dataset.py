@@ -2,8 +2,8 @@ import logging
 import numpy as np
 from typing import Optional
 
-from autoconf.fitsable import ndarray_via_fits_from
-from autoconf import cached_property
+from autonerves.fitsable import ndarray_via_fits_from
+from autonerves import cached_property
 
 from autoarray.dataset.abstract.dataset import AbstractDataset
 from autoarray.dataset.grids import GridsDataset

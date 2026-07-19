@@ -1,6 +1,6 @@
 import logging
 
-from autoconf import conf
+from autonerves import conf
 
 
 logger = logging.getLogger(__name__)

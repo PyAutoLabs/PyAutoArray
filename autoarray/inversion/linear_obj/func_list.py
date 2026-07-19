@@ -1,7 +1,7 @@
 import numpy as np
 from typing import Optional
 
-from autoconf import cached_property
+from autonerves import cached_property
 
 from autoarray.inversion.linear_obj.linear_obj import LinearObj
 from autoarray.inversion.linear_obj.neighbors import Neighbors

@@ -4,7 +4,7 @@ from autoarray.structures.triangles.abstract import HEIGHT_FACTOR
 from autoarray.structures.triangles.abstract import AbstractTriangles
 from autoarray.structures.triangles.array_np import ArrayTrianglesNp
 from autoarray.structures.triangles.shape import Shape
-from autoconf import cached_property
+from autonerves import cached_property
 
 
 class CoordinateArrayTrianglesNp(AbstractTriangles):
