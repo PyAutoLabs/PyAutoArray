@@ -3,7 +3,7 @@ import shutil
 from pathlib import Path
 
 
-SMALL_DATASETS_SHAPE_NATIVE = (15, 15)
+SMALL_DATASETS_SHAPE_NATIVE = (16, 16)
 SMALL_DATASETS_PIXEL_SCALES = 0.6
 
 
@@ -15,10 +15,10 @@ def cap_array_2d_for_small_datasets(array_2d, pixel_scales):
     Returns ``(array_2d, pixel_scales)`` unchanged in any of these cases:
 
     - ``PYAUTO_SMALL_DATASETS`` is not set to ``"1"``.
-    - ``array_2d.shape_native`` is already at-or-below the cap (15, 15).
+    - ``array_2d.shape_native`` is already at-or-below the cap (16, 16).
 
-    When the env var is set and the input shape exceeds (15, 15), returns a
-    new ``Array2D`` center-cropped to (15, 15) with ``pixel_scales`` overridden
+    When the env var is set and the input shape exceeds (16, 16), returns a
+    new ``Array2D`` center-cropped to (16, 16) with ``pixel_scales`` overridden
     to 0.6 — matching the convention used by ``Mask2D.circular`` and
     ``Grid2D.uniform`` so the loaded dataset stays shape-consistent with masks
     and grids built under the same env var.

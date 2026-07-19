@@ -361,8 +361,8 @@ class Mask2D(Mask):
         """
 
         if os.environ.get("PYAUTO_SMALL_DATASETS") == "1":
-            if shape_native[0] > 15 or shape_native[1] > 15:
-                shape_native = (15, 15)
+            if shape_native[0] > 16 or shape_native[1] > 16:
+                shape_native = (16, 16)
                 pixel_scales = 0.6
             scale_scalar = (
                 pixel_scales

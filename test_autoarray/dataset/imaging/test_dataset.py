@@ -196,8 +196,8 @@ def test__from_fits__small_datasets_env_caps_data_and_noise_map(
         noise_map_path=Path(test_data_path) / "noise_map_30x30.fits",
     )
 
-    assert dataset.data.shape_native == (15, 15)
-    assert dataset.noise_map.shape_native == (15, 15)
+    assert dataset.data.shape_native == (16, 16)
+    assert dataset.noise_map.shape_native == (16, 16)
     assert dataset.pixel_scales == (0.6, 0.6)
     assert dataset.psf.kernel.shape_native == (5, 5)
 

@@ -134,11 +134,11 @@ def test__circular__small_datasets_env__oversized_radius_clamped_to_disc(monkeyp
 
     mask = aa.Mask2D.circular(shape_native=(100, 100), pixel_scales=0.1, radius=6.0)
 
-    assert mask.shape_native == (15, 15)
+    assert mask.shape_native == (16, 16)
     assert mask.pixel_scales == (0.6, 0.6)
     assert mask.is_circular
     n_unmasked = int((~mask.array).sum())
-    assert 100 < n_unmasked < 225
+    assert 100 < n_unmasked < 256
 
 
 def test__circular__small_datasets_env__in_bounds_radius_unchanged(monkeypatch):
@@ -161,7 +161,7 @@ def test__circular__small_datasets_env__tuple_pixel_scales_oversized_radius_clam
         shape_native=(200, 200), pixel_scales=(0.1, 0.1), radius=7.5
     )
 
-    assert mask.shape_native == (15, 15)
+    assert mask.shape_native == (16, 16)
     assert mask.is_circular
 
 
