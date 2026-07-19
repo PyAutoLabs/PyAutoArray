@@ -12,4 +12,4 @@
 
 ## Ecosystem
 
-- Built on PyAutoConf (config); used by PyAutoGalaxy and PyAutoLens, which inherit its grid decorators and JAX `xp` backend.
+- Built on PyAutoNerves (config); used by PyAutoGalaxy and PyAutoLens, which inherit its grid decorators and JAX `xp` backend.

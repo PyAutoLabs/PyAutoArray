@@ -16,7 +16,7 @@ Shared utilities (e.g. `test_mode`, `jax_wrapper`) belong in autonerves.
 
 ## Related repos
 
-- **Source siblings:** PyAutoConf (upstream). PyAutoGalaxy / PyAutoLens build
+- **Source siblings:** PyAutoNerves (upstream). PyAutoGalaxy / PyAutoLens build
   directly on autoarray.
 - No `_workspace`, `_workspace_test`, or HowTo of its own. The JAX/`xp` path is
   exercised by the parity scripts in **autogalaxy_workspace_test** and
