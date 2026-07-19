@@ -491,14 +491,14 @@ class Grid2D(Structure):
         origin
             The origin of the grid's mask.
         respect_small_datasets
-            When ``PYAUTO_SMALL_DATASETS=1`` is set, grids larger than 15x15 are silently shrunk to
-            ``(15, 15)`` at ``pixel_scales=0.6`` to keep smoke runs fast. Pass ``False`` to opt out
+            When ``PYAUTO_SMALL_DATASETS=1`` is set, grids larger than 16x16 are silently shrunk to
+            ``(16, 16)`` at ``pixel_scales=0.6`` to keep smoke runs fast. Pass ``False`` to opt out
             of that shrink for grids whose spatial extent is load-bearing for the script (e.g. a
             visualization asserting cluster-scale critical curves at ~30-50").
         """
         if respect_small_datasets and os.environ.get("PYAUTO_SMALL_DATASETS") == "1":
-            if shape_native[0] > 15 or shape_native[1] > 15:
-                shape_native = (15, 15)
+            if shape_native[0] > 16 or shape_native[1] > 16:
+                shape_native = (16, 16)
                 pixel_scales = 0.6
 
         pixel_scales = geometry_util.convert_pixel_scales_2d(pixel_scales=pixel_scales)

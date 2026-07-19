@@ -59,12 +59,13 @@ def test__env_set__shape_above_cap__center_crops_and_overrides_pixel_scales(
     assert result.shape_native == SMALL_DATASETS_SHAPE_NATIVE
     assert pixel_scales == SMALL_DATASETS_PIXEL_SCALES
 
-    h0 = (150 - 15) // 2
-    expected = raw[h0:h0 + 15, h0:h0 + 15]
+    cap_h, cap_w = SMALL_DATASETS_SHAPE_NATIVE
+    h0, w0 = (150 - cap_h) // 2, (150 - cap_w) // 2
+    expected = raw[h0:h0 + cap_h, w0:w0 + cap_w]
     assert (result.native.array == expected).all()
 
 
-def test__env_set__non_square_above_cap__center_crops_to_15x15(monkeypatch):
+def test__env_set__non_square_above_cap__center_crops_to_16x16(monkeypatch):
     monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
 
     array = _array_2d((100, 50))
