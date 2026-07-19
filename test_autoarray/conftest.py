@@ -4,7 +4,7 @@ import pytest
 from matplotlib import pyplot
 
 from autoarray import fixtures
-from autoconf import conf
+from autonerves import conf
 
 
 class PlotPatch:

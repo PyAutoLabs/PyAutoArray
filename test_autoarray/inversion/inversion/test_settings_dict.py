@@ -4,7 +4,7 @@ import pytest
 from pathlib import Path
 
 import autoarray as aa
-from autoconf.dictable import from_dict, output_to_json, from_json
+from autonerves.dictable import from_dict, output_to_json, from_json
 
 
 @pytest.fixture(name="settings_dict")

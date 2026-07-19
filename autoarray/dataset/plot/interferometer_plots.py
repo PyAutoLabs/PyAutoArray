@@ -177,7 +177,7 @@ def fits_interferometer(
     overwrite : bool
         If ``True`` existing files are replaced.
     """
-    from autoconf.fitsable import output_to_fits, hdu_list_for_output_from, write_hdu_list
+    from autonerves.fitsable import output_to_fits, hdu_list_for_output_from, write_hdu_list
 
     if file_path is not None:
         values_list = []

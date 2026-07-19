@@ -5,7 +5,7 @@ import numpy as np
 from pathlib import Path
 from typing import List, Tuple, Union
 
-from autoconf.fitsable import ndarray_via_fits_from, output_to_fits
+from autonerves.fitsable import ndarray_via_fits_from, output_to_fits
 
 from autoarray.structures.abstract_structure import Structure
 from autoarray.structures.grids.irregular_2d import Grid2DIrregular

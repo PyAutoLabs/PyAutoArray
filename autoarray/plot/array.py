@@ -163,7 +163,7 @@ def plot_array(
     # --- colour normalisation --------------------------------------------------
     if use_log10:
         try:
-            from autoconf import conf as _conf
+            from autonerves import conf as _conf
 
             log10_min = _conf.instance["visualize"]["general"]["general"][
                 "log10_min_value"

@@ -1,4 +1,4 @@
-from autoconf import conf
+from autonerves import conf
 
 from autoarray.plot.utils import _arcsec_labels
 

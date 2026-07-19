@@ -10,9 +10,9 @@ numerical-utility layer: masks, arrays, (y,x) grids, imaging/interferometer
 datasets, inversions/pixelizations, convolution/over-sampling operators, and
 the grid decorators used throughout PyAutoGalaxy and PyAutoLens.
 
-Dependency direction: autoarray depends on **autoconf** only. It does **not**
+Dependency direction: autoarray depends on **autonerves** only. It does **not**
 import `autofit`, `autogalaxy`, or `autolens` — never add such an import.
-Shared utilities (e.g. `test_mode`, `jax_wrapper`) belong in autoconf.
+Shared utilities (e.g. `test_mode`, `jax_wrapper`) belong in autonerves.
 
 ## Related repos
 
@@ -55,7 +55,7 @@ is no black/ruff/flake8 gate — formatting is advisory. (`requires-python` in
 
 ## Configuration & defaults
 
-autoconf supplies the packaged defaults under `autoarray/config/`. Workspaces
+autonerves supplies the packaged defaults under `autoarray/config/`. Workspaces
 override them via their own `config/` directory; the test suite pushes a local
 config dir via `conf.instance.push(...)` in `test_autoarray/conftest.py`. When
 a change adds a new config key, mirror it into the packaged defaults so
@@ -97,7 +97,7 @@ from `AbstractNDArray`; `.array` returns the raw `numpy.ndarray` / `jax.Array`.
 
 ## Key rules / footguns
 
-- Import direction: autoconf only — never `autofit` / `autogalaxy` / `autolens`.
+- Import direction: autonerves only — never `autofit` / `autogalaxy` / `autolens`.
 - Grid-consuming functions decorated with `@aa.decorators.to_array` / `to_grid`
   / `to_vector_yx` must return a **raw array** — the decorator wraps it. (Write
   `aa.decorators.*`; `aa.grid_dec` is a deprecated alias.)

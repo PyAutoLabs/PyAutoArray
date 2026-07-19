@@ -45,7 +45,7 @@ import numpy as np
 from functools import partial
 from typing import Optional
 
-from autoconf import cached_property
+from autonerves import cached_property
 
 from autoarray.inversion.mesh.interpolator.rectangular import (
     InterpolatorRectangular,

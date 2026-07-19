@@ -219,7 +219,7 @@ def fits_imaging(
     overwrite : bool
         If ``True`` existing files are replaced.
     """
-    from autoconf.fitsable import output_to_fits, hdu_list_for_output_from, write_hdu_list
+    from autonerves.fitsable import output_to_fits, hdu_list_for_output_from, write_hdu_list
 
     header_dict = dataset.data.mask.header_dict if hasattr(dataset.data.mask, "header_dict") else None
 

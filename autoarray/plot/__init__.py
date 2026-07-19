@@ -1,7 +1,7 @@
 def _set_backend():
     try:
         import matplotlib
-        from autoconf import conf
+        from autonerves import conf
 
         backend = conf.get_matplotlib_backend()
         if backend != "default":

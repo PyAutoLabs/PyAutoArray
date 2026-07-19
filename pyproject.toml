@@ -26,7 +26,7 @@ classifiers = [
 ]
 keywords = ["cli"]
 dependencies = [
-    "autoconf",
+    "autonerves",
     "astropy>=5.0,<=7.2.0",
     "decorator>=4.0.0",
     "dill>=0.3.1.1",
@@ -52,7 +52,7 @@ local_scheme = "no-local-version"
 
 
 [project.optional-dependencies]
-jax = ["autoconf[jax]"]
+jax = ["autonerves[jax]"]
 optional = [
     "autoarray[jax]",
     "numba",
@@ -62,7 +62,7 @@ optional = [
     # regularization path (autoarray/inversion/regularization/matern_kernel.py).
     # The last *stable* release (tensorflow-probability==0.25.0) targets a JAX where
     # `jax.interpreters.xla.pytype_aval_mappings` still existed; it crashes at import
-    # under the resolved `jax>=0.7` stack (autoconf[jax]). The nightly restores
+    # under the resolved `jax>=0.7` stack (autonerves[jax]). The nightly restores
     # compatibility. Durable fix (vendor bessel_kve, drop tfp) tracked separately.
     "tfp-nightly==0.26.0.dev20260713"
 ]

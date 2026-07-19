@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from autoarray.structures.abstract_structure import Structure
 
-from autoconf import conf
+from autonerves import conf
 
 
 def to_new_array(func):
@@ -66,7 +66,7 @@ _pytree_registered_classes: set = set()
 
 
 def _register_as_pytree(cls):
-    """Register ``cls`` with ``jax.tree_util`` via the lazy autoconf wrapper.
+    """Register ``cls`` with ``jax.tree_util`` via the lazy autonerves wrapper.
 
     Gated: only called when a subclass instance is constructed on the JAX path
     (``xp is not np``). The registration is class-scoped via
@@ -75,7 +75,7 @@ def _register_as_pytree(cls):
     """
     if cls in _pytree_registered_classes:
         return
-    from autoconf.jax_wrapper import register_pytree_node
+    from autonerves.jax_wrapper import register_pytree_node
 
     register_pytree_node(cls, cls.instance_flatten, cls.instance_unflatten)
     _pytree_registered_classes.add(cls)
@@ -101,8 +101,8 @@ def register_instance_pytree(cls, no_flatten=()):
     """
     if cls in _pytree_registered_classes:
         return
-    from autoconf.jax_wrapper import register_pytree_node
-    from autoconf.tools.decorators import cached_property_names
+    from autonerves.jax_wrapper import register_pytree_node
+    from autonerves.tools.decorators import cached_property_names
 
     # Extend the caller-supplied no_flatten set with every
     # ``cached_property``-style descriptor on ``cls`` so derived caches
@@ -180,7 +180,7 @@ class AbstractNDArray(ABC):
         """
         Flatten an instance of an autoarray class into a tuple of its attributes (i.e.. a pytree)
         """
-        from autoconf.tools.decorators import cached_property_names
+        from autonerves.tools.decorators import cached_property_names
 
         # Union the class-level ``__no_flatten__`` opt-out with any
         # ``cached_property`` descriptor names so derived caches don't

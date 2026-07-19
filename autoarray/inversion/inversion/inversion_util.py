@@ -2,7 +2,7 @@ import numpy as np
 
 from typing import List, Optional, Type
 
-from autoconf import is_test_mode
+from autonerves import is_test_mode
 
 from autoarray.settings import Settings
 
@@ -288,7 +288,7 @@ def reconstruction_positive_only_from(
     """
     if xp.__name__.startswith("jax"):
 
-        from autoconf import conf
+        from autonerves import conf
 
         from autoarray.util.jax_nnls import solve_nnls_primal
 

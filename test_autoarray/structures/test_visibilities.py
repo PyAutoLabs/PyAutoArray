@@ -100,7 +100,7 @@ def test__output_to_fits():
 
     os.makedirs(output_test_path)
 
-    from autoconf.fitsable import output_to_fits
+    from autonerves.fitsable import output_to_fits
     output_to_fits(values=visibilities.in_array, file_path=output_test_path / "data.fits")
 
     visibilities_from_out = aa.Visibilities.from_fits(

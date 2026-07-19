@@ -1,7 +1,7 @@
 from typing import Tuple
 import numpy as np
 
-from autoconf import cached_property
+from autonerves import cached_property
 
 from autoarray.inversion.mesh.interpolator.abstract import AbstractInterpolator
 from autoarray.geometry.geometry_2d import Geometry2D

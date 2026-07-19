@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional, Tuple, Union
 import warnings
 
-from autoconf import conf
+from autonerves import conf
 from autoarray.structures.arrays.uniform_2d import Array2D
 from autoarray.structures.grids.uniform_2d import Grid2D
 

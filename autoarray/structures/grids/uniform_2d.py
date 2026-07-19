@@ -4,8 +4,8 @@ import numpy as np
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
-from autoconf import conf
-from autoconf.fitsable import ndarray_via_fits_from
+from autonerves import conf
+from autonerves.fitsable import ndarray_via_fits_from
 
 from autoarray.mask.mask_2d import Mask2D
 from autoarray.structures.abstract_structure import Structure

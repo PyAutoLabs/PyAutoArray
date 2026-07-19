@@ -33,7 +33,7 @@ from typing import Callable, Optional, Tuple
 
 import numpy as np
 
-from autoconf import cached_property
+from autonerves import cached_property
 
 from autoarray.inversion.mesh.interpolator.abstract import AbstractInterpolator
 from autoarray.inversion.mesh.interpolator.rectangular import InterpolatorRectangular

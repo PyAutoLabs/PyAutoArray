@@ -3,7 +3,7 @@ import copy
 import numpy as np
 from typing import Dict, List, Optional, Type, Union
 
-from autoconf import cached_property, is_test_mode
+from autonerves import cached_property, is_test_mode
 
 from autoarray.dataset.imaging.dataset import Imaging
 from autoarray.dataset.interferometer.dataset import Interferometer
