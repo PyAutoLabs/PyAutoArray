@@ -53,6 +53,30 @@ def test__from_gaussian__normalized__kernel_values_match_expected():
     )
 
 
+def test__from_gaussian__small_datasets__kernel_keeps_full_requested_shape(monkeypatch):
+    """
+    The `PYAUTO_SMALL_DATASETS` fast-mode cap shrinks datasets (and the grids paired with
+    them) to 16x16, but a convolution kernel's shape is intrinsic to the operator. If the
+    cap reached the grid the Gaussian is evaluated on, its 256 values would be wrapped in an
+    `Array2D` at the uncapped `shape_native` of 961, raising an `ArrayException`.
+    """
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
+
+    convolver = aa.Convolver.from_gaussian(
+        shape_native=(31, 31),
+        pixel_scales=0.1,
+        sigma=0.1,
+    )
+
+    assert convolver.kernel.shape_native == (31, 31)
+
+    image = aa.Array2D.ones(shape_native=(16, 16), pixel_scales=0.1)
+
+    blurred_image = convolver.convolved_image_from(image=image, blurring_image=None)
+
+    assert blurred_image.shape_native == (16, 16)
+
+
 def test__normalize__ones_kernel__each_element_equals_one_ninth():
 
     kernel_data = aa.Array2D.ones(shape_native=(3, 3), pixel_scales=1.0)
