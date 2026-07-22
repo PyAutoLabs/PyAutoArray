@@ -5,6 +5,7 @@ from typing import List, Optional, Tuple
 from autonerves import conf
 from autonerves import cached_property
 
+from autoarray import exc
 from autoarray.inversion.linear_obj.linear_obj import LinearObj
 from autoarray.inversion.linear_obj.func_list import UniqueMappings
 from autoarray.inversion.linear_obj.neighbors import Neighbors
@@ -464,7 +465,30 @@ class Mapper(LinearObj):
         signal_scale
             A factor which controls how rapidly the smoothness of regularization varies from high signal regions to
             low signal regions.
+
+        Raises
+        ------
+        exc.InversionException
+            If the `adapt_data` is not defined on the same mask as the data being fitted, which would otherwise
+            surface as a bare `IndexError` from the slim-index lookup inside `adaptive_pixel_signals_from`.
         """
+        adapt_data = self.adapt_data.array
+
+        data_pixels = self.over_sampler.mask.pixels_in_mask
+
+        if adapt_data.shape[0] != data_pixels:
+            raise exc.InversionException(
+                f"The adapt image passed to the mapper has {adapt_data.shape[0]} pixels, but the data being "
+                f"fitted has {data_pixels} pixels, so the adapt image cannot be indexed by the data's pixels.\n\n"
+                "The adapt image is therefore defined on a different mask to the dataset. The usual cause is a "
+                "stale adapt-image cache: the per-galaxy adapt images written to a previous search's "
+                "`files/galaxy_images_*.fits` are keyed by the search identifier, which encodes the model and "
+                "the search but not the dataset. Re-running with a changed mask, image resolution or "
+                "`PYAUTO_SMALL_DATASETS` setting, but an unchanged model, reuses that search's output "
+                "directory and its now-stale cache.\n\n"
+                "Delete the affected search's output directory (or the `galaxy_images_*.fits` files within it) "
+                "and re-run so the adapt images are recomputed on the current mask."
+            )
 
         return mapper_util.adaptive_pixel_signals_from(
             pixels=self.pixels,
@@ -473,7 +497,7 @@ class Mapper(LinearObj):
             pix_indexes_for_sub_slim_index=self.pix_indexes_for_sub_slim_index,
             pix_size_for_sub_slim_index=self.pix_sizes_for_sub_slim_index,
             slim_index_for_sub_slim_index=self.over_sampler.slim_for_sub_slim,
-            adapt_data=self.adapt_data.array,
+            adapt_data=adapt_data,
             xp=xp,
         )
 
