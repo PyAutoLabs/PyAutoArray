@@ -98,7 +98,7 @@ def test__data_weight_total_for_pix_from__multi_pixel_mappings__sums_weights_per
     assert data_weight_total_for_pix == pytest.approx([1.2, 0.7, 0.3, 1.4, 4.4], 1.0e-4)
 
 
-def test__adaptive_pixel_signals_from___matches_util(grid_2d_7x7, image_7x7):
+def test__adaptive_pixel_signals_from___matches_util(grid_2d_7x7):
     pixels = 6
     signal_scale = 2.0
     interpolator = aa.m.MockInterpolator(
@@ -110,11 +110,15 @@ def test__adaptive_pixel_signals_from___matches_util(grid_2d_7x7, image_7x7):
 
     over_sampler = aa.OverSampler(mask=grid_2d_7x7.mask, sub_size=1)
 
+    # The adapt image is defined on the data's own mask, as it is for a real fit.
+
+    adapt_data = aa.Array2D(values=np.ones(9), mask=grid_2d_7x7.mask)
+
     mapper = aa.m.MockMapper(
         source_plane_data_grid=grid_2d_7x7,
         over_sampler=over_sampler,
         interpolator=interpolator,
-        adapt_data=image_7x7,
+        adapt_data=adapt_data,
         parameters=pixels,
     )
 
@@ -127,10 +131,54 @@ def test__adaptive_pixel_signals_from___matches_util(grid_2d_7x7, image_7x7):
         pix_indexes_for_sub_slim_index=interpolator.mappings,
         pix_size_for_sub_slim_index=interpolator.sizes,
         slim_index_for_sub_slim_index=over_sampler.slim_for_sub_slim,
-        adapt_data=np.array(image_7x7),
+        adapt_data=np.array(adapt_data),
     )
 
     assert (pixel_signals == pixel_signals_util).all()
+
+
+def test__pixel_signals_from__adapt_data_on_a_different_mask__raises_clear_exception(
+    grid_2d_7x7,
+):
+    """
+    An adapt image defined on a different mask to the data cannot be indexed by the data's slim indexes.
+
+    The usual cause is a stale adapt-image cache being reused after the dataset's mask changed, and before
+    this guard it surfaced as a bare `IndexError` several frames deep in `adaptive_pixel_signals_from`,
+    which reads as an off-by-one rather than a mask mismatch (PyAutoGalaxy#516).
+    """
+    interpolator = aa.m.MockInterpolator(
+        mappings=np.array([[1], [1], [4], [0], [0], [3], [0], [0], [3]]),
+        sizes=np.array([1, 1, 1, 1, 1, 1, 1, 1, 1]),
+        weights=np.ones(9),
+    )
+
+    over_sampler = aa.OverSampler(mask=grid_2d_7x7.mask, sub_size=1)
+
+    # The data has 9 unmasked pixels, the adapt image only 8.
+
+    adapt_mask = np.full(fill_value=True, shape=(7, 7))
+    adapt_mask[2:5, 2:5] = False
+    adapt_mask[2, 2] = True
+
+    adapt_data = aa.Array2D(
+        values=np.ones(8),
+        mask=aa.Mask2D(mask=adapt_mask, pixel_scales=1.0),
+    )
+
+    mapper = aa.m.MockMapper(
+        source_plane_data_grid=grid_2d_7x7,
+        over_sampler=over_sampler,
+        interpolator=interpolator,
+        adapt_data=adapt_data,
+        parameters=6,
+    )
+
+    with pytest.raises(aa.exc.InversionException) as e:
+        mapper.pixel_signals_from(signal_scale=2.0)
+
+    assert "8 pixels" in str(e.value)
+    assert "9 pixels" in str(e.value)
 
 
 def test__mapped_to_source_from__delaunay_mapper__matches_mapping_matrix_util(
