@@ -699,7 +699,10 @@ class Convolver:
         Parameters
         ----------
         shape_native
-            The 2D shape of the mask the array is paired with.
+            The 2D shape of the mask the array is paired with. The kernel is always built at this
+            size, including when ``PYAUTO_SMALL_DATASETS=1`` is set — a kernel's shape is intrinsic
+            to the convolution operator, not a dataset size, so the fast-mode dataset cap does not
+            apply to it.
         pixel_scales
             The (y,x) arcsecond-to-pixel units conversion factor of every pixel. If this is input as a `float`,
             it is converted to a (float, float).
@@ -718,7 +721,13 @@ class Convolver:
             ``pixel_scales`` input should be the fine resolution (image pixel scale divided by this size).
         """
 
-        grid = Grid2D.uniform(shape_native=shape_native, pixel_scales=pixel_scales)
+        grid = Grid2D.uniform(
+            shape_native=shape_native,
+            pixel_scales=pixel_scales,
+            # The kernel is wrapped in an `Array2D` at `shape_native` below, so letting the
+            # `PYAUTO_SMALL_DATASETS` cap shrink this grid would leave the two inconsistent.
+            respect_small_datasets=False,
+        )
         grid_shifted = np.subtract(grid.array, centre)
         grid_radius = np.sqrt(np.sum(grid_shifted**2.0, 1))
         theta_coordinate_to_profile = np.arctan2(
