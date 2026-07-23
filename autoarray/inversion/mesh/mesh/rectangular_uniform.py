@@ -45,3 +45,9 @@ class RectangularUniform(RectangularAdaptDensity):
         )
 
         return InterpolatorRectangularUniform
+
+    @property
+    def interpolator_kwargs(self) -> dict:
+        # The uniform interpolator performs no kernel-CDF adaption and its
+        # constructor takes no bandwidth / n_knots arguments.
+        return {}

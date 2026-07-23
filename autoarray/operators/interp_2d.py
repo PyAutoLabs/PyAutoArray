@@ -1,9 +1,6 @@
 """
 2D regular-grid bilinear interpolation with NumPy and JAX backends.
 
-Mirrors the 1D dispatch pattern in
-``autoarray.inversion.mesh.interpolator.rectangular_spline``.
-
 NumPy path delegates to ``scipy.interpolate.RegularGridInterpolator``
 (``bounds_error=False``, configurable ``fill_value``). JAX path is built on
 ``jax.scipy.ndimage.map_coordinates(order=1, mode='constant')``.
@@ -62,9 +59,7 @@ def _interp_2d_jax(points, x_axis, y_axis, values, fill_value=0.0):
     # first axis of `values` is interpreted as the x-axis.
     coords = jnp.stack([col_coords, row_coords], axis=0)
 
-    return map_coordinates(
-        values, coords, order=1, mode="constant", cval=fill_value
-    )
+    return map_coordinates(values, coords, order=1, mode="constant", cval=fill_value)
 
 
 def interp_2d(points, x_axis, y_axis, values, fill_value=0.0, xp=np):

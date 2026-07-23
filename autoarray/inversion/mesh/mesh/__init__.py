@@ -1,11 +1,6 @@
 from .abstract import AbstractMesh as Mesh
 from .rectangular_adapt_density import RectangularAdaptDensity
 from .rectangular_adapt_image import RectangularAdaptImage
-from .rectangular_kernel_adapt_density import RectangularKernelAdaptDensity
-from .rectangular_kernel_adapt_image import RectangularKernelAdaptImage
-from .rectangular_spline_adapt_density import RectangularSplineAdaptDensity
-from .rectangular_spline_adapt_image import RectangularSplineAdaptImage
-from .rectangular_rotated_adapt_image import RectangularRotatedAdaptImage
 from .rectangular_uniform import RectangularUniform
 from .delaunay import Delaunay
 from .knn import KNearestNeighbor

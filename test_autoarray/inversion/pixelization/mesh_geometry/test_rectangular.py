@@ -158,10 +158,23 @@ def test__areas_transformed(mask_2d_7x7):
         source_plane_mesh_grid=mesh_grid,
     )
 
-    assert interpolator.mesh_geometry.areas_transformed[4] == pytest.approx(
-        4.0,
-        abs=1e-8,
-    )
+    areas = interpolator.mesh_geometry.areas_transformed
+
+    assert np.all(np.isfinite(areas))
+    assert np.all(areas > 0.0)
+
+    # The unit square maps exactly onto the data bounding box (3.0 x 3.0), so
+    # the per-axis edge differences telescope and the areas sum to its area.
+    assert areas.sum() == pytest.approx(9.0, rel=1e-8)
+
+    # The input grid is 4-fold symmetric, so the transformed areas must be:
+    # equal corners, equal edge-midpoints, single centre value.
+    assert areas[0] == pytest.approx(areas[2], rel=1e-8)
+    assert areas[0] == pytest.approx(areas[6], rel=1e-8)
+    assert areas[0] == pytest.approx(areas[8], rel=1e-8)
+    assert areas[1] == pytest.approx(areas[3], rel=1e-8)
+    assert areas[1] == pytest.approx(areas[5], rel=1e-8)
+    assert areas[1] == pytest.approx(areas[7], rel=1e-8)
 
 
 def test__edges_transformed(mask_2d_7x7):
@@ -236,7 +249,9 @@ def test__edges_transformed__aligned_with_interpolation_node_convention():
     edges_y = (n - rows - 0.5) / (n - 3)
     edges_x = (rows - 1.5) / (n - 3)
     edges = np.stack([edges_y, edges_x]).T
-    edges_t = adaptive_rectangular_transformed_grid_from(data_grid, edges)
+    edges_t = adaptive_rectangular_transformed_grid_from(
+        data_grid, edges, mesh_pixels=n
+    )
     y_edges, x_edges = edges_t.T
 
     centroid_y = 0.0

@@ -1,5 +1,5 @@
 import numpy as np
-from typing import Tuple
+from typing import Optional, Tuple
 
 from autoarray.inversion.mesh.mesh.rectangular_adapt_density import (
     RectangularAdaptDensity,
@@ -13,6 +13,8 @@ class RectangularAdaptImage(RectangularAdaptDensity):
         shape: Tuple[int, int] = (3, 3),
         weight_power: float = 1.0,
         weight_floor: float = 0.0,
+        bandwidth: Optional[float] = None,
+        n_knots: Optional[int] = None,
     ):
         """
         A uniform rectangular mesh of pixels used to reconstruct a source on a
@@ -72,21 +74,29 @@ class RectangularAdaptImage(RectangularAdaptDensity):
         weight_floor : float, optional
             Minimum weight applied to ensure numerical stability in low-intensity
             regions.
+        bandwidth : float, optional
+            Kernel bandwidth in units of the mesh pixel scale (see
+            `RectangularAdaptDensity`). Defaults to the kernel default.
+        n_knots : int, optional
+            Size of the fixed knot table used to invert the CDF. Defaults to
+            the kernel default.
         """
 
-        super().__init__(shape=shape)
+        super().__init__(shape=shape, bandwidth=bandwidth, n_knots=n_knots)
 
         self.weight_power = weight_power
         self.weight_floor = weight_floor
 
     def mesh_weight_map_from(self, adapt_data, xp=np) -> np.ndarray:
         """
-        The weight map of a rectangular pixelization is None, because magnificaiton adaption uses
-        the distribution and density of traced (y,x) coordinates in the source plane and
-        not weights or the adapt data.
+        The weight map the mesh adapts to, computed from the adapt image:
+        clipped, raised to `weight_power`, floored at `weight_floor` and
+        normalized to sum to 1.
 
         Parameters
         ----------
+        adapt_data
+            The adapt image whose (masked) values weight the mesh adaption.
         xp
             The array library to use.
         """
