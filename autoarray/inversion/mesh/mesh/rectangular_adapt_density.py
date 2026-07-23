@@ -62,10 +62,16 @@ def overlay_grid_from(
 
 
 class RectangularAdaptDensity(AbstractMesh):
-    def __init__(self, shape: Tuple[int, int] = (3, 3)):
+    def __init__(
+        self,
+        shape: Tuple[int, int] = (3, 3),
+        bandwidth: Optional[float] = None,
+        n_knots: Optional[int] = None,
+    ):
         """
-        A uniform rectangular mesh of pixels used to reconstruct a source on a
-        regular grid.
+        A rectangular mesh of pixels used to reconstruct a source on a regular
+        grid, whose pixels adapt to the density of the traced source-plane
+        coordinates.
 
         The mesh is defined by a 2D shape `(total_y_pixels, total_x_pixels)` and
         is indexed in row-major order:
@@ -74,23 +80,20 @@ class RectangularAdaptDensity(AbstractMesh):
             - Indices increase from left to right across each row,
               and from top to bottom across rows.
 
-        Each source-plane coordinate is associated with the rectangular pixel
-        in which it lies. No interpolation is performed — every coordinate
-        contributes entirely to a single pixel.
-
         Adaptive behaviour
         ------------------
-        Although the rectangular mesh has a fixed, uniform geometry, it adapts
-        *implicitly* to the spatial density of the points it is paired with.
-        Regions of the source plane where many coordinates map onto the same
-        pixel receive stronger observational constraints, while sparsely
-        sampled regions are more weakly constrained.
+        The mesh adapts to the spatial density of the traced points through a
+        smooth per-axis kernel-density CDF transform: mesh pixels shrink where
+        many coordinates land (e.g. regions of high magnification in
+        gravitational lensing) and grow where sampling is sparse. The
+        inversion therefore achieves higher effective resolution in these
+        regions without changing the fixed rectangular topology.
 
-        In gravitational lensing applications, this naturally concentrates
-        information in regions of high magnification, where many image-plane
-        pixels map to a small area of the source plane. The inversion therefore
-        achieves higher effective resolution in these regions without requiring
-        explicit refinement of the mesh geometry.
+        The kernel CDF is strictly monotone by construction, C-infinity in
+        both the interp queries and the traced-point positions (no ranks, no
+        sorts), and duplicate-safe. It therefore carries correct smooth
+        mass/shear gradients in every configuration — including imaging at
+        pixelization over-sampling 1 and the interferometer sparse path.
 
         Edge handling
         -------------
@@ -105,6 +108,14 @@ class RectangularAdaptDensity(AbstractMesh):
         shape : Tuple[int, int]
             The 2D dimensions of the rectangular pixel grid
             `(total_y_pixels, total_x_pixels)`.
+        bandwidth
+            Kernel bandwidth in units of the mesh pixel scale
+            (data span / mesh pixels per axis). Smaller values track the
+            point density more sharply; larger values smooth the mesh
+            geometry towards uniform. Defaults to the kernel default.
+        n_knots
+            Size of the fixed knot table used to invert the CDF. Defaults to
+            the kernel default.
 
         Raises
         ------
@@ -112,6 +123,10 @@ class RectangularAdaptDensity(AbstractMesh):
             If either dimension is less than 3, as a minimum of 3×3 pixels
             is required to define interior and boundary structure.
         """
+        from autoarray.inversion.mesh.interpolator.rectangular import (
+            KERNEL_CDF_DEFAULT_BANDWIDTH,
+            KERNEL_CDF_DEFAULT_KNOTS,
+        )
 
         if shape[0] <= 2 or shape[1] <= 2:
             raise exc.MeshException(
@@ -120,6 +135,10 @@ class RectangularAdaptDensity(AbstractMesh):
 
         self.shape = (int(shape[0]), int(shape[1]))
         self.pixels = self.shape[0] * self.shape[1]
+        self.bandwidth = float(
+            bandwidth if bandwidth is not None else KERNEL_CDF_DEFAULT_BANDWIDTH
+        )
+        self.n_knots = int(n_knots if n_knots is not None else KERNEL_CDF_DEFAULT_KNOTS)
         super().__init__()
 
     @property
@@ -155,6 +174,16 @@ class RectangularAdaptDensity(AbstractMesh):
         )
 
         return InterpolatorRectangular
+
+    @property
+    def interpolator_kwargs(self) -> dict:
+        """
+        Extra keyword arguments `interpolator_from` forwards to
+        `interpolator_cls` — the kernel-CDF parameters for the adaptive
+        meshes; overridden to `{}` by `RectangularUniform`, whose
+        interpolator takes no kernel arguments.
+        """
+        return {"bandwidth": self.bandwidth, "n_knots": self.n_knots}
 
     def mesh_weight_map_from(self, adapt_data, xp=np) -> np.ndarray:
         """
@@ -228,5 +257,6 @@ class RectangularAdaptDensity(AbstractMesh):
             mesh_grid=Grid2DIrregular(mesh_grid),
             mesh_weight_map=mesh_weight_map,
             adapt_data=adapt_data,
+            **self.interpolator_kwargs,
             xp=xp,
         )

@@ -387,37 +387,6 @@ def rectangular_edge_pixel_list_from(
     return np.sort(edge_pixel_indices).tolist()
 
 
-def adaptive_rectangular_areas_from(
-    source_grid_shape, data_grid, mesh_weight_map=None, xp=np
-):
-
-    from autoarray.inversion.mesh.interpolator.rectangular import (
-        create_transforms,
-    )
-
-    edges_y = xp.linspace(1, 0, source_grid_shape[0] + 1)
-    edges_x = xp.linspace(0, 1, source_grid_shape[1] + 1)
-
-    mu = data_grid.mean(axis=0)
-    scale = data_grid.std(axis=0).min()
-    source_grid_scaled = (data_grid - mu) / scale
-
-    transform, inv_transform = create_transforms(
-        source_grid_scaled, mesh_weight_map=mesh_weight_map, xp=xp
-    )
-
-    def inv_full(U):
-        return inv_transform(U) * scale + mu
-
-    pixel_edges = inv_full(xp.stack([edges_y, edges_x]).T)
-    pixel_lengths = xp.diff(pixel_edges, axis=0).squeeze()  # shape (N_source, 2)
-
-    dy = pixel_lengths[:, 0]
-    dx = pixel_lengths[:, 1]
-
-    return xp.abs(xp.outer(dy, dx).flatten())
-
-
 class MeshGeometryRectangular(AbstractMeshGeometry):
 
     @property
@@ -465,49 +434,36 @@ class MeshGeometryRectangular(AbstractMeshGeometry):
     @property
     def areas_transformed(self):
         """
-        A class packing the ndarrays describing the neighbors of every pixel in the rectangular pixelization (see
-        `Neighbors` for a complete description of the neighboring scheme).
+        The source-plane area of every pixel in the rectangular pixelization,
+        transformed through the kernel-density CDF the mapper adapts with.
 
-        The neighbors of a rectangular pixelization are computed by exploiting the uniform and symmetric nature of the
-        rectangular grid, as described in the method `rectangular_neighbors_from`.
-
-        When ``spline_deg`` is set (spline-CDF meshes), routes through the
-        polynomial+Hermite-spline variant to keep the areas consistent with
-        the mapper's CDF choice; when ``kernel_bandwidth`` is set
-        (kernel-CDF meshes), through the kernel-density variant. Otherwise
-        uses the linear-interp CDF.
+        ``kernel_bandwidth`` / ``kernel_knots`` of None (e.g. the uniform
+        mesh's interpolator, which passes no kernel arguments) fall back to
+        the kernel defaults.
         """
-        if self.spline_deg is not None:
-            from autoarray.inversion.mesh.interpolator.rectangular_spline import (
-                adaptive_rectangular_areas_from_spline,
-            )
+        from autoarray.inversion.mesh.interpolator.rectangular import (
+            KERNEL_CDF_DEFAULT_BANDWIDTH,
+            KERNEL_CDF_DEFAULT_KNOTS,
+            adaptive_rectangular_areas_from,
+        )
 
-            return adaptive_rectangular_areas_from_spline(
-                source_grid_shape=self.shape_native,
-                data_grid=self.data_grid.over_sampled,
-                mesh_weight_map=self.mesh_weight_map,
-                deg=self.spline_deg,
-                xp=self._xp,
-            )
-
-        if self.kernel_bandwidth is not None:
-            from autoarray.inversion.mesh.interpolator.rectangular_kernel import (
-                adaptive_rectangular_areas_from_kernel,
-            )
-
-            return adaptive_rectangular_areas_from_kernel(
-                source_grid_shape=self.shape_native,
-                data_grid=self.data_grid.over_sampled,
-                mesh_weight_map=self.mesh_weight_map,
-                bandwidth=self.kernel_bandwidth,
-                n_knots=self.kernel_knots,
-                xp=self._xp,
-            )
+        bandwidth = (
+            self.kernel_bandwidth
+            if self.kernel_bandwidth is not None
+            else KERNEL_CDF_DEFAULT_BANDWIDTH
+        )
+        n_knots = (
+            self.kernel_knots
+            if self.kernel_knots is not None
+            else KERNEL_CDF_DEFAULT_KNOTS
+        )
 
         return adaptive_rectangular_areas_from(
             source_grid_shape=self.shape_native,
             data_grid=self.data_grid.over_sampled,
             mesh_weight_map=self.mesh_weight_map,
+            bandwidth=bandwidth,
+            n_knots=n_knots,
             xp=self._xp,
         )
 
@@ -552,42 +508,30 @@ class MeshGeometryRectangular(AbstractMeshGeometry):
 
         edges_reshaped = self._xp.stack([edges_y, edges_x]).T
 
-        if self.spline_deg is not None:
-            from autoarray.inversion.mesh.interpolator.rectangular_spline import (
-                adaptive_rectangular_transformed_grid_from_spline,
-            )
-
-            return adaptive_rectangular_transformed_grid_from_spline(
-                data_grid=self.data_grid.array,
-                grid=edges_reshaped,
-                mesh_weight_map=self.mesh_weight_map,
-                deg=self.spline_deg,
-                xp=self._xp,
-            )
-
-        if self.kernel_bandwidth is not None:
-            from autoarray.inversion.mesh.interpolator.rectangular_kernel import (
-                adaptive_rectangular_transformed_grid_from_kernel,
-            )
-
-            return adaptive_rectangular_transformed_grid_from_kernel(
-                data_grid=self.data_grid.array,
-                grid=edges_reshaped,
-                mesh_pixels=self.shape_native[0],
-                mesh_weight_map=self.mesh_weight_map,
-                bandwidth=self.kernel_bandwidth,
-                n_knots=self.kernel_knots,
-                xp=self._xp,
-            )
-
         from autoarray.inversion.mesh.interpolator.rectangular import (
+            KERNEL_CDF_DEFAULT_BANDWIDTH,
+            KERNEL_CDF_DEFAULT_KNOTS,
             adaptive_rectangular_transformed_grid_from,
+        )
+
+        bandwidth = (
+            self.kernel_bandwidth
+            if self.kernel_bandwidth is not None
+            else KERNEL_CDF_DEFAULT_BANDWIDTH
+        )
+        n_knots = (
+            self.kernel_knots
+            if self.kernel_knots is not None
+            else KERNEL_CDF_DEFAULT_KNOTS
         )
 
         return adaptive_rectangular_transformed_grid_from(
             data_grid=self.data_grid.array,
             grid=edges_reshaped,
+            mesh_pixels=self.shape_native[0],
             mesh_weight_map=self.mesh_weight_map,
+            bandwidth=bandwidth,
+            n_knots=n_knots,
             xp=self._xp,
         )
 

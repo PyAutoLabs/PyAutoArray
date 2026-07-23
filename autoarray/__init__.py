@@ -78,7 +78,6 @@ from .operators.over_sampling.over_sampler import OverSampler
 from .structures.grids.irregular_2d import Grid2DIrregular
 from .inversion.mesh.mesh_geometry.rectangular import MeshGeometryRectangular
 from .inversion.mesh.mesh_geometry.delaunay import MeshGeometryDelaunay
-from .inversion.mesh.interpolator.rectangular import InterpolatorRectangular
 from .inversion.mesh.interpolator.delaunay import InterpolatorDelaunay
 from .operators.convolver import Convolver
 from .operators.interp_2d import interp_2d
