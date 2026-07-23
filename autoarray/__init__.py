@@ -106,7 +106,7 @@ from autonerves.fitsable import hdu_list_for_output_from
 
 conf.instance.register(__file__)
 
-__version__ = "2026.7.22.1"
+__version__ = "2026.7.23.1"
 
 # ---------------------------------------------------------------------------
 # Public re-export of the autonerves configuration / serialization surface.
