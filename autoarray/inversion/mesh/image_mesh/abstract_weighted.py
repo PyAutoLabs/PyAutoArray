@@ -57,7 +57,19 @@ class AbstractImageMeshWeighted(AbstractImageMesh):
         The weight map which is used to adapt the Delaunay pixels in the image-plane to components in the data.
         """
 
-        weight_map = np.abs(adapt_data) / np.max(adapt_data)
+        max_value = np.max(adapt_data)
+
+        if max_value <= 0.0:
+            # A blank adapt image (all-zero, or with no positive signal) carries
+            # no structure to adapt the mesh to. Normalising by ``np.max`` would
+            # divide by zero (or a non-positive peak), producing NaN/negative
+            # weights that propagate into NaN mesh coordinates and crash the
+            # downstream Delaunay/Voronoi triangulation ("Points cannot contain
+            # NaN"). Fall back to a uniform weight map so the mesh degrades to
+            # uniform sampling instead of failing.
+            return np.ones_like(adapt_data, dtype=float)
+
+        weight_map = np.abs(adapt_data) / max_value
         weight_map = weight_map**self.weight_power
 
         weight_map[weight_map < self.weight_floor] = self.weight_floor
