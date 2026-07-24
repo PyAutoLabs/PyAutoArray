@@ -1,6 +1,7 @@
 import autoarray.plot as aplt
 from autoarray.inversion.mappers.abstract import Mapper
 
+import numpy as np
 import pytest
 from pathlib import Path
 
@@ -62,3 +63,32 @@ def test__inversion_subplot_of_mapper__is_output_for_all_inversions(
         output_format="png",
     )
     assert str(Path(plot_path) / "mappings_0.png") in plot_patch.paths
+
+
+def test__inversion_subplot_of_mapper__singular_curvature_reg_matrix(
+    rectangular_inversion_7x7_3x3,
+    plot_path,
+    plot_patch,
+    monkeypatch,
+):
+    inversion = rectangular_inversion_7x7_3x3
+
+    params = inversion.linear_obj_list[0].params
+
+    monkeypatch.setattr(
+        type(inversion),
+        "reconstruction_noise_map_with_covariance",
+        property(lambda self: np.sqrt(np.linalg.inv(np.zeros((params, params))))),
+    )
+
+    with pytest.raises(np.linalg.LinAlgError):
+        inversion.reconstruction_noise_map_dict
+
+    aplt.subplot_of_mapper(
+        inversion=inversion,
+        mapper_index=0,
+        output_path=plot_path,
+        output_format="png",
+    )
+
+    assert str(Path(plot_path) / "inversion_0.png") in plot_patch.paths

@@ -166,7 +166,7 @@ def subplot_of_mapper(
             mesh_grid=mesh_grid,
             lines=lines,
         )
-    except (KeyError, TypeError):
+    except (KeyError, TypeError, np.linalg.LinAlgError):
         pass
 
     # panel 7: regularization weights
