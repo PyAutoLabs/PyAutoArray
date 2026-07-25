@@ -369,6 +369,14 @@ def save_reconstruction_csv(
     One file is written per mapper: ``source_plane_reconstruction_{i}.csv``,
     with columns ``y``, ``x``, ``reconstruction``, ``noise_map``.
 
+    The reconstruction noise map inverts the curvature regularization matrix, which is
+    singular for rank-deficient inversions (e.g. the reduced-iteration searches used by
+    test profiles). The column schema is fixed, because consumers index the CSV by
+    column name, so in that case the ``noise_map`` column is written as ``nan`` (with a
+    logged warning) rather than omitted, and the file is still written: the
+    reconstruction is a science product in its own right and must not be lost, nor may
+    a failure here abort the enclosing model-fit.
+
     Parameters
     ----------
     inversion
@@ -383,10 +391,20 @@ def save_reconstruction_csv(
         y = mapper.source_plane_mesh_grid[:, 0]
         x = mapper.source_plane_mesh_grid[:, 1]
         reconstruction = inversion.reconstruction_dict[mapper]
-        noise_map = inversion.reconstruction_noise_map_dict[mapper]
+
+        try:
+            noise_map = inversion.reconstruction_noise_map_dict[mapper]
+        except np.linalg.LinAlgError:
+            logger.warning(
+                f"save_reconstruction_csv: could not compute the reconstruction noise map for "
+                f"mapper {i} (singular curvature_reg_matrix); writing the noise_map column of "
+                f"source_plane_reconstruction_{i}.csv as nan."
+            )
+            noise_map = None
 
         with open(output_path / f"source_plane_reconstruction_{i}.csv", mode="w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["y", "x", "reconstruction", "noise_map"])
             for j in range(len(x)):
-                writer.writerow([float(y[j]), float(x[j]), float(reconstruction[j]), float(noise_map[j])])
+                noise_value = float("nan") if noise_map is None else float(noise_map[j])
+                writer.writerow([float(y[j]), float(x[j]), float(reconstruction[j]), noise_value])

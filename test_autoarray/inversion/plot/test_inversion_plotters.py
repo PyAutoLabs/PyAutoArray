@@ -1,6 +1,8 @@
 import autoarray.plot as aplt
 from autoarray.inversion.mappers.abstract import Mapper
+from autoarray.inversion.plot.inversion_plots import save_reconstruction_csv
 
+import csv
 import numpy as np
 import pytest
 from pathlib import Path
@@ -92,3 +94,46 @@ def test__inversion_subplot_of_mapper__singular_curvature_reg_matrix(
     )
 
     assert str(Path(plot_path) / "inversion_0.png") in plot_patch.paths
+
+
+def test__save_reconstruction_csv__singular_curvature_reg_matrix(
+    rectangular_inversion_7x7_3x3,
+    tmp_path,
+    monkeypatch,
+):
+    inversion = rectangular_inversion_7x7_3x3
+
+    params = inversion.linear_obj_list[0].params
+
+    monkeypatch.setattr(
+        type(inversion),
+        "reconstruction_noise_map_with_covariance",
+        property(lambda self: np.sqrt(np.linalg.inv(np.zeros((params, params))))),
+    )
+
+    with pytest.raises(np.linalg.LinAlgError):
+        inversion.reconstruction_noise_map_dict
+
+    save_reconstruction_csv(inversion=inversion, output_path=tmp_path)
+
+    csv_path = tmp_path / "source_plane_reconstruction_0.csv"
+
+    assert csv_path.exists()
+
+    with open(csv_path, mode="r") as f:
+        reader = csv.reader(f)
+        header_list = next(reader)
+        row_list = [row for row in reader]
+
+    # The column schema is unchanged, because consumers index the CSV by column name.
+
+    assert header_list == ["y", "x", "reconstruction", "noise_map"]
+
+    mapper = inversion.cls_list_from(cls=Mapper)[0]
+
+    assert len(row_list) == len(mapper.source_plane_mesh_grid)
+
+    for row in row_list:
+        assert np.isfinite(float(row[0]))
+        assert np.isfinite(float(row[1]))
+        assert np.isnan(float(row[3]))
