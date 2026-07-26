@@ -32,7 +32,22 @@ class Delaunay(AbstractMesh):
         zero between re-wiring events), while point location, barycentric
         weights, dual areas and split points are computed in-graph from the
         traced vertices, so ``jax.grad`` returns the exact almost-everywhere
-        derivative. Caveat for batched samplers: the callback is
+        derivative.
+
+        In what sense "autodifferentiable"? The same sense as a ReLU network:
+        the likelihood is piecewise-smooth — perfectly smooth within each
+        triangulation topology, with measure-zero jump discontinuities at the
+        triangle-flip (re-wiring) boundaries, where no gradient exists for
+        any method. A sampler almost surely never lands on a seam, and on
+        either side autodiff returns the exact gradient of the branch the
+        evaluation point is on (FD comparisons show the seams, autodiff does
+        not — individual finite-difference steps can straddle a flip). This
+        contrasts the adaptive rectangular (kernel-CDF) meshes, which are
+        C-infinity by construction with no seams at all — the cleanest choice
+        for gradient-based inference, with Delaunay a scientifically exact
+        piecewise-smooth alternative.
+
+        Caveat for batched samplers: the callback is
         ``vmap_method="sequential"`` (one host qhull call per vmap lane) —
         the ``KNearestNeighbor`` / ``KNNBarycentric`` subclasses avoid the
         callback entirely and remain the batched-throughput option.
