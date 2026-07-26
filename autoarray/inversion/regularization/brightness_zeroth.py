@@ -82,10 +82,15 @@ class BrightnessZeroth(AbstractRegularization):
 
         A full description of regularization and this matrix can be found in the parent `AbstractRegularization` class.
 
-        **JAX & gradient support** (2026-07 gradient sweep): not yet xp-ported —
-        the pixel-signal thresholding applies numpy operations to traced
-        arrays, raising ``TracerArrayConversionError`` under ``jax.jit`` /
-        ``jax.grad`` on every mesh.
+        **JAX & gradient support** (xp-ported 2026-07-26): the pixel-signals
+        call now threads ``xp`` (it previously dropped the backend, raising
+        ``TracerArrayConversionError`` under ``jax.jit`` / ``jax.grad``), so
+        the scheme is JAX-differentiable — the weights and diagonal matrix
+        are smooth functions of the pixel signals, FD-certified through
+        ``AdaptSplitZeroth`` (8.2e-8 on the KNN meshes). Standalone use
+        under-regularizes high-signal pixels (weights → 0 where the source
+        is) and can leave the linear system singular — it is a supplement to
+        a smoothing scheme by design, not a standalone regularization.
 
         Parameters
         ----------
@@ -120,7 +125,9 @@ class BrightnessZeroth(AbstractRegularization):
         -------
         The regularization weights.
         """
-        pixel_signals = linear_obj.pixel_signals_from(signal_scale=self.signal_scale)
+        pixel_signals = linear_obj.pixel_signals_from(
+            signal_scale=self.signal_scale, xp=xp
+        )
 
         return brightness_zeroth_regularization_weights_from(
             coefficient=self.coefficient, pixel_signals=pixel_signals
