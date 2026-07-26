@@ -172,6 +172,15 @@ class Adapt(AbstractRegularization):
 
         A full description of regularization and this matrix can be found in the parent `AbstractRegularization` class.
 
+        **JAX & gradient support** (2026-07 gradient sweep): as for
+        ``Constant`` — JAX-differentiable and FD-certified on the rectangular
+        mesh family (this is the rectangular production scheme), but raises
+        ``TracerArrayConversionError`` on the Delaunay mesh family, whose
+        neighbors come from a direct scipy call on the traced mesh grid (use
+        ``AdaptSplit`` there). Note the defaults
+        ``inner_coefficient == outer_coefficient == 1.0`` make the weighting
+        uniform — numerically identical to ``Constant(coefficient=1.0)``.
+
         Parameters
         ----------
         coefficients

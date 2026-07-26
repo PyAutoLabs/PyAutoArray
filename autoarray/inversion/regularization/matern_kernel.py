@@ -1,7 +1,7 @@
 from __future__ import annotations
 import numpy as np
 import math
-from typing import TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from autoarray.inversion.linear_obj.linear_obj import LinearObj
@@ -89,6 +89,7 @@ def matern_cov_matrix_from(
     nu: float,
     pixel_points,
     weights=None,
+    jitter: float = 1e-8,
     xp=np,
 ):
     """
@@ -109,6 +110,8 @@ def matern_cov_matrix_from(
         Array-like of shape [N, 2] with (y, x) coordinates (or any 2D coords; only distances matter).
     weights
         Optional array-like of shape [N]. If None, treated as all ones.
+    jitter
+        The small value added to the covariance diagonal for numerical stability.
     xp
         Backend (numpy or jax.numpy).
 
@@ -146,7 +149,7 @@ def matern_cov_matrix_from(
     # Add diagonal jitter (JAX-safe)
     # --------------------------------
     pixels = pts.shape[0]
-    covariance_matrix = covariance_matrix + 1e-8 * xp.eye(
+    covariance_matrix = covariance_matrix + jitter * xp.eye(
         pixels, dtype=covariance_matrix.dtype
     )
 
@@ -171,7 +174,13 @@ def inv_via_cholesky(C, xp=np):
 
 
 class MaternKernel(AbstractRegularization):
-    def __init__(self, coefficient: float = 1.0, scale: float = 1.0, nu: float = 0.5):
+    def __init__(
+        self,
+        coefficient: float = 1.0,
+        scale: float = 1.0,
+        nu: float = 0.5,
+        jitter: Optional[float] = None,
+    ):
         """
         Regularization which uses a Matern smoothing kernel to regularize the solution.
 
@@ -187,6 +196,18 @@ class MaternKernel(AbstractRegularization):
 
         A full description of regularization and this matrix can be found in the parent `AbstractRegularization` class.
 
+        **JAX & gradient support** (2026-07 gradient sweep): the JAX path
+        evaluates the modified Bessel ``K_nu`` through
+        ``tensorflow_probability.substrates.jax.math.bessel_kve`` (requires
+        ``tfp-nightly``; see ``kv_xp``), which ships a registered gradient
+        with respect to its argument (``nu`` is a static float), and the
+        covariance inverse differentiates through the Cholesky — gradients
+        flow end-to-end and are FD-certified on the rectangular mesh at
+        ``nu=2.5``. Caveat: the regularization matrix is an explicit dense
+        inverse, so on clustered mesh vertices (e.g. the KNN meshes' traced
+        vertices, where cond(C) can reach ~1e9) it puts a ~1e-6 absolute
+        numerical noise floor on the likelihood.
+
         Parameters
         ----------
         coefficient
@@ -195,12 +216,22 @@ class MaternKernel(AbstractRegularization):
             The typical scale of the exponential regularization pattern.
         nu
             Controls the derivative of the regularization pattern (`nu=0.5` is a Gaussian).
+        jitter
+            The small value added to the covariance diagonal for numerical stability.
+            ``None`` (default) uses the historical value 1e-8 — behaviour is identical
+            to not having this parameter (it is a fixed setting, not a free model
+            parameter, hence the ``None`` default).
         """
 
         self.coefficient = coefficient
         self.scale = scale
         self.nu = nu
+        self.jitter = jitter
         super().__init__()
+
+    @property
+    def jitter_value(self) -> float:
+        return 1e-8 if self.jitter is None else self.jitter
 
     def regularization_weights_from(self, linear_obj: LinearObj, xp=np) -> np.ndarray:
         """
@@ -240,7 +271,34 @@ class MaternKernel(AbstractRegularization):
             scale=self.scale,
             pixel_points=linear_obj.source_plane_mesh_grid.array,
             nu=self.nu,
+            jitter=self.jitter_value,
             xp=xp,
         )
 
         return self.coefficient * inv_via_cholesky(covariance_matrix, xp=xp)
+
+    def log_det_regularization_matrix_term_from(
+        self, linear_obj: LinearObj, xp=np
+    ) -> float:
+        """
+        The analytically exact ``log det H`` from a single Cholesky of the kernel
+        covariance: ``H = coefficient * C^-1``, so
+        ``log det H = pixels * log(coefficient) - 2 * sum(log(diag(cholesky(C))))``.
+
+        Consumed by the inversion only when ``Settings.log_det_method == "slogdet"``
+        (see :meth:`AbstractRegularization.log_det_regularization_matrix_term_from`);
+        the default evidence path factorizes the formed ``H`` and is unchanged.
+        """
+        covariance_matrix = matern_cov_matrix_from(
+            scale=self.scale,
+            pixel_points=linear_obj.source_plane_mesh_grid.array,
+            nu=self.nu,
+            jitter=self.jitter_value,
+            xp=xp,
+        )
+
+        log_det_covariance = 2.0 * xp.sum(
+            xp.log(xp.diag(xp.linalg.cholesky(covariance_matrix)))
+        )
+
+        return linear_obj.params * np.log(self.coefficient) - log_det_covariance

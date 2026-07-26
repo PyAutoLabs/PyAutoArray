@@ -25,6 +25,33 @@ class Delaunay(AbstractMesh):
         according to their barycentric distances, providing a smooth, piecewise-linear
         reconstruction.
 
+        **JAX & gradient support** (2026-07-26, FD-certified): the likelihood
+        runs under ``jax.jit`` and is differentiable — the host-called qhull
+        ``pure_callback`` returns only integer connectivity tables (frozen
+        under differentiation via ``stop_gradient``; their true derivative is
+        zero between re-wiring events), while point location, barycentric
+        weights, dual areas and split points are computed in-graph from the
+        traced vertices, so ``jax.grad`` returns the exact almost-everywhere
+        derivative.
+
+        In what sense "autodifferentiable"? The same sense as a ReLU network:
+        the likelihood is piecewise-smooth — perfectly smooth within each
+        triangulation topology, with measure-zero jump discontinuities at the
+        triangle-flip (re-wiring) boundaries, where no gradient exists for
+        any method. A sampler almost surely never lands on a seam, and on
+        either side autodiff returns the exact gradient of the branch the
+        evaluation point is on (FD comparisons show the seams, autodiff does
+        not — individual finite-difference steps can straddle a flip). This
+        contrasts the adaptive rectangular (kernel-CDF) meshes, which are
+        C-infinity by construction with no seams at all — the cleanest choice
+        for gradient-based inference, with Delaunay a scientifically exact
+        piecewise-smooth alternative.
+
+        Caveat for batched samplers: the callback is
+        ``vmap_method="sequential"`` (one host qhull call per vmap lane) —
+        the ``KNearestNeighbor`` / ``KNNBarycentric`` subclasses avoid the
+        callback entirely and remain the batched-throughput option.
+
         Zeroed pixels
         -------------
         The `zeroed_pixels` parameter specifies a number of mesh vertices that are

@@ -60,6 +60,10 @@ class Zeroth(AbstractRegularization):
 
         A full description of regularization and this matrix can be found in the parent `AbstractRegularization` class.
 
+        **JAX & gradient support** (2026-07 gradient sweep): neighbor-free and
+        pure-xp — JAX-differentiable and FD-certified on both the rectangular
+        and KNN mesh families.
+
         Parameters
         ----------
         coefficient

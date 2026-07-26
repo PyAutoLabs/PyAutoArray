@@ -60,6 +60,12 @@ class AdaptSplitZeroth(Adapt):
 
         A full description of regularization and this matrix can be found in the parent `AbstractRegularization` class.
 
+        **JAX & gradient support** (xp-ported 2026-07-26): FD-certified on
+        the Delaunay mesh family (KNN meshes, 8.2e-8 max rel err) — the
+        zeroth leg's dropped-``xp`` call site in ``BrightnessZeroth`` was the
+        blocker. Still structurally incompatible with the rectangular meshes
+        (the split leg's shape mismatch, as ``ConstantSplit``).
+
         Parameters
         ----------
         coefficients

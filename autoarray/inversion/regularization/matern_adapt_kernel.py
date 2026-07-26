@@ -1,6 +1,6 @@
 from __future__ import annotations
 import numpy as np
-from typing import TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING
 
 from autoarray.inversion.regularization.matern_kernel import MaternKernel
 
@@ -21,6 +21,7 @@ class MaternAdaptKernel(MaternKernel):
         inner_coefficient: float = 1.0,
         outer_coefficient: float = 1.0,
         signal_scale: float = 1.0,
+        jitter: Optional[float] = None,
     ):
         """
         Regularization which uses a Matern smoothing kernel to regularize the solution with regularization weights
@@ -43,6 +44,11 @@ class MaternAdaptKernel(MaternKernel):
 
         A full description of regularization and this matrix can be found in the parent `AbstractRegularization` class.
 
+        **JAX & gradient support**: as for ``MaternKernel`` (tfp
+        ``bessel_kve`` gradients; explicit-inverse conditioning caveat). Note
+        the defaults ``inner_coefficient == outer_coefficient == 1.0`` make
+        the weighting uniform — numerically identical to ``MaternKernel``.
+
         Parameters
         ----------
         coefficient
@@ -58,7 +64,7 @@ class MaternAdaptKernel(MaternKernel):
             receive significantly higher weights (and faint pixels lower weights), while smaller values produce a
             more uniform weighting. Typical values are of order unity (e.g. 0.5–2.0).
         """
-        super().__init__(coefficient=0.0, scale=scale, nu=nu)
+        super().__init__(coefficient=0.0, scale=scale, nu=nu, jitter=jitter)
         self.inner_coefficient = inner_coefficient
         self.outer_coefficient = outer_coefficient
         self.signal_scale = signal_scale
@@ -104,7 +110,35 @@ class MaternAdaptKernel(MaternKernel):
             pixel_points=pixel_points,
             nu=self.nu,
             weights=kernel_weights,
+            jitter=self.jitter_value,
             xp=xp,
         )
 
         return inv_via_cholesky(covariance_matrix, xp=xp)
+
+    def log_det_regularization_matrix_term_from(
+        self, linear_obj: LinearObj, xp=np
+    ) -> float:
+        """
+        The analytically exact ``log det H`` from a single Cholesky of the weighted
+        kernel covariance: this scheme's ``H = C_w^-1`` (no coefficient scaling — the
+        adaptive weights are inside ``C_w``), so ``log det H = -log det C_w``.
+
+        Consumed by the inversion only when ``Settings.log_det_method == "slogdet"``
+        (see :meth:`AbstractRegularization.log_det_regularization_matrix_term_from`);
+        the default evidence path factorizes the formed ``H`` and is unchanged.
+        """
+        kernel_weights = 1.0 / self.regularization_weights_from(
+            linear_obj=linear_obj, xp=xp
+        )
+
+        covariance_matrix = matern_cov_matrix_from(
+            scale=self.scale,
+            pixel_points=linear_obj.source_plane_mesh_grid.array,
+            nu=self.nu,
+            weights=kernel_weights,
+            jitter=self.jitter_value,
+            xp=xp,
+        )
+
+        return -2.0 * xp.sum(xp.log(xp.diag(xp.linalg.cholesky(covariance_matrix))))
