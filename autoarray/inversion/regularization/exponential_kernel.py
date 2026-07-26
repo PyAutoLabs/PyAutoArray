@@ -20,30 +20,40 @@ def exp_cov_matrix_from(
 
     with a tiny jitter 1e-8 added on the diagonal for numerical stability.
 
+    The pairwise distances use the ``||x||^2 + ||y||^2 - 2 x.y`` identity with a
+    ``sqrt(d^2 + 1e-20)`` floor (mirroring ``matern_cov_matrix_from``) rather than
+    ``linalg.norm`` of an (N, N, 2) difference cube: the norm's derivative is NaN at
+    the zero diagonal, which would poison every JAX gradient through this kernel.
+
     Parameters
     ----------
     scale
         The length‐scale of the exponential kernel.
     pixel_points
         Array of shape (N, 2) giving the (y,x) coordinates of each source‐plane pixel.
+    xp
+        Backend (numpy or jax.numpy).
 
     Returns
     -------
     np.ndarray, shape (N, N)
         The exponential covariance matrix.
     """
-    # pairwise differences: shape (N, N, 2)
-    diff = pixel_points[:, None, :] - pixel_points[None, :, :]
+    pts = xp.asarray(pixel_points)
 
-    # Euclidean distances: shape (N, N)
-    d = xp.linalg.norm(diff, axis=-1)
+    # ||x - y||^2 = ||x||^2 + ||y||^2 - 2 x·y
+    x2 = xp.sum(pts * pts, axis=1, keepdims=True)  # (N, 1)
+    dist_sq = x2 + x2.T - 2.0 * (pts @ pts.T)  # (N, N)
+    dist_sq = xp.maximum(dist_sq, 0.0)  # numerical safety
+
+    d = xp.sqrt(dist_sq + 1e-20)  # (N, N)
 
     # exponential kernel
     cov = xp.exp(-d / scale)
 
     # add a small jitter on the diagonal
-    N = pixel_points.shape[0]
-    cov = cov + xp.eye(N) * 1e-8
+    N = pts.shape[0]
+    cov = cov + xp.eye(N, dtype=cov.dtype) * 1e-8
 
     return cov
 
@@ -63,6 +73,14 @@ class ExponentialKernel(AbstractRegularization):
         This scheme is introduced by Vernardos et al. (2022): https://arxiv.org/abs/2202.09378
 
         A full description of regularization and this matrix can be found in the parent `AbstractRegularization` class.
+
+        **JAX & gradient support** (2026-07): xp-threaded and
+        JAX-differentiable end-to-end — the pairwise distances use the
+        NaN-safe ``sqrt(d^2 + 1e-20)`` form (see ``exp_cov_matrix_from``).
+        Caveat: the regularization matrix is an explicit dense inverse of the
+        kernel covariance, whose conditioning on clustered mesh vertices puts
+        a small numerical noise floor on the likelihood (see ``MaternKernel``
+        for the measured detail).
 
         Parameters
         ----------
@@ -113,6 +131,7 @@ class ExponentialKernel(AbstractRegularization):
         covariance_matrix = exp_cov_matrix_from(
             scale=self.scale,
             pixel_points=linear_obj.source_plane_mesh_grid.array,
+            xp=xp,
         )
 
         return self.coefficient * xp.linalg.inv(covariance_matrix)

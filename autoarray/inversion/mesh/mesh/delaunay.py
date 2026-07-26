@@ -25,6 +25,12 @@ class Delaunay(AbstractMesh):
         according to their barycentric distances, providing a smooth, piecewise-linear
         reconstruction.
 
+        **JAX & gradient support**: the likelihood runs under ``jax.jit``
+        (the triangulation is host-called via ``jax.pure_callback``), but
+        ``jax.grad`` is unavailable — ``pure_callback`` has no JVP rule. The
+        ``KNearestNeighbor`` / ``KNNBarycentric`` subclasses are the
+        gradient-capable members of this mesh family.
+
         Zeroed pixels
         -------------
         The `zeroed_pixels` parameter specifies a number of mesh vertices that are

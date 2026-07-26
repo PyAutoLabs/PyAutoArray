@@ -35,6 +35,13 @@ class ConstantSplit(Constant):
 
         A full description of regularization and this matrix can be found in the parent `AbstractRegularization` class.
 
+        **JAX & gradient support** (2026-07 gradient sweep): differentiable and
+        FD-certified on the Delaunay mesh family (e.g. the KNN meshes), whose
+        interpolators supply pure-xp split mappings. Structurally incompatible
+        with the rectangular meshes, whose interpolator reuses its per-query
+        4-corner mappings for the split path (shape error) — use ``Constant``
+        or ``Adapt`` there.
+
         Parameters
         ----------
         coefficient

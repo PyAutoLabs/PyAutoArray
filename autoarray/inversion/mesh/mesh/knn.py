@@ -26,6 +26,16 @@ class KNearestNeighbor(Delaunay):
         Neighbour connections may be further restricted using a distance-based criterion,
         and optionally subdivided to improve stability for highly irregular meshes.
 
+        **JAX & gradient support** (2026-07, FD-certified): the kNN
+        interpolation is pure JAX (blocked brute-force ``lax.top_k`` +
+        Wendland weights — no scipy callback), so unlike the parent
+        ``Delaunay`` mesh the full likelihood is differentiable, with
+        gradients flowing through both the traced query points and the
+        traced mesh vertices. Pair it with a split-family regularization
+        (``ConstantSplit`` / ``AdaptSplit``) or a kernel scheme — the
+        neighbor-based schemes (``Constant`` / ``Adapt``) call scipy on the
+        traced mesh grid and cannot differentiate.
+
         Parameters
         ----------
         pixels : int
@@ -92,6 +102,11 @@ class KNNBarycentric(KNearestNeighbor):
     (``k_neighbors``, ``radius_scale``, ``split_neighbor_division``) are
     inherited and still control the regularization-spacing computation, but the
     *interpolation* weights always use k=3 + barycentric and ignore them.
+    Gradients are FD-certified like the parent (2026-07), but this mesh
+    FAILED its science gate as a Delaunay replacement (PyAutoArray#317 —
+    ~5% of vertices are never any query's nearest-3, drifting the
+    log-evidence by ~2%): use it for gradient experiments, not production
+    science.
     """
 
     @property

@@ -187,6 +187,18 @@ class MaternKernel(AbstractRegularization):
 
         A full description of regularization and this matrix can be found in the parent `AbstractRegularization` class.
 
+        **JAX & gradient support** (2026-07 gradient sweep): the JAX path
+        evaluates the modified Bessel ``K_nu`` through
+        ``tensorflow_probability.substrates.jax.math.bessel_kve`` (requires
+        ``tfp-nightly``; see ``kv_xp``), which ships a registered gradient
+        with respect to its argument (``nu`` is a static float), and the
+        covariance inverse differentiates through the Cholesky — gradients
+        flow end-to-end and are FD-certified on the rectangular mesh at
+        ``nu=2.5``. Caveat: the regularization matrix is an explicit dense
+        inverse, so on clustered mesh vertices (e.g. the KNN meshes' traced
+        vertices, where cond(C) can reach ~1e9) it puts a ~1e-6 absolute
+        numerical noise floor on the likelihood.
+
         Parameters
         ----------
         coefficient

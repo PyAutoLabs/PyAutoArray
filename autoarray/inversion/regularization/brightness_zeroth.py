@@ -82,6 +82,11 @@ class BrightnessZeroth(AbstractRegularization):
 
         A full description of regularization and this matrix can be found in the parent `AbstractRegularization` class.
 
+        **JAX & gradient support** (2026-07 gradient sweep): not yet xp-ported —
+        the pixel-signal thresholding applies numpy operations to traced
+        arrays, raising ``TracerArrayConversionError`` under ``jax.jit`` /
+        ``jax.grad`` on every mesh.
+
         Parameters
         ----------
         coefficient

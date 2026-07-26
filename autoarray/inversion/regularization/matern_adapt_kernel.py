@@ -43,6 +43,11 @@ class MaternAdaptKernel(MaternKernel):
 
         A full description of regularization and this matrix can be found in the parent `AbstractRegularization` class.
 
+        **JAX & gradient support**: as for ``MaternKernel`` (tfp
+        ``bessel_kve`` gradients; explicit-inverse conditioning caveat). Note
+        the defaults ``inner_coefficient == outer_coefficient == 1.0`` make
+        the weighting uniform — numerically identical to ``MaternKernel``.
+
         Parameters
         ----------
         coefficient

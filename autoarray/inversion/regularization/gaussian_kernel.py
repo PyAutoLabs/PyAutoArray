@@ -64,6 +64,12 @@ class GaussianKernel(AbstractRegularization):
 
         A full description of regularization and this matrix can be found in the parent `AbstractRegularization` class.
 
+        **JAX & gradient support** (2026-07 gradient sweep): xp-threaded and
+        JAX-differentiable end-to-end. Caveat: the regularization matrix is an
+        explicit dense inverse of the kernel covariance, whose conditioning on
+        clustered mesh vertices puts a small numerical noise floor on the
+        likelihood (see ``MaternKernel`` for the measured detail).
+
         Parameters
         ----------
         coefficient

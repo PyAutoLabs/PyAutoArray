@@ -60,6 +60,12 @@ class AdaptSplitZeroth(Adapt):
 
         A full description of regularization and this matrix can be found in the parent `AbstractRegularization` class.
 
+        **JAX & gradient support** (2026-07 gradient sweep): not currently
+        JAX-differentiable on either gradient-capable mesh family — the split
+        leg is structurally incompatible with the rectangular meshes (shape
+        error) and the zeroth/adapt legs hit numpy-on-traced-array operations
+        on the Delaunay mesh family (``TracerArrayConversionError``).
+
         Parameters
         ----------
         coefficients
