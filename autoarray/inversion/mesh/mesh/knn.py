@@ -28,13 +28,15 @@ class KNearestNeighbor(Delaunay):
 
         **JAX & gradient support** (2026-07, FD-certified): the kNN
         interpolation is pure JAX (blocked brute-force ``lax.top_k`` +
-        Wendland weights — no scipy callback), so unlike the parent
-        ``Delaunay`` mesh the full likelihood is differentiable, with
-        gradients flowing through both the traced query points and the
-        traced mesh vertices. Pair it with a split-family regularization
-        (``ConstantSplit`` / ``AdaptSplit``) or a kernel scheme — the
-        neighbor-based schemes (``Constant`` / ``Adapt``) call scipy on the
-        traced mesh grid and cannot differentiate.
+        Wendland weights — no scipy callback), so the full likelihood is
+        differentiable, with gradients flowing through both the traced query
+        points and the traced mesh vertices. (The parent ``Delaunay`` mesh
+        is also differentiable as of 2026-07-26 via its frozen integer
+        tables; this mesh's remaining edge is batched throughput — no
+        per-vmap-lane host callback.) Pair it with a split-family
+        regularization (``ConstantSplit`` / ``AdaptSplit``) or a kernel
+        scheme — the neighbor-based schemes (``Constant`` / ``Adapt``) call
+        scipy on the traced mesh grid and cannot differentiate.
 
         Parameters
         ----------

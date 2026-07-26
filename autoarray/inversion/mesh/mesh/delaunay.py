@@ -25,11 +25,17 @@ class Delaunay(AbstractMesh):
         according to their barycentric distances, providing a smooth, piecewise-linear
         reconstruction.
 
-        **JAX & gradient support**: the likelihood runs under ``jax.jit``
-        (the triangulation is host-called via ``jax.pure_callback``), but
-        ``jax.grad`` is unavailable — ``pure_callback`` has no JVP rule. The
-        ``KNearestNeighbor`` / ``KNNBarycentric`` subclasses are the
-        gradient-capable members of this mesh family.
+        **JAX & gradient support** (2026-07-26, FD-certified): the likelihood
+        runs under ``jax.jit`` and is differentiable — the host-called qhull
+        ``pure_callback`` returns only integer connectivity tables (frozen
+        under differentiation via ``stop_gradient``; their true derivative is
+        zero between re-wiring events), while point location, barycentric
+        weights, dual areas and split points are computed in-graph from the
+        traced vertices, so ``jax.grad`` returns the exact almost-everywhere
+        derivative. Caveat for batched samplers: the callback is
+        ``vmap_method="sequential"`` (one host qhull call per vmap lane) —
+        the ``KNearestNeighbor`` / ``KNNBarycentric`` subclasses avoid the
+        callback entirely and remain the batched-throughput option.
 
         Zeroed pixels
         -------------

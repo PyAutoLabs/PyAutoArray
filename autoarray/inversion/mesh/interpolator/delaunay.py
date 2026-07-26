@@ -118,7 +118,22 @@ def scipy_delaunay_tri_only(points_np):
 
 
 def _jax_delaunay_tables(points):
-    """Run the qhull-only callback with fixed output shapes."""
+    """Run the qhull-only callback with fixed output shapes.
+
+    The callback input is wrapped in ``stop_gradient`` so ``jax.grad`` /
+    ``jax.value_and_grad`` flow through the Delaunay likelihood
+    (``pure_callback`` has no JVP rule and would otherwise raise). This is
+    NOT an approximation: the callback returns only int32 connectivity
+    tables, which are piecewise-constant in the vertex positions — their
+    true derivative is exactly zero everywhere except the measure-zero
+    re-wiring (triangle-flip) events, where the likelihood itself is
+    discontinuous and no gradient exists for any method. Every quantity
+    with a non-zero derivative (point location via the visibility walk,
+    barycentric weights, dual areas, split points) is computed in-graph
+    from the traced ``points``, so the frozen-tables gradient is the exact
+    almost-everywhere derivative. FD-certified 2026-07-26
+    (autolens_workspace_test ``scripts/imaging/jax_grad/delaunay.py``).
+    """
     import jax
     import jax.numpy as jnp
 
@@ -130,7 +145,7 @@ def _jax_delaunay_tables(points):
             jax.ShapeDtypeStruct((2 * N, 3), jnp.int32),
             jax.ShapeDtypeStruct((N,), jnp.int32),
         ),
-        points,
+        jax.lax.stop_gradient(points),
         vmap_method="sequential",
     )
 
