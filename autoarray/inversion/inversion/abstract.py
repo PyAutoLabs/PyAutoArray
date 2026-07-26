@@ -758,6 +758,17 @@ class AbstractInversion:
         used for the source reconstruction, this uses scipy sparse linear algebra to solve the determinant efficiently
         (or ``slogdet`` when ``Settings.log_det_method == "slogdet"`` — see :meth:`_log_det_symmetric_from`).
 
+        Under ``log_det_method == "slogdet"`` (opt-in, default off — PyAutoArray#391), regularization schemes
+        which know a factorization of their own matrix may additionally supply the term directly via
+        :meth:`AbstractRegularization.log_det_regularization_matrix_term_from` — the kernel schemes
+        (``MaternKernel`` etc.) return the analytically exact ``pixels * log(coeff) - log det C`` from a single
+        Cholesky of their covariance ``C``, avoiding the round-off of factorizing the explicitly formed inverse
+        (which reaches ~1e-6 absolute in the evidence at cond(C) ~ 1e9 on clustered traced mesh vertices).
+        Because ``regularization_matrix_reduced`` is the block diagonal of the per-object matrices when every
+        linear object is regularized, the term is the sum of the per-object terms; if any scheme has no
+        shortcut (returns ``None``) the whole computation falls back to ``slogdet`` of the formed matrix.
+        The default ``"cholesky"`` path never consults the shortcut, so default evidence values are unchanged.
+
         Returns
         -------
         float
@@ -765,6 +776,22 @@ class AbstractInversion:
         """
         if not self.has(cls=AbstractRegularization):
             return 0.0
+
+        if (
+            self.settings.log_det_method == "slogdet"
+            and self.all_linear_obj_have_regularization
+        ):
+            term_list = [
+                regularization.log_det_regularization_matrix_term_from(
+                    linear_obj=linear_obj, xp=self._xp
+                )
+                for linear_obj, regularization in zip(
+                    self.linear_obj_list, self.regularization_list
+                )
+            ]
+
+            if all(term is not None for term in term_list):
+                return sum(term_list)
 
         return self._log_det_symmetric_from(self.regularization_matrix_reduced)
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 import numpy as np
-from typing import TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from autoarray.inversion.linear_obj.linear_obj import LinearObj
@@ -167,3 +167,38 @@ class AbstractRegularization:
         The regularization matrix.
         """
         raise NotImplementedError
+
+    def log_det_regularization_matrix_term_from(
+        self, linear_obj: LinearObj, xp=np
+    ) -> Optional[float]:
+        """
+        Returns ``log det H`` of this scheme's regularization matrix computed from a
+        factorization the scheme itself knows about, or ``None`` when no such shortcut
+        exists (the default).
+
+        The kernel regularization schemes build ``H = coefficient * C^-1`` from a dense
+        covariance ``C`` and can therefore return the analytically exact
+        ``pixels * log(coefficient) - log det C`` from a single Cholesky of ``C`` —
+        avoiding the explicit inverse, whose round-off (amplified by ``cond(C)``, which
+        reaches ~1e9 on clustered traced mesh vertices) otherwise leaks into the
+        evidence. ``C``'s conditioning does not depend on the regularization
+        coefficient, so this path is also finite where factorizing the formed ``H``
+        fails at extreme coefficients.
+
+        The inversion consumes this ONLY when ``Settings.log_det_method == "slogdet"``
+        (the opt-in gradient-safe log-det, PyAutoArray#391) — the default
+        ``"cholesky"`` evidence path never calls it, so default likelihood values are
+        unchanged. See ``AbstractInversion.log_det_regularization_matrix_term``.
+
+        Parameters
+        ----------
+        linear_obj
+            The linear object (e.g. a ``Mapper``) whose regularization matrix the
+            log-determinant is of.
+
+        Returns
+        -------
+        The log determinant of the regularization matrix, or ``None`` when this scheme
+        has no factorization-aware shortcut.
+        """
+        return None

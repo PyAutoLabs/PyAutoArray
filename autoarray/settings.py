@@ -109,6 +109,15 @@ class Settings:
               (autolens_workspace_developer#104). This is an **opt-in, non-default** alternative intended for
               gradient-based work and for comparison against the Cholesky evidence — it is not a replacement
               for the default and the default evidence path is unchanged. See PyAutoArray#391.
+
+              Under ``"slogdet"``, the kernel regularization schemes (``MaternKernel``, ``GaussianKernel``,
+              ``ExponentialKernel``, ``MaternAdaptKernel``) additionally compute
+              ``log_det_regularization_matrix_term`` analytically from a single Cholesky of their kernel
+              covariance ``C`` (``log det H = pixels * log(coeff) - log det C``) instead of factorizing the
+              explicitly formed inverse — more accurate (the formed ``C^-1`` carries round-off amplified by
+              ``cond(C)``, ~1e-6 absolute in the evidence on clustered traced mesh vertices) and finite at any
+              regularization coefficient (``C``'s conditioning does not depend on it). See
+              :meth:`AbstractRegularization.log_det_regularization_matrix_term_from`.
         """
         self.use_mixed_precision = use_mixed_precision
         self.nnls_solver_tol = nnls_solver_tol

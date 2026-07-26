@@ -1,6 +1,6 @@
 from __future__ import annotations
 import numpy as np
-from typing import TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from autoarray.inversion.linear_obj.linear_obj import LinearObj
@@ -9,7 +9,10 @@ from autoarray.inversion.regularization.abstract import AbstractRegularization
 
 
 def gauss_cov_matrix_from(
-    scale: float, pixel_points: np.ndarray, xp=np  # shape (N, 2)
+    scale: float,
+    pixel_points: np.ndarray,  # shape (N, 2)
+    jitter: float = 1e-8,
+    xp=np,
 ) -> np.ndarray:
     """
     Construct the source‐pixel Gaussian covariance matrix for regularization.
@@ -43,13 +46,18 @@ def gauss_cov_matrix_from(
 
     # Add tiny jitter on the diagonal
     N = pts.shape[0]
-    cov = cov + xp.eye(N, dtype=cov.dtype) * 1e-8
+    cov = cov + xp.eye(N, dtype=cov.dtype) * jitter
 
     return cov
 
 
 class GaussianKernel(AbstractRegularization):
-    def __init__(self, coefficient: float = 1.0, scale: float = 1.0):
+    def __init__(
+        self,
+        coefficient: float = 1.0,
+        scale: float = 1.0,
+        jitter: Optional[float] = None,
+    ):
         """
         Regularization which uses a Gaussian smoothing kernel to regularize the solution.
 
@@ -76,10 +84,20 @@ class GaussianKernel(AbstractRegularization):
             The regularization coefficient which controls the degree of smooth of the inversion reconstruction.
         scale
             The typical scale of the exponential regularization pattern.
+        jitter
+            The small value added to the covariance diagonal for numerical stability.
+            ``None`` (default) uses the historical value 1e-8 — behaviour is identical
+            to not having this parameter (it is a fixed setting, not a free model
+            parameter, hence the ``None`` default).
         """
         self.coefficient = coefficient
         self.scale = scale
+        self.jitter = jitter
         super().__init__()
+
+    @property
+    def jitter_value(self) -> float:
+        return 1e-8 if self.jitter is None else self.jitter
 
     def regularization_weights_from(self, linear_obj: LinearObj, xp=np) -> np.ndarray:
         """
@@ -115,25 +133,63 @@ class GaussianKernel(AbstractRegularization):
         -------
         The regularization matrix.
         """
+        from autoarray.inversion.regularization.matern_kernel import inv_via_cholesky
+
         covariance_matrix = gauss_cov_matrix_from(
             scale=self.scale,
             pixel_points=linear_obj.source_plane_mesh_grid.array,
+            jitter=self.jitter_value,
             xp=xp,
         )
 
-        regularization_matrix = self.coefficient * xp.linalg.inv(covariance_matrix)
+        # The SPD inverse via Cholesky (as MaternKernel) — identical quantity to
+        # inv(), with better accuracy and symmetry on the SPD covariance.
+        regularization_matrix = self.coefficient * inv_via_cholesky(
+            covariance_matrix, xp=xp
+        )
 
-        # inv() loses exact symmetry and can introduce tiny negative eigenvalues
-        # when the covariance matrix is near-singular (e.g. scale >> pixel
-        # spacing). Symmetrise and add a trace-scaled diagonal jitter so the
-        # downstream cholesky in log_det_regularization_matrix_term cannot
-        # fail on floating-point noise.
+        # The inverse can still lose exact symmetry and introduce tiny negative
+        # eigenvalues when the covariance matrix is near-singular (e.g. scale >>
+        # pixel spacing). Symmetrise and add a trace-scaled diagonal jitter so the
+        # downstream cholesky in log_det_regularization_matrix_term cannot fail on
+        # floating-point noise.
         regularization_matrix = 0.5 * (regularization_matrix + regularization_matrix.T)
         N = regularization_matrix.shape[0]
         diag_mean = xp.mean(xp.diag(regularization_matrix))
-        jitter = 1e-8 * xp.abs(diag_mean)
+        h_jitter = 1e-8 * xp.abs(diag_mean)
         regularization_matrix = regularization_matrix + xp.eye(
             N, dtype=regularization_matrix.dtype
-        ) * jitter
+        ) * h_jitter
 
         return regularization_matrix
+
+    def log_det_regularization_matrix_term_from(
+        self, linear_obj: LinearObj, xp=np
+    ) -> float:
+        """
+        The analytically exact ``log det H`` from a single Cholesky of the kernel
+        covariance: ``H = coefficient * C^-1``, so
+        ``log det H = pixels * log(coefficient) - 2 * sum(log(diag(cholesky(C))))``.
+
+        This is the log-determinant of the analytic ``coefficient * C^-1`` — it
+        deliberately excludes the trace-scaled stabilisation jitter that
+        :meth:`regularization_matrix_from` adds to the formed matrix (that jitter
+        exists only to guard the factorization of the explicit inverse, which this
+        shortcut avoids entirely).
+
+        Consumed by the inversion only when ``Settings.log_det_method == "slogdet"``
+        (see :meth:`AbstractRegularization.log_det_regularization_matrix_term_from`);
+        the default evidence path factorizes the formed ``H`` and is unchanged.
+        """
+        covariance_matrix = gauss_cov_matrix_from(
+            scale=self.scale,
+            pixel_points=linear_obj.source_plane_mesh_grid.array,
+            jitter=self.jitter_value,
+            xp=xp,
+        )
+
+        log_det_covariance = 2.0 * xp.sum(
+            xp.log(xp.diag(xp.linalg.cholesky(covariance_matrix)))
+        )
+
+        return linear_obj.params * np.log(self.coefficient) - log_det_covariance
