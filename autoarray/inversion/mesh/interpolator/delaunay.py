@@ -96,20 +96,27 @@ def scipy_delaunay_tri_only(points_np):
         coplanar/duplicate (the walk then starts from simplex 0 instead,
         which is equally valid — the walk converges from any start).
     """
+    N = points_np.shape[0]
+    simplices_padded = -np.ones((2 * N, 3), dtype=np.int32)
+    simplex_neighbors = -np.ones((2 * N, 3), dtype=np.int32)
+    vertex_simplex = -np.ones(N, dtype=np.int32)
+
+    # This function is the body of a sequentially-vmapped host callback.  A
+    # qhull exception in one lane aborts the entire batch, so keep non-finite
+    # input lane-local and encode it with the callback's existing padding
+    # convention.  The JAX-side walk and weights preserve the lane as NaN.
+    if not np.isfinite(points_np).all():
+        return simplices_padded, simplex_neighbors, vertex_simplex
+
     from scipy.spatial import Delaunay
 
-    N = points_np.shape[0]
     tri = Delaunay(points_np)
     simplices = tri.simplices.astype(np.int32)  # (T, 3)
     T = simplices.shape[0]
 
-    simplices_padded = -np.ones((2 * N, 3), dtype=np.int32)
     simplices_padded[:T] = simplices
-
-    simplex_neighbors = -np.ones((2 * N, 3), dtype=np.int32)
     simplex_neighbors[:T] = tri.neighbors.astype(np.int32)
 
-    vertex_simplex = -np.ones(N, dtype=np.int32)
     simplex_ids = np.arange(T, dtype=np.int32)
     for k in range(3):
         vertex_simplex[simplices[:, k]] = simplex_ids
@@ -185,9 +192,11 @@ def pix_indexes_delaunay_walk_from(
 
     def weights_of(cur, q_chunk):
         verts = simplices_padded[cur]  # (chunk, 3)
-        a = points[verts[:, 0]]
-        b = points[verts[:, 1]]
-        c = points[verts[:, 2]]
+        valid_simplex = (verts >= 0).all(axis=1)
+        safe_verts = verts.clip(min=0)
+        a = points[safe_verts[:, 0]]
+        b = points[safe_verts[:, 1]]
+        c = points[safe_verts[:, 2]]
         den = cross(b - a, c - a)
         den = xp.where(den != 0.0, den, 1.0)
         w = (
@@ -201,13 +210,14 @@ def pix_indexes_delaunay_walk_from(
             )
             / den[:, None]
         )
-        return verts, w
+        return verts, w, valid_simplex
 
     def walk_step(carry, q_chunk):
         cur, done, outside = carry
-        _, w = weights_of(cur, q_chunk)
+        _, w, valid_simplex = weights_of(cur, q_chunk)
         minw = w.min(axis=1)
         opposite = w.argmin(axis=1)
+        outside = outside | (~done & ~valid_simplex)
         done = done | (~outside & (minw >= -1.0e-12))
         nxt = simplex_neighbors[cur, opposite]
         outside = outside | (~done & (nxt < 0))
@@ -550,6 +560,10 @@ def pixel_weights_delaunay_from(
     # SELECT BETWEEN CASES
     # -----------------------------
     pixel_weights = xp.where(has_simplex[:, None], weights_bary, weights_nn)
+
+    if xp is not np:
+        mesh_is_finite = xp.isfinite(mesh_grid).all()
+        pixel_weights = xp.where(mesh_is_finite, pixel_weights, xp.nan)
 
     return pixel_weights
 
