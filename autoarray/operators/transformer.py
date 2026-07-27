@@ -1,5 +1,6 @@
 import copy
 import numpy as np
+import sys
 import warnings
 from typing import Optional, Tuple
 
@@ -41,6 +42,32 @@ def pynufft_exception():
 
 
 def nufftax_exception():
+    # On Python 3.11 `pip install nufftax` is actively bad advice. The releases
+    # that work with our JAX stack (0.4.x) require Python >= 3.12, so pip resolves
+    # 0.6.x instead — and 0.6.0/0.6.1 both break the interferometer inversion
+    # (0.6.0 uses `jax.interpreters.batching.not_mapped`, removed in JAX 0.10;
+    # 0.6.1 cannot handle the rank-4 input `transform_mapping_matrix` produces
+    # under vmap). There is currently no nufftax release that both installs on
+    # 3.11 and works, so send 3.11 users to 3.12+ or to the pynufft backend.
+    if sys.version_info < (3, 12):
+        raise ModuleNotFoundError(
+            "\n--------------------\n"
+            "You are attempting to perform interferometer analysis with the default "
+            f"JAX-native `TransformerNUFFT`, on Python {sys.version_info.major}.{sys.version_info.minor}.\n\n"
+            "The optional library nufftax (https://github.com/GragasLab/nufftax) is not installed, "
+            "and on this Python version it CANNOT be usefully installed:\n\n"
+            "  - nufftax releases that work with PyAutoArray require Python >= 3.12.\n"
+            "  - The releases that do install here (0.6.x) are incompatible with the "
+            "JAX version PyAutoArray requires, and fail partway through a fit.\n\n"
+            "Do NOT `pip install nufftax` on this Python version. Instead either:\n\n"
+            "  1. Upgrade to Python 3.12 or newer (recommended), then "
+            "`pip install 'autoarray[optional]'`; or\n"
+            "  2. Use the legacy pynufft backend, by passing "
+            "`transformer_class=TransformerNUFFTPyNUFFT` and running "
+            "`pip install pynufft==2022.2.2`.\n\n"
+            "----------------------"
+        )
+
     raise ModuleNotFoundError(
         "\n--------------------\n"
         "You are attempting to perform interferometer analysis with the default "
