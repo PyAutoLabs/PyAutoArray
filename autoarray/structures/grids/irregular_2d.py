@@ -168,7 +168,7 @@ class Grid2DIrregular(AbstractNDArray):
         ]
 
     def grid_2d_via_deflection_grid_from(
-        self, deflection_grid: np.ndarray, xp=np
+        self, deflection_grid: np.ndarray, xp=None
     ) -> "Grid2DIrregular":
         """
         Returns a new Grid2DIrregular from this grid coordinates, where the (y,x) coordinates of this grid have a
@@ -183,11 +183,18 @@ class Grid2DIrregular(AbstractNDArray):
             The grid of (y,x) coordinates which is subtracted from this grid.
         xp
             The array module (``numpy`` or ``jax.numpy``) used to construct the returned grid, mirroring
-            ``subtracted_from`` / ``subtracted_and_rotated_from``. Passed through explicitly by the caller rather
-            than inferred from ``self._xp``, so JIT-traced call sites (where ``self`` may not carry a reliable
-            ``use_jax`` flag) do not silently fall back to NumPy.
+            ``subtracted_from`` / ``subtracted_and_rotated_from``. Defaults to ``self._xp`` (the pre-existing
+            behaviour); JIT-traced call sites (where ``self`` may not carry a reliable ``use_jax`` flag) should
+            pass it explicitly so they do not silently fall back to NumPy.
         """
-        return Grid2DIrregular(values=self.array - xp.asarray(deflection_grid), xp=xp)
+        if xp is None:
+            xp = self._xp
+        deflections = (
+            deflection_grid.array
+            if hasattr(deflection_grid, "array")
+            else deflection_grid
+        )
+        return Grid2DIrregular(values=self.array - deflections, xp=xp)
 
     def squared_distances_to_coordinate_from(
         self, coordinate: Tuple[float, float] = (0.0, 0.0)
