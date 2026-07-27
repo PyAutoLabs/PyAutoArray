@@ -52,6 +52,68 @@ def test__tri_only_callback__tables_match_triangulation():
         assert v in tri.simplices[vertex_simplex[v]]
 
 
+def test__tri_only_callback__non_finite_points_return_sentinel_tables(monkeypatch):
+    def qhull_must_not_run(_):
+        raise AssertionError("Delaunay called for non-finite points")
+
+    monkeypatch.setattr("scipy.spatial.Delaunay", qhull_must_not_run)
+
+    rng = np.random.default_rng(5)
+    finite_points = rng.uniform(size=(40, 2))
+    poisoned_points = []
+
+    for poison_index in (7, 39):
+        points = finite_points.copy()
+        points[poison_index, 0] = np.nan
+        poisoned_points.append(points)
+
+    poisoned_points.append(np.full_like(finite_points, np.nan))
+
+    for points in poisoned_points:
+        simplices, neighbors, vertex_simplex = scipy_delaunay_tri_only(points)
+
+        assert simplices.shape == (80, 3)
+        assert neighbors.shape == (80, 3)
+        assert vertex_simplex.shape == (40,)
+        assert simplices.dtype == np.int32
+        assert neighbors.dtype == np.int32
+        assert vertex_simplex.dtype == np.int32
+        assert (simplices == -1).all()
+        assert (neighbors == -1).all()
+        assert (vertex_simplex == -1).all()
+
+
+def test__walk_locator__sentinel_tables_keep_nearest_vertex_fallback_live():
+    rng = np.random.default_rng(6)
+    finite_points = rng.uniform(size=(40, 2))
+    query = rng.uniform(size=(8, 2))
+
+    poisoned_points = []
+    for poison_index in (7, 39):
+        points = finite_points.copy()
+        points[poison_index, 0] = np.nan
+        poisoned_points.append(points)
+    poisoned_points.append(np.full_like(finite_points, np.nan))
+
+    simplices = -np.ones((80, 3), dtype=np.int32)
+    neighbors = -np.ones((80, 3), dtype=np.int32)
+    vertex_simplex = -np.ones(40, dtype=np.int32)
+
+    for points in poisoned_points:
+        mappings = pix_indexes_delaunay_walk_from(
+            query_points=query,
+            points=points,
+            simplices_padded=simplices,
+            simplex_neighbors=neighbors,
+            vertex_simplex=vertex_simplex,
+            xp=np,
+        )
+
+        assert (mappings[:, 0] >= 0).all()
+        assert (mappings[:, 0] < points.shape[0]).all()
+        assert (mappings[:, 1:] == -1).all()
+
+
 def _assert_matches_find_simplex(points, query):
     """The walk must reproduce find_simplex + KDTree-fallback semantics: rows
     identical, except at most fp edge ties where the returned simplex still
