@@ -11,6 +11,7 @@ from autoarray.inversion.regularization import regularization_util
 
 
 class ConstantSplit(Constant):
+    is_split_regularization = True
     def __init__(self, coefficient: float = 1.0):
         """
         Regularization which uses the derivatives at a cross of four points around each pixel centre and a single

@@ -11,6 +11,7 @@ from autoarray.inversion.regularization import regularization_util
 
 
 class AdaptSplit(Adapt):
+    is_split_regularization = True
     def __init__(
         self,
         inner_coefficient: float = 1.0,

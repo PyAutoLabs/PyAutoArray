@@ -456,9 +456,13 @@ class InterpolatorRectangular(AbstractInterpolator):
 
         return mappings, sizes, weights
 
-    @cached_property
-    def _mappings_sizes_weights_split(self):
-        # Rectangular pixelizations use bilinear interpolation which already factors
-        # in the 4-corner neighbourhood, so no separate split-cross calculation is
-        # needed — split regularization reuses the same mappings.
-        return self._mappings_sizes_weights
+    # NOTE: `_mappings_sizes_weights_split` is deliberately NOT implemented here.
+    #
+    # It previously returned `self._mappings_sizes_weights` unchanged, on the reasoning that
+    # bilinear interpolation already factors in the 4-corner neighbourhood. That was not correct:
+    # `reg_split_from` expects the split-cross structure, so the pass-through raised
+    # `IndexError: index 4 is out of bounds for axis 0 with size 4` one frame later.
+    #
+    # Rectangular meshes do not support split regularization. The combination is now rejected at
+    # `Pixelization` construction via `AbstractMesh.supports_split_regularization`, which names
+    # both the mesh and the regularization instead of failing deep inside the inversion.

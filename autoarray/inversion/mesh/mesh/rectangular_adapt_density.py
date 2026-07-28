@@ -62,6 +62,10 @@ def overlay_grid_from(
 
 
 class RectangularAdaptDensity(AbstractMesh):
+    # Rectangular meshes do not support split regularization -- their interpolators provide no
+    # split-cross mappings. Inherited by `RectangularUniform` and `RectangularAdaptImage`.
+    supports_split_regularization = False
+
     def __init__(
         self,
         shape: Tuple[int, int] = (3, 3),
