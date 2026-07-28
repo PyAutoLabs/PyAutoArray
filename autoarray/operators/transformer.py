@@ -176,7 +176,14 @@ class TransformerDFT:
         visibilities
             The complex visibilities to be transformed into a real-space image.
         use_adjoint_scaling
-            If True, the result is scaled by a normalization factor. Currently unused.
+            If True, normalise the adjoint output onto the common scale shared by
+            every transformer (that of the plain mathematical adjoint). This is a
+            no-op for the DFT, whose adjoint is already on that scale; it is
+            load-bearing for `TransformerNUFFTPyNUFFT`, whose pynufft-internal
+            IFFT normalisation leaves its raw adjoint a factor `4 * N_y * N_x`
+            low. Do not remove it as "unused" — see `Interferometer.
+            apply_sparse_operator`, which passes `True` so the sparse-operator
+            dirty image is scale-consistent across all three transformers.
 
         Returns
         -------
@@ -734,11 +741,15 @@ class TransformerNUFFT:
         deconvolution). The structure of the dirty image is the same, and
         the values match `TransformerDFT.image_from` exactly.
 
-        `use_adjoint_scaling` is accepted for API compatibility with the
-        legacy class and is otherwise unused (the nufftax adjoint is already
-        the mathematical adjoint; no extra normalisation is needed). This
-        matches `TransformerDFT.image_from` semantics so the sparse-operator
-        path is scale-consistent across both transformers.
+        `use_adjoint_scaling` normalises the adjoint onto the common scale
+        shared by every transformer. It is a no-op here (and for
+        `TransformerDFT`) because the nufftax adjoint is already the plain
+        mathematical adjoint, but it is load-bearing for
+        `TransformerNUFFTPyNUFFT`, whose pynufft-internal IFFT normalisation
+        leaves its raw adjoint a factor `4 * N_y * N_x` low. Do not remove it
+        as "unused" — `Interferometer.apply_sparse_operator` passes `True` so
+        the sparse-operator dirty image is scale-consistent across all three
+        transformers.
         """
         n_y, n_x = self.real_space_mask.shape_native
         n_modes = (n_x, n_y)  # nufftax wants (n1, n2) = (N_x, N_y)
