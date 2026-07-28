@@ -152,6 +152,30 @@ class Pixelization:
             model = af.Collection(galaxies=af.Collection(galaxy=galaxy))
         """
 
+        if (
+            regularization is not None
+            and getattr(regularization, "is_split_regularization", False)
+            and not getattr(mesh, "supports_split_regularization", True)
+        ):
+            raise exc.PixelizationException(
+                f"""
+                The regularization scheme `{type(regularization).__name__}` is a split regularization
+                scheme, which is not supported by the mesh `{type(mesh).__name__}`.
+
+                Split regularization regularizes using a cross of four points around each pixel centre,
+                which requires the mesh to provide split-cross mappings. The rectangular meshes
+                (`RectangularUniform`, `RectangularAdaptDensity`, `RectangularAdaptImage`) do not
+                provide them.
+
+                Use either:
+
+                - an adaptive mesh which supports split regularization, e.g. `Delaunay` or
+                  `KNNBarycentric`, with `{type(regularization).__name__}`; or
+                - a non-split regularization scheme with `{type(mesh).__name__}`, e.g. `Constant`
+                  instead of `ConstantSplit`, or `Adapt` instead of `AdaptSplit`.
+                """
+            )
+
         self.mesh = mesh
         self.regularization = regularization
 

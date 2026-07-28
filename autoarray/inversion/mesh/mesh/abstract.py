@@ -9,6 +9,17 @@ from autoarray.structures.grids.irregular_2d import Grid2DIrregular
 
 
 class AbstractMesh:
+    supports_split_regularization = True
+    """
+    Whether this mesh supports "split" regularization schemes (e.g. ``ConstantSplit``, ``AdaptSplit``,
+    ``AdaptSplitZeroth``).
+
+    Split schemes regularize using a split-cross calculation, which requires the mesh's interpolator to
+    provide ``_mappings_sizes_weights_split``. The adaptive meshes (``Delaunay``, ``KNNBarycentric``)
+    compute this; the rectangular meshes do not, and set this to ``False`` so that ``Pixelization``
+    rejects the combination at construction rather than failing deep inside the inversion.
+    """
+
     def __eq__(self, other):
         return self.__dict__ == other.__dict__ and self.__class__ is other.__class__
 
