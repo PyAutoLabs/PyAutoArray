@@ -287,13 +287,11 @@ def pytest_collection_modifyitems(config, items):
     it is not installed.
 
     The default ``Interferometer`` transformer is the JAX-native
-    ``TransformerNUFFT``, backed by ``nufftax`` — which is declared for Python
-    ``>= 3.12`` only (Python 3.9-3.11 are not officially supported). On those
-    interpreters the backend cannot be installed, so any test that builds a
-    default interferometer/transformer raises ``ModuleNotFoundError`` at
-    construction. Skip exactly those, while keeping the explicit ``DFT`` and
-    ``pynufft`` transformer tests, which have no ``nufftax`` dependency. On
-    3.12/3.13 (where ``nufftax`` is present) nothing is skipped.
+    ``TransformerNUFFT``, backed by the optional ``nufftax`` dependency. When
+    that backend is absent, any test that builds a default interferometer or
+    transformer raises ``ModuleNotFoundError`` at construction. Skip exactly
+    those tests while keeping the explicit ``DFT`` and ``pynufft`` transformer
+    tests, which have no ``nufftax`` dependency.
     """
     try:
         import nufftax  # noqa: F401
@@ -303,7 +301,7 @@ def pytest_collection_modifyitems(config, items):
         pass
 
     skip_nufftax = pytest.mark.skip(
-        reason="nufftax (default JAX interferometer backend) requires Python >= 3.12"
+        reason="nufftax (the default JAX interferometer backend) is not installed"
     )
     for item in items:
         name = item.nodeid.rsplit("::", 1)[-1]
