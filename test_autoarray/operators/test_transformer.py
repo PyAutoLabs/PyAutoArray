@@ -308,47 +308,11 @@ def test__nufft__chunk_size__jax_jit_traces_with_scan():
     )
 
 
-def test__nufftax_exception__pre_3_12_tells_user_to_upgrade_not_to_pip_install():
-    """
-    On Python < 3.12 there is no usable nufftax release: the versions that work
-    require >= 3.12, and the ones that do install (0.6.x) break mid-fit. The
-    error must therefore steer the user away from `pip install nufftax`.
-    """
-    import collections
-    from unittest import mock
+def test__nufftax_exception__keeps_the_plain_install_instruction():
     from autoarray.operators import transformer
 
-    version_info = collections.namedtuple(
-        "version_info", "major minor micro releaselevel serial"
-    )
-
-    with mock.patch.object(
-        transformer.sys, "version_info", version_info(3, 11, 0, "final", 0)
-    ):
-        with pytest.raises(ModuleNotFoundError) as exc:
-            transformer.nufftax_exception()
-
-    message = str(exc.value)
-    assert "Python 3.11" in message
-    assert "Do NOT `pip install nufftax`" in message
-    assert "Python 3.12 or newer" in message
-    assert "TransformerNUFFTPyNUFFT" in message
-
-
-def test__nufftax_exception__3_12_and_later_keeps_the_plain_install_instruction():
-    import collections
-    from unittest import mock
-    from autoarray.operators import transformer
-
-    version_info = collections.namedtuple(
-        "version_info", "major minor micro releaselevel serial"
-    )
-
-    with mock.patch.object(
-        transformer.sys, "version_info", version_info(3, 12, 0, "final", 0)
-    ):
-        with pytest.raises(ModuleNotFoundError) as exc:
-            transformer.nufftax_exception()
+    with pytest.raises(ModuleNotFoundError) as exc:
+        transformer.nufftax_exception()
 
     message = str(exc.value)
     assert "Install it via the command `pip install nufftax`" in message
