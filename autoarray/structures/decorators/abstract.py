@@ -54,8 +54,8 @@ class AbstractMaker:
                 f"Called {getattr(func, '__qualname__', repr(func))} with "
                 f"xp=np but the input grid is JAX-backed (grid.use_jax=True). "
                 f"Inside @jax.jit, pass xp=jnp explicitly to the library call. "
-                f"See the autolens_workspace `scripts/guides/lens_calc.py` "
-                f"`__JAX__` section (Phase 5d) for the JIT-it-yourself pattern."
+                f"See the autolens_workspace `scripts/guides/using_jax.py` "
+                f"guide for the JIT-it-yourself pattern."
             )
 
         self.func = func
