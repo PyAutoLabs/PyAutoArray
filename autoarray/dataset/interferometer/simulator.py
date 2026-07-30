@@ -7,6 +7,58 @@ from autoarray.structures.visibilities import VisibilitiesNoiseMap
 from autoarray import exc
 from autoarray.dataset import preprocess
 
+_INTERFEROMETER_PYTREES_REGISTERED = False
+
+
+def _register_interferometer_pytrees() -> None:
+    """Register ``Interferometer`` so ``jax.jit(via_image_from)`` can flatten its return.
+
+    Counterpart of ``_register_imaging_pytrees`` in the imaging simulator (and of
+    ``AnalysisImaging._register_fit_imaging_pytrees``). Without it a jitted
+    interferometer call raises ``TypeError: ... returned a value of type
+    Interferometer, which is not a valid JAX type``.
+
+    ``data`` and ``noise_map`` are the only per-simulation dynamic values.
+    Everything else rides as aux: ``uv_wavelengths`` and ``real_space_mask`` are
+    the fixed observation geometry, ``transformer`` and ``grids`` are constants for
+    a given simulation, the over-sample sizes are static integer geometry, and the
+    remaining slots are ``None``.
+
+    Unlike registration for a jitted function's *arguments* — which must happen
+    before the first call, since JAX flattens arguments at trace time — this is in
+    time, because the return value is flattened only after the body has run.
+    Idempotent via the module-level flag.
+    """
+    global _INTERFEROMETER_PYTREES_REGISTERED
+    if _INTERFEROMETER_PYTREES_REGISTERED:
+        return
+
+    from autoarray.abstract_ndarray import register_instance_pytree
+    from autoarray.structures.visibilities import Visibilities
+
+    # The two dynamic children must themselves be pytrees, or they surface as
+    # bare leaves and JAX rejects the return value ("... returned a value of type
+    # Visibilities ... at output component [0]"). Unlike ``Array2D`` — which the
+    # imaging path gets auto-registered — these are not registered anywhere else.
+    register_instance_pytree(Visibilities)
+    register_instance_pytree(VisibilitiesNoiseMap)
+
+    register_instance_pytree(
+        Interferometer,
+        no_flatten=(
+            "uv_wavelengths",
+            "real_space_mask",
+            "transformer",
+            "grids",
+            "over_sample_size_lp",
+            "over_sample_size_pixelization",
+            "noise_covariance_matrix",
+            "sparse_operator",
+        ),
+    )
+
+    _INTERFEROMETER_PYTREES_REGISTERED = True
+
 
 class SimulatorInterferometer:
     def __init__(
@@ -115,11 +167,14 @@ class SimulatorInterferometer:
         if xp is None:
             xp = self._xp
 
+        if xp is not np:
+            _register_interferometer_pytrees()
+
         transformer = self.transformer_class(
             uv_wavelengths=self.uv_wavelengths, real_space_mask=image.mask
         )
 
-        visibilities = transformer.visibilities_from(image=image)
+        visibilities = transformer.visibilities_from(image=image, xp=xp)
 
         if self.noise_sigma is not None:
             visibilities = preprocess.data_with_complex_gaussian_noise_added(
