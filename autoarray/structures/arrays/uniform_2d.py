@@ -291,9 +291,18 @@ class AbstractArray2D(Structure):
 
         If it is already stored in its `native` representation it is return as it is. If not, it is mapped from
         `slim` to `native` and returned as a new `Array2D`.
+
+        ``xp`` is forwarded from ``self._xp`` rather than left at its ``numpy``
+        default. A property cannot take an argument, so without this a JAX-backed
+        array would be re-mapped slim -> native through the NumPy path and raise
+        ``TracerArrayConversionError`` inside a ``jax.jit`` trace.
         """
         return Array2D(
-            values=self, mask=self.mask, header=self.header, store_native=True
+            values=self,
+            mask=self.mask,
+            header=self.header,
+            store_native=True,
+            xp=self._xp,
         )
 
     @property

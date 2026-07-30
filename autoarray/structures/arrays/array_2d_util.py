@@ -509,8 +509,15 @@ def array_2d_native_from(
 
     shape = (mask_2d.shape[0], mask_2d.shape[1])
 
+    # Deliberately NumPy, not ``xp``: this index map is derived from the mask,
+    # which is concrete geometry and never traced. Its computation is a
+    # ``where(~mask)``, whose output shape depends on the *values* of the mask, so
+    # under ``jnp`` inside a ``jax.jit`` trace it raises
+    # ``ConcretizationTypeError``. Computing it in NumPy yields a concrete index
+    # array, which is a valid static operand for the scatter below — that is
+    # where ``xp`` genuinely belongs.
     native_index_for_slim_index_2d = mask_2d_util.native_index_for_slim_index_2d_from(
-        mask_2d=mask_2d, xp=xp
+        mask_2d=mask_2d
     ).astype("int")
 
     return array_2d_via_indexes_from(

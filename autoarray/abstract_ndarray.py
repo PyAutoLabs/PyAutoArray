@@ -164,7 +164,20 @@ class AbstractNDArray(ABC):
 
     @property
     def _xp(self):
-        if self.use_jax:
+        """The array module matching the array this instance actually holds.
+
+        ``use_jax`` records how the instance was *constructed*, and not every
+        construction site threads ``xp`` — an intermediate operation can hand
+        back an instance whose flag says NumPy while its backing array is a JAX
+        tracer. Consumers of ``_xp`` (notably ``Array2D.native``, which is a
+        property and so cannot be passed ``xp`` by its caller) would then route a
+        traced array through the NumPy path and raise
+        ``TracerArrayConversionError`` inside a ``jax.jit`` trace.
+
+        So the backing array is authoritative: if it is a JAX type, this is
+        ``jnp`` regardless of the flag. On the NumPy path nothing changes.
+        """
+        if self.use_jax or type(self._array).__module__.startswith(("jax", "jaxlib")):
             import jax.numpy as jnp
 
             return jnp

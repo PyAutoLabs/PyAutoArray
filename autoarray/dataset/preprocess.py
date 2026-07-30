@@ -132,7 +132,9 @@ def array_with_random_uniform_values_added(array, upper_limit=0.001):
     return array + upper_limit * np.random.uniform(size=array.shape_slim)
 
 
-def noise_map_via_data_eps_and_exposure_time_map_from(data_eps, exposure_time_map):
+def noise_map_via_data_eps_and_exposure_time_map_from(
+    data_eps, exposure_time_map, xp=np
+):
     """
     Estimate the noise-map value in every data-point, by converting the data to units of counts and taking the
     square root of these values.
@@ -148,9 +150,13 @@ def noise_map_via_data_eps_and_exposure_time_map_from(data_eps, exposure_time_ma
         The data in electrons second used to estimate the Poisson noise in every data point.
     exposure_time_map
         The exposure time at every data-point of the data.
+    xp
+        The array module (``numpy`` or ``jax.numpy``). Must be ``jnp`` when
+        ``data_eps`` carries a traced array, otherwise ``np.abs`` raises
+        ``TracerArrayConversionError`` inside a ``jax.jit`` trace.
     """
     return data_eps.with_new_array(
-        np.abs(data_eps.array * exposure_time_map.array) ** 0.5
+        xp.abs(data_eps.array * exposure_time_map.array) ** 0.5
         / exposure_time_map.array
     )
 
