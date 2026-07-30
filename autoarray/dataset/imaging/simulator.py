@@ -12,6 +12,57 @@ from autoarray.dataset import preprocess
 
 logger = logging.getLogger(__name__)
 
+_IMAGING_PYTREES_REGISTERED = False
+
+
+def _register_imaging_pytrees() -> None:
+    """Register ``Imaging`` so ``jax.jit(via_image_from)`` can flatten its return.
+
+    Counterpart of ``AnalysisImaging._register_fit_imaging_pytrees``, which does
+    the same job for ``FitImaging``. Without it a jitted simulator call raises
+    ``TypeError: ... returned a value of type Imaging, which is not a valid JAX
+    type``.
+
+    ``data`` and ``noise_map`` are the only per-simulation dynamic values, so
+    everything else rides as aux: ``psf`` and ``grids`` are constants for a given
+    simulation, the over-sample sizes are static integer geometry, and the
+    remaining slots are ``None``.
+
+    Unlike pytree registration for a jitted function's *arguments* — which must
+    happen before the first call, because JAX flattens arguments at trace time —
+    registering here is in time, because the return value is flattened only after
+    the body has run. Idempotent via the module-level flag.
+    """
+    global _IMAGING_PYTREES_REGISTERED
+    if _IMAGING_PYTREES_REGISTERED:
+        return
+
+    from autoarray.abstract_ndarray import register_instance_pytree
+
+    # ``Array2D.instance_flatten`` emits every ``__dict__`` entry not opted out,
+    # so a flattened ``data`` exposes its ``mask`` as a child. ``Mask2D`` must
+    # therefore be a pytree itself, or it surfaces as a bare leaf and JAX
+    # rejects the return value. Registering it here rather than adding ``mask``
+    # to ``Array2D.__no_flatten__`` keeps ``Array2D``'s flatten semantics
+    # unchanged for every other jitted path in the stack.
+    register_instance_pytree(Mask2D)
+
+    register_instance_pytree(
+        Imaging,
+        no_flatten=(
+            "psf",
+            "grids",
+            "over_sample_size_lp",
+            "over_sample_size_pixelization",
+            "convolve_over_sample_size_lp",
+            "convolve_over_sample_size_pixelization",
+            "noise_covariance_matrix",
+            "sparse_operator",
+        ),
+    )
+
+    _IMAGING_PYTREES_REGISTERED = True
+
 
 class SimulatorImaging:
     def __init__(
@@ -162,6 +213,9 @@ class SimulatorImaging:
         if xp is None:
             xp = self._xp
 
+        if xp is not np:
+            _register_imaging_pytrees()
+
         exposure_time_map = Array2D.full(
             fill_value=self.exposure_time,
             shape_native=image.shape_native,
@@ -201,7 +255,9 @@ class SimulatorImaging:
 
         if self.include_poisson_noise_in_noise_map:
             noise_map = preprocess.noise_map_via_data_eps_and_exposure_time_map_from(
-                data_eps=image_with_poisson_noise, exposure_time_map=exposure_time_map
+                data_eps=image_with_poisson_noise,
+                exposure_time_map=exposure_time_map,
+                xp=xp,
             )
 
         else:
