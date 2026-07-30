@@ -53,7 +53,9 @@ jax = ["autonerves[jax]"]
 optional = [
     "autoarray[jax]",
     "numba",
-    "nufftax>=0.4.0,<0.5.0",
+    # 0.6.1 floor: nufftax <0.6 cannot differentiate a batched nufft2d2
+    # (_nufft2d2_bwd assumed 2-D f), which transform_mapping_matrix relies on.
+    "nufftax>=0.6.1,<0.7.0",
     "pynufft",
     # tfp provides the modified-Bessel `bessel_kve` used by the JAX Matern-kernel
     # regularization path (autoarray/inversion/regularization/matern_kernel.py).
@@ -64,7 +66,7 @@ optional = [
     "tfp-nightly==0.26.0.dev20260713"
 ]
 test = ["pytest"]
-dev = ["pytest", "black", "numba", "nufftax>=0.4.0,<0.5.0", "pynufft==2022.2.2"]
+dev = ["pytest", "black", "numba", "nufftax>=0.6.1,<0.7.0", "pynufft==2022.2.2"]
 
 [tool.pytest.ini_options]
 testpaths = ["test_autoarray"]

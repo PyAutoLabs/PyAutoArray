@@ -29,6 +29,71 @@ except ModuleNotFoundError:
     _nufftax = None
 
 
+def _patch_nufftax_batchers():
+    """Rank-guard nufftax's vmap batching rules (shim for nufftax <0.7).
+
+    nufftax's batching fast path re-binds a primitive unchanged whenever only
+    the source argument is vmapped, assuming the impl's single native batch
+    axis can absorb it. Under nested batching — e.g. `jax.vmap(jax.value_and_grad(...))`
+    over a fit whose `transform_mapping_matrix` already passes a batched stack —
+    the dims accumulate past what the impl accepts and tracing crashes
+    ("too many values to unpack"). Until that is fixed upstream
+    (github.com/GragasLab/nufftax), re-register every primitive's batcher with
+    the missing guard: within native rank, bind as before; beyond it, collapse
+    the stacked batch axes into the one native axis and unflatten the output.
+    """
+    import jax
+    from jax.interpreters import batching
+
+    P = _nufftax.transforms.primitives
+
+    # (primitive, impl, index of the source argument, unbatched source rank)
+    table = [
+        (P.nufft1d1_p, P._impl_1d1, 1, 1),
+        (P.nufft1d2_p, P._impl_1d2, 1, 1),
+        (P.nufft2d1_p, P._impl_2d1, 2, 1),
+        (P.nufft2d2_p, P._impl_2d2, 2, 2),
+        (P.nufft3d1_p, P._impl_3d1, 3, 1),
+        (P.nufft3d2_p, P._impl_3d2, 3, 3),
+        (P.nufft1d3_p, P._impl_1d3, 1, 1),
+        (P.nufft2d3_p, P._impl_2d3, 2, 1),
+        (P.nufft3d3_p, P._impl_3d3, 3, 1),
+    ]
+
+    def guarded_batcher(prim, impl_fn, source_idx, base_rank):
+        def batcher(args, dims, **kwargs):
+            batched = [i for i, d in enumerate(dims) if d is not None]
+            if batched == [source_idx] and dims[source_idx] == 0:
+                src = args[source_idx]
+                extra = src.ndim - (base_rank + 1)
+                if extra <= 0:
+                    return prim.bind(*args, **kwargs), 0
+                lead = src.shape[: extra + 1]
+                flat = src.reshape((-1,) + src.shape[extra + 1 :])
+                new_args = list(args)
+                new_args[source_idx] = flat
+                out = prim.bind(*new_args, **kwargs)
+                return out.reshape(lead + out.shape[1:]), 0
+            out = jax.vmap(lambda *a: impl_fn(*a, **kwargs), in_axes=tuple(dims))(
+                *args
+            )
+            return out, 0
+
+        return batcher
+
+    for prim, impl, source_idx, base_rank in table:
+        batching.primitive_batchers[prim] = guarded_batcher(
+            prim, impl, source_idx, base_rank
+        )
+
+
+if _nufftax is not None:
+    _version = tuple(int(v) for v in _nufftax.__version__.split(".")[:2])
+    # Only the 0.6.x series both has the primitives module and needs the shim.
+    if (0, 6) <= _version < (0, 7):
+        _patch_nufftax_batchers()
+
+
 def pynufft_exception():
     raise ModuleNotFoundError(
         "\n--------------------\n"
