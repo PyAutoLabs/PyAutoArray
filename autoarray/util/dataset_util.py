@@ -10,18 +10,30 @@ SMALL_DATASETS_PIXEL_SCALES = 0.6
 def cap_array_2d_for_small_datasets(array_2d, pixel_scales):
     """
     Center-crop a 2D autoarray to the small-datasets cap when
-    ``PYAUTO_SMALL_DATASETS=1`` is active.
+    ``PYAUTO_SMALL_DATASETS=1`` is active, and relabel it at the capped
+    pixel scale.
 
-    Returns ``(array_2d, pixel_scales)`` unchanged in any of these cases:
+    Returns ``(array_2d, pixel_scales)`` unchanged only when
+    ``PYAUTO_SMALL_DATASETS`` is not set to ``"1"``.
 
-    - ``PYAUTO_SMALL_DATASETS`` is not set to ``"1"``.
-    - ``array_2d.shape_native`` is already at-or-below the cap (16, 16).
+    When the env var is set, ``pixel_scales`` is always overridden to 0.6 —
+    matching the convention used by ``Mask2D.circular`` and ``Grid2D.uniform``
+    so the loaded dataset stays shape-consistent with masks and grids built
+    under the same env var — and the shape is handled per case:
 
-    When the env var is set and the input shape exceeds (16, 16), returns a
-    new ``Array2D`` center-cropped to (16, 16) with ``pixel_scales`` overridden
-    to 0.6 — matching the convention used by ``Mask2D.circular`` and
-    ``Grid2D.uniform`` so the loaded dataset stays shape-consistent with masks
-    and grids built under the same env var.
+    - Input shape exceeds (16, 16): center-cropped to (16, 16).
+    - Input shape is already at-or-below the cap: kept as-is, because a capped
+      simulator wrote it at 0.6 already. Only the scale is corrected.
+
+    That second case must still rebuild the ``Array2D``, not just return a
+    corrected scalar: the array is constructed by the caller before this call
+    and carries its own geometry, so an uncorrected array would keep the
+    caller's uncapped scale no matter what scalar is returned. Leaving it
+    uncorrected mislabels the frame 6x (±0.8" instead of ±4.8" for a 16x16
+    field), which pushes off-centre galaxies outside the frame; their
+    non-negative linear intensity solve then correctly returns exactly 0.0 and
+    the failure surfaces far downstream as a collapsed prior rather than as a
+    geometry error (PyAutoArray #430).
 
     The same env var is honoured for shape construction in
     ``Mask2D.circular`` and ``Grid2D.uniform`` (and by ``should_simulate``
@@ -36,12 +48,18 @@ def cap_array_2d_for_small_datasets(array_2d, pixel_scales):
     if os.environ.get("PYAUTO_SMALL_DATASETS") != "1":
         return array_2d, pixel_scales
 
+    from autoarray.structures.arrays.uniform_2d import Array2D
+
     h, w = array_2d.shape_native
     cap_h, cap_w = SMALL_DATASETS_SHAPE_NATIVE
     if h <= cap_h and w <= cap_w:
-        return array_2d, pixel_scales
-
-    from autoarray.structures.arrays.uniform_2d import Array2D
+        return (
+            Array2D.no_mask(
+                values=array_2d.native.array,
+                pixel_scales=SMALL_DATASETS_PIXEL_SCALES,
+            ),
+            SMALL_DATASETS_PIXEL_SCALES,
+        )
 
     h0, w0 = (h - cap_h) // 2, (w - cap_w) // 2
     cropped = array_2d.native.array[h0:h0 + cap_h, w0:w0 + cap_w]
