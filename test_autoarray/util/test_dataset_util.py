@@ -25,24 +25,41 @@ def test__env_unset__returns_inputs_unchanged(monkeypatch):
     assert pixel_scales == 0.08
 
 
-def test__env_set__shape_already_at_cap__returns_inputs_unchanged(monkeypatch):
+def test__env_set__shape_already_at_cap__relabels_pixel_scales_without_cropping(
+    monkeypatch,
+):
     monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
 
     array = _array_2d(SMALL_DATASETS_SHAPE_NATIVE, pixel_scales=0.08)
     result, pixel_scales = cap_array_2d_for_small_datasets(array, 0.08)
 
-    assert result is array
-    assert pixel_scales == 0.08
+    assert result is not array
+    assert result.shape_native == SMALL_DATASETS_SHAPE_NATIVE
+    assert pixel_scales == SMALL_DATASETS_PIXEL_SCALES
+    assert result.pixel_scales == (
+        SMALL_DATASETS_PIXEL_SCALES,
+        SMALL_DATASETS_PIXEL_SCALES,
+    )
+    assert (result.native.array == array.native.array).all()
 
 
-def test__env_set__shape_below_cap__returns_inputs_unchanged(monkeypatch):
+def test__env_set__shape_below_cap__relabels_pixel_scales_without_cropping(monkeypatch):
     monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
 
-    array = _array_2d((10, 10), pixel_scales=0.08)
+    raw = np.arange(10 * 10, dtype=float).reshape(10, 10)
+    array = aa.Array2D.no_mask(values=raw, pixel_scales=0.08)
+
     result, pixel_scales = cap_array_2d_for_small_datasets(array, 0.08)
 
-    assert result is array
-    assert pixel_scales == 0.08
+    assert result is not array
+    # Shape is PRESERVED — the below-cap branch relabels, it must never crop.
+    assert result.shape_native == (10, 10)
+    assert pixel_scales == SMALL_DATASETS_PIXEL_SCALES
+    assert result.pixel_scales == (
+        SMALL_DATASETS_PIXEL_SCALES,
+        SMALL_DATASETS_PIXEL_SCALES,
+    )
+    assert (result.native.array == raw).all()
 
 
 def test__env_set__shape_above_cap__center_crops_and_overrides_pixel_scales(
