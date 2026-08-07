@@ -44,6 +44,53 @@ def _cholupdate(U, x):
     return U
 
 
+def _pivot_from_schur(schur, diagonal, index):
+    """
+    Turn the Schur complement of a Cholesky insertion into the new pivot.
+
+    The pivot is `sqrt(schur)`, which is only defined for a positive-definite
+    matrix. When the matrix being factorised is singular -- as it is when two
+    source-plane mesh vertices (near-)coincide, giving (near-)identical columns
+    in the mapping matrix -- `schur` is zero to within rounding, and which side
+    of zero it lands on depends purely on floating-point summation order (and
+    therefore on the BLAS thread count).
+
+    All three of those roundings are the same degenerate matrix, so they must
+    fail the same way. Taking `sqrt` directly does not do that: a tiny negative
+    raises `ValueError`, but an exact zero yields a zero diagonal in `U` and a
+    tiny positive yields a pivot that the following `cho_solve` amplifies --
+    both of which return NaN *without raising*, so the caller cannot tell a
+    degenerate solve from a good one.
+
+    The test is `schur > 0` and nothing stricter, which is deliberate:
+
+    * `schur < 0` already raised (`math.sqrt` of a negative), so rejecting it
+      changes nothing -- `LinAlgError` subclasses `ValueError`, so every
+      existing `except ValueError` still catches it.
+    * `schur == 0` is the silent case. The pivot is exactly zero, so the
+      following `cho_solve` divides by zero and the reconstruction is NaN with
+      certainty. There is no finite result to preserve.
+    * `schur > 0`, however small, still yields a positive finite pivot, so it
+      is passed through untouched and returns a BITWISE IDENTICAL pivot to the
+      old code.
+
+    A relative tolerance was tried here first and rejected: it also refused
+    small-but-positive pivots that were producing perfectly usable
+    reconstructions, which would have changed likelihood evaluations. Anything
+    that survives this check but still degenerates into NaN is caught at the
+    solver boundary in `fnnls.py`, where the failure is unambiguous.
+    """
+    if not schur > 0.0:
+        raise np.linalg.LinAlgError(
+            f"Cholesky insertion at index {index} is not positive definite: "
+            f"Schur complement is {schur:.6e} (diagonal {diagonal:.6e}). The "
+            f"matrix is singular to working precision, which for an inversion "
+            f"means (near-)degenerate mesh vertices."
+        )
+
+    return math.sqrt(schur)
+
+
 def cholinsert(U, index, x):
     from scipy import linalg
 
@@ -53,7 +100,9 @@ def cholinsert(U, index, x):
         U[:index, :index], x[:index], trans=1, lower=False, overwrite_b=True
     )
 
-    S[index, index] = s22 = math.sqrt(x[index] - S12.dot(S12))
+    S[index, index] = s22 = _pivot_from_schur(
+        schur=x[index] - S12.dot(S12), diagonal=x[index], index=index
+    )
 
     if index == U.shape[0]:
         return S
@@ -81,7 +130,9 @@ def cholinsertlast(U, x):
         U[:index, :index], x[:index], trans=1, lower=False, overwrite_b=True
     )
 
-    S[index, index] = s22 = math.sqrt(x[index] - S12.dot(S12))
+    S[index, index] = s22 = _pivot_from_schur(
+        schur=x[index] - S12.dot(S12), diagonal=x[index], index=index
+    )
 
     return S
 

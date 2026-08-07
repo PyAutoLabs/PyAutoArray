@@ -114,6 +114,21 @@ def fnnls_cholesky(
         if no_update >= max_repetitions:
             break
 
+    if not np.all(np.isfinite(d)):
+        # A non-finite solution is not a solution. NaN/inf never raises on its
+        # own, so without this check a degenerate solve is returned to the
+        # caller as if it were a valid reconstruction -- and a NaN
+        # reconstruction goes on to poison the adapt image, and through it the
+        # mesh vertices of the next pixelization stage, where it finally
+        # surfaces as an unrelated-looking qhull "Points cannot contain NaN".
+        # Fail here instead, at the producer, with the same exception type the
+        # inversion machinery already handles.
+        raise np.linalg.LinAlgError(
+            "fnnls_cholesky produced a non-finite solution "
+            f"({np.count_nonzero(~np.isfinite(d))} of {d.size} entries). The "
+            f"normal-equations matrix is singular to working precision."
+        )
+
     return d
 
 
