@@ -41,6 +41,7 @@ from .inversion.mesh.image_mesh.abstract import AbstractImageMesh
 from .inversion.mesh.mesh.abstract import AbstractMesh
 from .inversion.mesh.interpolator.rectangular import InterpolatorRectangular
 from .inversion.mesh.interpolator.delaunay import InterpolatorDelaunay
+from .inversion.mesh.interpolator.sibson import InterpolatorDelaunayNN
 from .inversion.inversion.imaging.mapping import InversionImagingMapping
 from .inversion.inversion.imaging.sparse import InversionImagingSparse
 from .inversion.inversion.imaging.inversion_imaging_util import ImagingSparseOperator
@@ -79,6 +80,7 @@ from .structures.grids.irregular_2d import Grid2DIrregular
 from .inversion.mesh.mesh_geometry.rectangular import MeshGeometryRectangular
 from .inversion.mesh.mesh_geometry.delaunay import MeshGeometryDelaunay
 from .inversion.mesh.interpolator.delaunay import InterpolatorDelaunay
+from .inversion.mesh.interpolator.sibson import InterpolatorDelaunayNN
 from .operators.convolver import Convolver
 from .operators.interp_2d import interp_2d
 from .structures.vectors.uniform import VectorYX2D

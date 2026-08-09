@@ -90,7 +90,7 @@ class Constant(AbstractRegularization):
         **JAX & gradient support** (2026-07 gradient sweep): on meshes with an
         analytic neighbor structure (the rectangular family) this scheme is
         JAX-differentiable and FD-certified. On the Delaunay mesh family
-        (``Delaunay``, ``KNearestNeighbor``, ``KNNBarycentric``) the neighbors
+        (``Delaunay``, ``DelaunayNN``, ``KNearestNeighbor``, ``KNNBarycentric``) the neighbors
         come from a direct ``scipy.spatial.Delaunay`` call on the traced
         source-plane mesh grid, so it raises ``TracerArrayConversionError``
         under ``jax.jit`` / ``jax.grad`` — use a split-family scheme

@@ -169,8 +169,9 @@ class Pixelization:
 
                 Use either:
 
-                - an adaptive mesh which supports split regularization, e.g. `Delaunay` or
-                  `KNNBarycentric`, with `{type(regularization).__name__}`; or
+                - an adaptive mesh which supports split regularization, e.g. `Delaunay`,
+                  `DelaunayNN`, or `KNNBarycentric`, with
+                  `{type(regularization).__name__}`; or
                 - a non-split regularization scheme with `{type(mesh).__name__}`, e.g. `Constant`
                   instead of `ConstantSplit`, or `Adapt` instead of `AdaptSplit`.
                 """
