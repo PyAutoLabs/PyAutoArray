@@ -1,6 +1,7 @@
 import numpy as np
 from typing import Optional
 
+from autoarray import exc
 from autoarray.settings import Settings
 from autoarray.inversion.mesh.border_relocator import BorderRelocator
 from autoarray.inversion.regularization.abstract import AbstractRegularization
@@ -62,6 +63,50 @@ class AbstractMesh:
             over_sampler=source_plane_data_grid.over_sampler,
             xp=xp,
         )
+
+    def _validate_source_plane_mesh_grid(self, source_plane_mesh_grid):
+        """
+        Raise if the mesh was given no source-plane mesh grid.
+
+        The adaptive meshes (``Delaunay``, ``KNearestNeighbor``, ``KNNBarycentric``) do
+        not compute their own image-plane mesh grid — it is a required input, supplied
+        in PyAutoGalaxy / PyAutoLens through ``adapt_images``. Omitting it leaves this
+        grid ``None`` and the failure previously landed several frames deeper as
+        ``AttributeError: 'NoneType' object has no attribute 'array'`` inside
+        ``border_relocator.py``, naming nothing the caller controls and no file the
+        caller has opened.
+
+        This raises at the point the precondition is known to be unmet, and names
+        ``adapt_images`` so the message points at the thing the caller actually passes.
+
+        Fail-fast is deliberate rather than having the mesh wire the grid up itself:
+        constructing an image-plane mesh grid requires a weighting policy (which is
+        exactly what ``adapt_images`` carries), so inventing one here would silently
+        pick a science choice on the user's behalf. This matches how the
+        rectangular-mesh / split-regularization combination was handled — an explicit
+        "you must supply X" exception rather than implementing a missing capability.
+
+        Parameters
+        ----------
+        source_plane_mesh_grid
+            The source-plane mesh grid to check.
+        """
+        if source_plane_mesh_grid is None:
+            raise exc.MeshException(
+                f"The mesh `{type(self).__name__}` was not given an image-plane mesh "
+                f"grid, so its source-plane mesh grid is None and the pixelization "
+                f"cannot be built.\n\n"
+                f"This mesh does not compute that grid itself — it is a required "
+                f"input, supplied via `adapt_images`:\n\n"
+                f"    adapt_images = al.AdaptImages(\n"
+                f"        galaxy_image_plane_mesh_grid_dict={{source: image_plane_mesh_grid}}\n"
+                f"    )\n"
+                f"    fit = al.FitImaging(dataset=dataset, tracer=tracer, adapt_images=adapt_images)\n\n"
+                f"See the `pixelization` feature scripts in the workspace (e.g. "
+                f"`imaging/features/pixelization/delaunay.py`) for the full idiom. A "
+                f"mesh in the rectangular family (e.g. `RectangularUniform`) builds "
+                f"its own grid and needs no `adapt_images`."
+            )
 
     def relocated_mesh_grid_from(
         self,
