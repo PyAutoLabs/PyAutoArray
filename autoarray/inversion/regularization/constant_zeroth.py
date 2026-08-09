@@ -6,6 +6,7 @@ if TYPE_CHECKING:
     from autoarray.inversion.linear_obj.linear_obj import LinearObj
 
 from autoarray.inversion.regularization.abstract import AbstractRegularization
+from autoarray.inversion.regularization.abstract import validate_coefficient
 
 
 def constant_zeroth_regularization_matrix_from(
@@ -76,7 +77,11 @@ class ConstantZeroth(AbstractRegularization):
     def __init__(self, coefficient_neighbor=1.0, coefficient_zeroth=1.0):
         super().__init__()
 
+        validate_coefficient(
+            coefficient=coefficient_neighbor, name="coefficient_neighbor"
+        )
         self.coefficient_neighbor = coefficient_neighbor
+        validate_coefficient(coefficient=coefficient_zeroth, name="coefficient_zeroth")
         self.coefficient_zeroth = coefficient_zeroth
 
     def regularization_weights_from(self, linear_obj: LinearObj, xp=np) -> np.ndarray:

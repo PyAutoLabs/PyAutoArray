@@ -14,6 +14,7 @@ from autoarray.inversion.regularization.matern_kernel import (
     quadratic_form_via_cholesky,
 )
 from autoarray.inversion.regularization.adapt import adapt_regularization_weights_from
+from autoarray.inversion.regularization.abstract import validate_coefficient
 
 
 class MaternAdaptKernel(MaternKernel):
@@ -86,7 +87,9 @@ class MaternAdaptKernel(MaternKernel):
             jitter=jitter,
             jitter_relative=jitter_relative,
         )
+        validate_coefficient(coefficient=inner_coefficient, name="inner_coefficient")
         self.inner_coefficient = inner_coefficient
+        validate_coefficient(coefficient=outer_coefficient, name="outer_coefficient")
         self.outer_coefficient = outer_coefficient
         self.signal_scale = signal_scale
 

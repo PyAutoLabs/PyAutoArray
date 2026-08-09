@@ -6,6 +6,7 @@ if TYPE_CHECKING:
     from autoarray.inversion.linear_obj.linear_obj import LinearObj
 
 from autoarray.inversion.regularization.abstract import AbstractRegularization
+from autoarray.inversion.regularization.abstract import validate_coefficient
 from autoarray.operators import derivative_util
 
 
@@ -74,6 +75,7 @@ class FourthOrderMask(AbstractRegularization):
             The regularization coefficient which multiplies the matrix,
             setting the strength of the smoothing.
         """
+        validate_coefficient(coefficient=coefficient)
         self.coefficient = coefficient
 
         super().__init__()

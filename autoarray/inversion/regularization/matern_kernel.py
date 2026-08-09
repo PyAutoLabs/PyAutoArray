@@ -7,6 +7,7 @@ if TYPE_CHECKING:
     from autoarray.inversion.linear_obj.linear_obj import LinearObj
 
 from autoarray.inversion.regularization.abstract import AbstractRegularization
+from autoarray.inversion.regularization.abstract import validate_coefficient
 
 
 def kv_xp(v, z, xp=np):
@@ -318,6 +319,7 @@ class MaternKernel(AbstractRegularization):
             for the adaptive one; see :func:`apply_jitter` for why and when to switch.
         """
 
+        validate_coefficient(coefficient=coefficient)
         self.coefficient = coefficient
         self.scale = scale
         self.nu = nu

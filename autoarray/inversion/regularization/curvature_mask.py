@@ -7,6 +7,7 @@ if TYPE_CHECKING:
 
 from autoarray.inversion.regularization.abstract import AbstractRegularization
 from autoarray.operators import derivative_util
+from autoarray.inversion.regularization.abstract import validate_coefficient
 
 
 def curvature_reg_matrix_via_mask_from(mask, pixel_scale: float = 1.0) -> np.ndarray:
@@ -71,6 +72,7 @@ class CurvatureMask(AbstractRegularization):
             The regularization coefficient which multiplies the matrix,
             setting the strength of the smoothing.
         """
+        validate_coefficient(coefficient=coefficient)
         self.coefficient = coefficient
 
         super().__init__()

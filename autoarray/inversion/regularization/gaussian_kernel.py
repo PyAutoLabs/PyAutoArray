@@ -6,6 +6,7 @@ if TYPE_CHECKING:
     from autoarray.inversion.linear_obj.linear_obj import LinearObj
 
 from autoarray.inversion.regularization.abstract import AbstractRegularization
+from autoarray.inversion.regularization.abstract import validate_coefficient
 
 
 def gauss_cov_matrix_from(
@@ -100,6 +101,7 @@ class GaussianKernel(AbstractRegularization):
             convention assumes ``C_ii ~ 1``, which holds for this unweighted kernel but not
             for the adaptive one; see :func:`apply_jitter` for why and when to switch.
         """
+        validate_coefficient(coefficient=coefficient)
         self.coefficient = coefficient
         self.scale = scale
         self.jitter = jitter

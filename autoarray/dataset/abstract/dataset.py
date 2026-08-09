@@ -119,6 +119,25 @@ class AbstractDataset:
                     """
                 ) from e
 
+        # Guarding on the base class covers `Imaging`, `Interferometer` and every other
+        # dataset subclass. Array shapes are static under JAX, so no tracer gate is
+        # needed here (unlike the scalar guards in `autoarray.validate`).
+        data_shape = getattr(data, "shape_native", None)
+        noise_map_shape = getattr(noise_map, "shape_native", None)
+
+        if (
+            data_shape is not None
+            and noise_map_shape is not None
+            and tuple(data_shape) != tuple(noise_map_shape)
+        ):
+            raise exc.DatasetException(
+                f"noise_map must have the same shape as data; got data with "
+                f"shape_native {tuple(data_shape)!r} and noise_map with shape_native "
+                f"{tuple(noise_map_shape)!r}. Every fit quantity pairs a data value "
+                f"with its noise value pixel-by-pixel, so a mismatch has no "
+                f"well-defined meaning"
+            )
+
         self.noise_map = noise_map
 
         self.over_sample_size_lp = (

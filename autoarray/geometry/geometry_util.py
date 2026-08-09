@@ -2,6 +2,7 @@ import numpy as np
 from typing import Tuple, Union
 
 from autoarray import type as ty
+from autoarray import validate
 
 
 def convert_shape_native_1d(shape_native: Union[int, Tuple[int]]) -> Tuple[int]:
@@ -46,7 +47,14 @@ def convert_pixel_scales_1d(pixel_scales: ty.PixelScales) -> Tuple[float]:
     -------
     Tuple[float]
         The pixel scale as a 1-element tuple `(float,)`.
+
+    Raises
+    ------
+    ValueError
+        If any entry is a concrete scalar which is not finite and above zero.
     """
+
+    validate.validate_pixel_scales(pixel_scales=pixel_scales)
 
     if type(pixel_scales) is float:
         pixel_scales = (pixel_scales,)
@@ -205,7 +213,20 @@ def convert_pixel_scales_2d(pixel_scales: ty.PixelScales) -> Tuple[float, float]
     -------
     Tuple[float, float]
         The pixel scale as a 2-element tuple `(float, float)`.
+
+    Raises
+    ------
+    ValueError
+        If any entry is a concrete scalar which is not finite and above zero.
+
+    Notes
+    -----
+    This is the single chokepoint every ``Mask2D`` factory and ``Grid2D.uniform``
+    funnel their ``pixel_scales`` through, so validating here covers them all rather
+    than repeating a guard at each construction site.
     """
+
+    validate.validate_pixel_scales(pixel_scales=pixel_scales)
 
     if type(pixel_scales) is float:
         pixel_scales = (pixel_scales, pixel_scales)
