@@ -177,6 +177,14 @@ class Delaunay(AbstractMesh):
         adapt_data
             Not used for a rectangular mesh.
         """
+        # Adaptive meshes require an image-plane mesh grid (supplied via `adapt_images`)
+        # and do not compute one themselves. Checked here, at the entry point the whole
+        # adaptive family shares, so a missing precondition names `adapt_images` rather
+        # than surfacing as an AttributeError on None several frames deeper.
+        self._validate_source_plane_mesh_grid(
+            source_plane_mesh_grid=source_plane_mesh_grid
+        )
+
         relocated_grid = self.relocated_grid_from(
             border_relocator=border_relocator,
             source_plane_data_grid=source_plane_data_grid,
