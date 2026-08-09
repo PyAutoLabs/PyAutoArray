@@ -36,6 +36,7 @@ SPLIT_REGULARIZATIONS = [
 
 ADAPTIVE_MESHES = [
     aa.mesh.Delaunay,
+    aa.mesh.DelaunayNN,
     aa.mesh.KNNBarycentric,
 ]
 
@@ -99,6 +100,7 @@ def test__capability_flags():
     assert aa.mesh.RectangularAdaptDensity(shape=(15, 15)).supports_split_regularization is False
     assert aa.mesh.RectangularAdaptImage(shape=(15, 15)).supports_split_regularization is False
     assert aa.mesh.Delaunay(pixels=100).supports_split_regularization is True
+    assert aa.mesh.DelaunayNN(pixels=100).supports_split_regularization is True
     assert aa.mesh.KNNBarycentric(pixels=100).supports_split_regularization is True
 
     assert aa.reg.ConstantSplit().is_split_regularization is True
@@ -119,10 +121,12 @@ def test__interpolator_rectangular_has_no_split_mappings():
         InterpolatorRectangularUniform,
     )
     from autoarray.inversion.mesh.interpolator.delaunay import InterpolatorDelaunay
+    from autoarray.inversion.mesh.interpolator.sibson import InterpolatorDelaunayNN
 
     assert not hasattr(InterpolatorRectangular, "_mappings_sizes_weights_split")
     assert not hasattr(InterpolatorRectangularUniform, "_mappings_sizes_weights_split")
     assert hasattr(InterpolatorDelaunay, "_mappings_sizes_weights_split")
+    assert hasattr(InterpolatorDelaunayNN, "_mappings_sizes_weights_split")
 
 
 def test__pixelization_exception_is_not_a_fit_exception():

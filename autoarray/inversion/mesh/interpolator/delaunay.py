@@ -133,8 +133,9 @@ def _jax_delaunay_tables(points):
     NOT an approximation: the callback returns only int32 connectivity
     tables, which are piecewise-constant in the vertex positions — their
     true derivative is exactly zero everywhere except the measure-zero
-    re-wiring (triangle-flip) events, where the likelihood itself is
-    discontinuous and no gradient exists for any method. Every quantity
+    re-wiring (triangle-flip) events. The barycentric interpolant is
+    discontinuous there; the Sibson interpolant in ``DelaunayNN`` instead has
+    matching limits across an ordinary flip. Every quantity
     with a non-zero derivative (point location via the visibility walk,
     barycentric weights, dual areas, split points) is computed in-graph
     from the traced ``points``, so the frozen-tables gradient is the exact
@@ -164,6 +165,7 @@ def pix_indexes_delaunay_walk_from(
     simplex_neighbors,
     vertex_simplex,
     xp=np,
+    return_simplex_indexes=False,
 ):
     """JAX/NumPy point location replacing ``scipy.spatial.Delaunay.find_simplex``
     on the JAX likelihood path, via the same visibility-walk algorithm
@@ -185,6 +187,11 @@ def pix_indexes_delaunay_walk_from(
     vmap (JAX path; the NumPy path — used by the unit tests — processes the
     whole array with early exit). Returns a (Q, 3) int32 mapping array with
     the same semantics as ``pix_indexes_for_sub_slim_index_delaunay_from``.
+
+    When ``return_simplex_indexes`` is true, also return the containing
+    simplex index for every query (or -1 outside the convex hull).  Sibson
+    interpolation uses this as the seed of its circumcircle-cavity walk, so
+    point location is not repeated.
     """
 
     def cross(u, v):
@@ -251,10 +258,15 @@ def pix_indexes_delaunay_walk_from(
 
         verts = simplices_padded[cur]
         fallback = xp.stack([seed, -xp.ones_like(seed), -xp.ones_like(seed)], axis=1)
-        return xp.where(done[:, None], verts, fallback).astype(xp.int32)
+        mappings = xp.where(done[:, None], verts, fallback).astype(xp.int32)
+        simplex_indexes = xp.where(done, cur, -1).astype(xp.int32)
+        return mappings, simplex_indexes
 
     if xp is np:
-        return locate_chunk(query_points)
+        mappings, simplex_indexes = locate_chunk(query_points)
+        if return_simplex_indexes:
+            return mappings, simplex_indexes
+        return mappings
 
     import jax
 
@@ -265,8 +277,14 @@ def pix_indexes_delaunay_walk_from(
     q_padded = xp.concatenate(
         [query_points, xp.full((pad, 2), 1.0e9, dtype=query_points.dtype)]
     )
-    mappings = jax.lax.map(locate_chunk, q_padded.reshape(-1, chunk, 2)).reshape(-1, 3)
-    return mappings[:Q]
+    mappings, simplex_indexes = jax.lax.map(
+        locate_chunk, q_padded.reshape(-1, chunk, 2)
+    )
+    mappings = mappings.reshape(-1, 3)[:Q]
+    simplex_indexes = simplex_indexes.reshape(-1)[:Q]
+    if return_simplex_indexes:
+        return mappings, simplex_indexes
+    return mappings
 
 
 def jax_delaunay(points, query_points, areas_factor=0.5):

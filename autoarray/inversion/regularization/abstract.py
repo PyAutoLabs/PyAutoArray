@@ -13,7 +13,8 @@ class AbstractRegularization:
     calculation of the mesh's mappings rather than the mappings themselves.
 
     Split schemes require the mesh's interpolator to provide `_mappings_sizes_weights_split`, which
-    only the adaptive meshes (e.g. ``Delaunay``, ``KNNBarycentric``) do. ``Pixelization`` uses this
+    only the adaptive meshes (e.g. ``Delaunay``, ``DelaunayNN``,
+    ``KNNBarycentric``) do. ``Pixelization`` uses this
     flag together with ``AbstractMesh.supports_split_regularization`` to reject unsupported
     combinations at construction.
     """
