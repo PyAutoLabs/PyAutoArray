@@ -107,10 +107,15 @@ def test__fnnls_cholesky__never_returns_a_non_finite_solution(jitter):
     # The producer regression: across the whole near-degenerate band, the
     # solver must either return a finite solution or raise -- never hand back
     # NaN as though it were a valid reconstruction.
-    raised = 0
+    solved = 0
 
     for seed in range(40):
         ZTZ, ZTx = _normal_equations(n=12, n_data=40, jitter=jitter, seed=seed)
+
+        # The band really is degenerate. This is a property of the fixture, so it
+        # holds on every machine -- unlike *how the solver responds* to it, which
+        # is decided by floating-point summation order (see the module comment).
+        assert np.linalg.cond(ZTZ) > 1.0e12
 
         try:
             P_initial = np.linalg.solve(ZTZ, ZTx) > 0
@@ -120,14 +125,24 @@ def test__fnnls_cholesky__never_returns_a_non_finite_solution(jitter):
         try:
             reconstruction = fnnls_cholesky(ZTZ, ZTx.T, P_initial=P_initial)
         except np.linalg.LinAlgError:
-            raised += 1
             continue
+
+        solved += 1
 
         assert np.all(np.isfinite(reconstruction))
 
-    # Sanity: the degenerate band must actually be exercising the guard,
-    # otherwise the assertion above is passing vacuously.
-    assert raised > 0
+    # Sanity: at least one seed must have reached the finiteness assertion above,
+    # otherwise this test passes vacuously.
+    #
+    # NOT `raised > 0`. The invariant here is the same one
+    # `test__cholinsertlast__singular_insertion_never_yields_an_unusable_pivot`
+    # states: either raise, or return something finite. Raising is one *allowed*
+    # outcome, not a required one, so requiring it of some seed asserts on which
+    # side of zero the runner's BLAS happens to round the Schur complement. At
+    # `jitter=0.0` exactly one of these 40 seeds raises on a single-threaded local
+    # BLAS and none do on the CI runners, so `raised > 0` was a coin flip that
+    # failed CI on a green library.
+    assert solved > 0
 
 
 def test__fnnls_cholesky__well_conditioned_problem_is_unaffected():
