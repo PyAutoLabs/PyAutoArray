@@ -691,9 +691,49 @@ class AbstractInversion:
 
         The above works include the regularization_matrix coefficient (lambda) in this calculation. In PyAutoLens,
         this is already in the regularization matrix and thus implicitly included in the matrix multiplication.
+
+        Under ``regularization_term_method == "cho_solve"`` (opt-in, default off), regularization schemes
+        which know a factorization of their own matrix may instead supply their contribution directly via
+        :meth:`AbstractRegularization.regularization_term_from` — the kernel schemes (``MaternKernel`` etc.)
+        return ``coefficient * s^T C^-1 s`` from a single Cholesky solve of their covariance ``C``, avoiding
+        the round-off of contracting the explicitly formed inverse (whose error is amplified by ``cond(C)``,
+        ~1e9 on clustered traced mesh vertices). Because ``regularization_matrix_reduced`` is the block
+        diagonal of the per-object matrices when every linear object is regularized, the term is the sum of
+        the per-object terms; if any scheme has no shortcut (returns ``None``) the whole computation falls
+        back to the formed matrix. The default ``"matmul"`` path never consults the shortcut, so default
+        evidence values are unchanged.
+
+        Returns
+        -------
+        float
+            The regularization term of the inversion.
         """
         if not self.has(cls=AbstractRegularization):
             return 0.0
+
+        if (
+            self.settings.regularization_term_method == "cho_solve"
+            and self.all_linear_obj_have_regularization
+        ):
+            # `reconstruction_reduced` is the full reconstruction here (the guard above is exactly the
+            # no-reduction case), so the per-object slices index it directly.
+            reconstruction = self.reconstruction_reduced
+
+            term_list = [
+                regularization.regularization_term_from(
+                    linear_obj=linear_obj,
+                    reconstruction=reconstruction[param_range[0] : param_range[1]],
+                    xp=self._xp,
+                )
+                for linear_obj, regularization, param_range in zip(
+                    self.linear_obj_list,
+                    self.regularization_list,
+                    self.param_range_list_from(cls=LinearObj),
+                )
+            ]
+
+            if all(term is not None for term in term_list):
+                return sum(term_list)
 
         return self._xp.matmul(
             self.reconstruction_reduced.T,

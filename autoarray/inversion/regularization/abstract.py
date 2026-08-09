@@ -213,3 +213,47 @@ class AbstractRegularization:
         has no factorization-aware shortcut.
         """
         return None
+
+    def regularization_term_from(
+        self, linear_obj: LinearObj, reconstruction: np.ndarray, xp=np
+    ) -> Optional[float]:
+        """
+        Returns this scheme's contribution to the regularization term ``s^T H s``
+        computed from a factorization the scheme itself knows about, or ``None`` when
+        no such shortcut exists (the default).
+
+        This is the ``s^T H s`` counterpart of
+        :meth:`log_det_regularization_matrix_term_from`, and exists for the same
+        reason. The kernel regularization schemes build ``H = coefficient * C^-1``
+        from a dense covariance ``C``, so their term is
+        ``coefficient * s^T C^-1 s`` — obtainable from a single Cholesky *solve*
+        against ``s`` rather than by forming ``C^-1`` and contracting it. Forming the
+        explicit inverse carries round-off amplified by ``cond(C)`` (~1e9 on the
+        clustered traced vertices of the kNN mesh families), which then enters the
+        evidence through this term.
+
+        Note this cannot remove the explicit inverse from the inversion altogether:
+        ``curvature_reg_matrix`` is a dense ``F + H`` feeding the dense solve for the
+        reconstruction, so ``H`` is still formed there. This shortcut removes the
+        formed inverse from the *evidence* terms only.
+
+        The inversion consumes this ONLY when
+        ``Settings.regularization_term_method == "cho_solve"`` — the default
+        ``"matmul"`` path never calls it, so default likelihood values are unchanged.
+        See ``AbstractInversion.regularization_term``.
+
+        Parameters
+        ----------
+        linear_obj
+            The linear object (e.g. a ``Mapper``) whose regularization matrix the
+            term is of.
+        reconstruction
+            The reconstructed values ``s`` of this linear object's parameters (the
+            slice of the inversion's reconstruction belonging to ``linear_obj``).
+
+        Returns
+        -------
+        The scalar ``s^T H s`` for this linear object, or ``None`` when this scheme
+        has no factorization-aware shortcut.
+        """
+        return None

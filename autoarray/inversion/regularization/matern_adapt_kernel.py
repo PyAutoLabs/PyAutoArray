@@ -10,6 +10,9 @@ if TYPE_CHECKING:
 from autoarray.inversion.regularization.matern_kernel import matern_kernel
 from autoarray.inversion.regularization.matern_kernel import matern_cov_matrix_from
 from autoarray.inversion.regularization.matern_kernel import inv_via_cholesky
+from autoarray.inversion.regularization.matern_kernel import (
+    quadratic_form_via_cholesky,
+)
 from autoarray.inversion.regularization.adapt import adapt_regularization_weights_from
 
 
@@ -22,6 +25,7 @@ class MaternAdaptKernel(MaternKernel):
         outer_coefficient: float = 1.0,
         signal_scale: float = 1.0,
         jitter: Optional[float] = None,
+        jitter_relative: bool = False,
     ):
         """
         Regularization which uses a Matern smoothing kernel to regularize the solution with regularization weights
@@ -63,8 +67,25 @@ class MaternAdaptKernel(MaternKernel):
             Controls how strongly the kernel weights adapt to pixel brightness. Larger values make bright pixels
             receive significantly higher weights (and faint pixels lower weights), while smaller values produce a
             more uniform weighting. Typical values are of order unity (e.g. 0.5–2.0).
+        jitter
+            The small value added to the covariance diagonal for numerical stability.
+            ``None`` (default) uses the historical value 1e-8.
+        jitter_relative
+            If ``True`` the jitter is applied *relative* to each pixel's own variance
+            (``C_ii *= 1 + jitter``) rather than as a fixed absolute ``jitter * I``.
+            ``False`` (default) preserves the historical behaviour exactly. **This scheme is
+            the one the absolute convention breaks down on**: its ``C_ii = w_i^2`` spans the
+            adaptive-weight dynamic range, so at wide inner/outer coefficients a fixed
+            ``1e-8`` can reach 100% of a faint pixel's variance, destroying its kernel
+            structure. See :func:`apply_jitter`.
         """
-        super().__init__(coefficient=0.0, scale=scale, nu=nu, jitter=jitter)
+        super().__init__(
+            coefficient=0.0,
+            scale=scale,
+            nu=nu,
+            jitter=jitter,
+            jitter_relative=jitter_relative,
+        )
         self.inner_coefficient = inner_coefficient
         self.outer_coefficient = outer_coefficient
         self.signal_scale = signal_scale
@@ -111,6 +132,7 @@ class MaternAdaptKernel(MaternKernel):
             nu=self.nu,
             weights=kernel_weights,
             jitter=self.jitter_value,
+            jitter_relative=self.jitter_relative,
             xp=xp,
         )
 
@@ -138,7 +160,40 @@ class MaternAdaptKernel(MaternKernel):
             nu=self.nu,
             weights=kernel_weights,
             jitter=self.jitter_value,
+            jitter_relative=self.jitter_relative,
             xp=xp,
         )
 
         return -2.0 * xp.sum(xp.log(xp.diag(xp.linalg.cholesky(covariance_matrix))))
+
+    def regularization_term_from(
+        self, linear_obj: LinearObj, reconstruction: np.ndarray, xp=np
+    ) -> float:
+        """
+        The regularization term ``s^T H s`` from a single Cholesky solve of the
+        weighted kernel covariance. This scheme's ``H = C_w^-1`` carries no
+        coefficient scaling (the adaptive weights are inside ``C_w``), so the term is
+        ``s^T C_w^-1 s`` — which is why this override is needed rather than the
+        inherited :class:`MaternKernel` one, whose ``coefficient`` is fixed at 0.0
+        here.
+
+        Consumed by the inversion only when
+        ``Settings.regularization_term_method == "cho_solve"`` (see
+        :meth:`AbstractRegularization.regularization_term_from`); the default
+        ``"matmul"`` path contracts the formed ``H`` and is unchanged.
+        """
+        kernel_weights = 1.0 / self.regularization_weights_from(
+            linear_obj=linear_obj, xp=xp
+        )
+
+        covariance_matrix = matern_cov_matrix_from(
+            scale=self.scale,
+            pixel_points=linear_obj.source_plane_mesh_grid.array,
+            nu=self.nu,
+            weights=kernel_weights,
+            jitter=self.jitter_value,
+            jitter_relative=self.jitter_relative,
+            xp=xp,
+        )
+
+        return quadratic_form_via_cholesky(covariance_matrix, reconstruction, xp=xp)

@@ -12,6 +12,7 @@ def exp_cov_matrix_from(
     scale: float,
     pixel_points: np.ndarray,  # shape (N, 2)
     jitter: float = 1e-8,
+    jitter_relative: bool = False,
     xp=np,
 ) -> np.ndarray:  # shape (N, N)
     """
@@ -54,7 +55,9 @@ def exp_cov_matrix_from(
 
     # add a small jitter on the diagonal
     N = pts.shape[0]
-    cov = cov + xp.eye(N, dtype=cov.dtype) * jitter
+    from autoarray.inversion.regularization.matern_kernel import apply_jitter
+
+    cov = apply_jitter(cov, jitter=jitter, jitter_relative=jitter_relative, xp=xp)
 
     return cov
 
@@ -65,6 +68,7 @@ class ExponentialKernel(AbstractRegularization):
         coefficient: float = 1.0,
         scale: float = 1.0,
         jitter: Optional[float] = None,
+        jitter_relative: bool = False,
     ):
         """
         Regularization which uses an Exponential smoothing kernel to regularize the solution.
@@ -99,10 +103,17 @@ class ExponentialKernel(AbstractRegularization):
             ``None`` (default) uses the historical value 1e-8 — behaviour is identical
             to not having this parameter (it is a fixed setting, not a free model
             parameter, hence the ``None`` default).
+        jitter_relative
+            If ``True`` the jitter is applied *relative* to each pixel's own variance
+            (``C_ii *= 1 + jitter``) rather than as a fixed absolute ``jitter * I``.
+            ``False`` (default) preserves the historical behaviour exactly. The absolute
+            convention assumes ``C_ii ~ 1``, which holds for this unweighted kernel but not
+            for the adaptive one; see :func:`apply_jitter` for why and when to switch.
         """
         self.coefficient = coefficient
         self.scale = scale
         self.jitter = jitter
+        self.jitter_relative = jitter_relative
 
         super().__init__()
 
@@ -150,6 +161,7 @@ class ExponentialKernel(AbstractRegularization):
             scale=self.scale,
             pixel_points=linear_obj.source_plane_mesh_grid.array,
             jitter=self.jitter_value,
+            jitter_relative=self.jitter_relative,
             xp=xp,
         )
 
@@ -173,6 +185,7 @@ class ExponentialKernel(AbstractRegularization):
             scale=self.scale,
             pixel_points=linear_obj.source_plane_mesh_grid.array,
             jitter=self.jitter_value,
+            jitter_relative=self.jitter_relative,
             xp=xp,
         )
 
@@ -181,3 +194,33 @@ class ExponentialKernel(AbstractRegularization):
         )
 
         return linear_obj.params * np.log(self.coefficient) - log_det_covariance
+
+    def regularization_term_from(
+        self, linear_obj: LinearObj, reconstruction: np.ndarray, xp=np
+    ) -> float:
+        """
+        The regularization term ``s^T H s`` from a single Cholesky solve of the kernel
+        covariance: ``H = coefficient * C^-1``, so
+        ``s^T H s = coefficient * s^T C^-1 s``, with the quadratic form evaluated by
+        solving ``C x = s`` rather than by forming ``C^-1``.
+
+        Consumed by the inversion only when
+        ``Settings.regularization_term_method == "cho_solve"`` (see
+        :meth:`AbstractRegularization.regularization_term_from`); the default
+        ``"matmul"`` path contracts the formed ``H`` and is unchanged.
+        """
+        from autoarray.inversion.regularization.matern_kernel import (
+            quadratic_form_via_cholesky,
+        )
+
+        covariance_matrix = exp_cov_matrix_from(
+            scale=self.scale,
+            pixel_points=linear_obj.source_plane_mesh_grid.array,
+            jitter=self.jitter_value,
+            jitter_relative=self.jitter_relative,
+            xp=xp,
+        )
+
+        return self.coefficient * quadratic_form_via_cholesky(
+            covariance_matrix, reconstruction, xp=xp
+        )
