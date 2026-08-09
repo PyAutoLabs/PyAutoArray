@@ -10,6 +10,9 @@ if TYPE_CHECKING:
 from autoarray.inversion.regularization.matern_kernel import matern_kernel
 from autoarray.inversion.regularization.matern_kernel import matern_cov_matrix_from
 from autoarray.inversion.regularization.matern_kernel import inv_via_cholesky
+from autoarray.inversion.regularization.matern_kernel import (
+    quadratic_form_via_cholesky,
+)
 from autoarray.inversion.regularization.adapt import adapt_regularization_weights_from
 
 
@@ -142,3 +145,34 @@ class MaternAdaptKernel(MaternKernel):
         )
 
         return -2.0 * xp.sum(xp.log(xp.diag(xp.linalg.cholesky(covariance_matrix))))
+
+    def regularization_term_from(
+        self, linear_obj: LinearObj, reconstruction: np.ndarray, xp=np
+    ) -> float:
+        """
+        The regularization term ``s^T H s`` from a single Cholesky solve of the
+        weighted kernel covariance. This scheme's ``H = C_w^-1`` carries no
+        coefficient scaling (the adaptive weights are inside ``C_w``), so the term is
+        ``s^T C_w^-1 s`` — which is why this override is needed rather than the
+        inherited :class:`MaternKernel` one, whose ``coefficient`` is fixed at 0.0
+        here.
+
+        Consumed by the inversion only when
+        ``Settings.regularization_term_method == "cho_solve"`` (see
+        :meth:`AbstractRegularization.regularization_term_from`); the default
+        ``"matmul"`` path contracts the formed ``H`` and is unchanged.
+        """
+        kernel_weights = 1.0 / self.regularization_weights_from(
+            linear_obj=linear_obj, xp=xp
+        )
+
+        covariance_matrix = matern_cov_matrix_from(
+            scale=self.scale,
+            pixel_points=linear_obj.source_plane_mesh_grid.array,
+            nu=self.nu,
+            weights=kernel_weights,
+            jitter=self.jitter_value,
+            xp=xp,
+        )
+
+        return quadratic_form_via_cholesky(covariance_matrix, reconstruction, xp=xp)

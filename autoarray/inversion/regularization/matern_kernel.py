@@ -173,6 +173,44 @@ def inv_via_cholesky(C, xp=np):
     return jla.cho_solve((L, True), I)
 
 
+def quadratic_form_via_cholesky(C, s, xp=np):
+    """
+    The quadratic form ``s^T C^-1 s`` evaluated through a single Cholesky solve.
+
+    This is the implicit counterpart of ``s @ inv_via_cholesky(C) @ s``: it never
+    forms ``C^-1``, solving ``C x = s`` for the single right-hand side ``s`` instead
+    of the ``N`` right-hand sides of the identity. Both accuracy and cost improve —
+    the explicit inverse's round-off is amplified by ``cond(C)``, which reaches ~1e9
+    on the clustered traced vertices of the kNN mesh families, and it performs ``N``
+    triangular solves where one suffices.
+
+    Parameters
+    ----------
+    C
+        The (N, N) symmetric positive-definite kernel covariance matrix.
+    s
+        The (N,) vector the quadratic form is taken over (the reconstruction).
+    xp
+        Backend (numpy or jax.numpy).
+
+    Returns
+    -------
+    The scalar ``s^T C^-1 s``.
+    """
+    # NumPy
+    if xp is np:
+        import scipy.linalg as la
+
+        cho = la.cho_factor(C, lower=True, check_finite=False)
+        return s @ la.cho_solve(cho, s, check_finite=False)
+
+    # JAX
+    import jax.scipy.linalg as jla
+
+    L = xp.linalg.cholesky(C)
+    return s @ jla.cho_solve((L, True), s)
+
+
 class MaternKernel(AbstractRegularization):
     def __init__(
         self,
@@ -302,3 +340,29 @@ class MaternKernel(AbstractRegularization):
         )
 
         return linear_obj.params * np.log(self.coefficient) - log_det_covariance
+
+    def regularization_term_from(
+        self, linear_obj: LinearObj, reconstruction: np.ndarray, xp=np
+    ) -> float:
+        """
+        The regularization term ``s^T H s`` from a single Cholesky solve of the kernel
+        covariance: ``H = coefficient * C^-1``, so
+        ``s^T H s = coefficient * s^T C^-1 s``, with the quadratic form evaluated by
+        solving ``C x = s`` rather than by forming ``C^-1``.
+
+        Consumed by the inversion only when
+        ``Settings.regularization_term_method == "cho_solve"`` (see
+        :meth:`AbstractRegularization.regularization_term_from`); the default
+        ``"matmul"`` path contracts the formed ``H`` and is unchanged.
+        """
+        covariance_matrix = matern_cov_matrix_from(
+            scale=self.scale,
+            pixel_points=linear_obj.source_plane_mesh_grid.array,
+            nu=self.nu,
+            jitter=self.jitter_value,
+            xp=xp,
+        )
+
+        return self.coefficient * quadratic_form_via_cholesky(
+            covariance_matrix, reconstruction, xp=xp
+        )

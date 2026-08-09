@@ -18,6 +18,7 @@ class Settings:
         nnls_solver_tol: Optional[float] = None,
         nnls_max_iter: Optional[int] = None,
         log_det_method: Optional[str] = None,
+        regularization_term_method: Optional[str] = None,
     ):
         """
         The settings of an Inversion, customizing how a linear set of equations are solved for.
@@ -118,6 +119,32 @@ class Settings:
               ``cond(C)``, ~1e-6 absolute in the evidence on clustered traced mesh vertices) and finite at any
               regularization coefficient (``C``'s conditioning does not depend on it). See
               :meth:`AbstractRegularization.log_det_regularization_matrix_term_from`.
+        regularization_term_method
+            How the Bayesian-evidence regularization term ``s^T H s``
+            (``AbstractInversion.regularization_term``) is computed. `None` (default) reads the
+            packaged value ``"matmul"``.
+
+            - ``"matmul"`` (default) — ``s @ (H @ s)`` against the explicitly formed regularization
+              matrix, the historical computation.
+            - ``"cho_solve"`` — for the kernel regularization schemes (``MaternKernel``,
+              ``GaussianKernel``, ``ExponentialKernel``, ``MaternAdaptKernel``), whose
+              ``H = coefficient * C^-1``, evaluate ``coefficient * s^T C^-1 s`` by solving
+              ``C x = s`` through one Cholesky of the kernel covariance ``C`` instead of forming
+              ``C^-1`` and contracting it. More accurate — the explicit inverse's round-off is
+              amplified by ``cond(C)``, which reaches ~1e9 on the clustered traced vertices of the
+              kNN mesh families — and cheaper, being one triangular solve rather than ``N``. This
+              is an **opt-in, non-default** alternative; schemes with no such factorization
+              (``Constant``, ``Adapt``, the split families) have no shortcut and fall back to the
+              formed matrix, so mixed inversions stay correct. See
+              :meth:`AbstractRegularization.regularization_term_from`.
+
+              This is deliberately separate from ``log_det_method``: the two terms can be moved
+              onto their exact factorizations independently, which is what makes it possible to
+              attribute an evidence shift to one term rather than both.
+
+              Note neither option removes the explicit inverse from the inversion as a whole —
+              ``curvature_reg_matrix`` is a dense ``F + H`` feeding the dense solve for the
+              reconstruction, so ``H`` is still formed there regardless.
         """
         self.use_mixed_precision = use_mixed_precision
         self.nnls_solver_tol = nnls_solver_tol
@@ -129,6 +156,7 @@ class Settings:
             no_regularization_add_to_curvature_diag_value
         )
         self._log_det_method = log_det_method
+        self._regularization_term_method = regularization_term_method
 
     @property
     def use_positive_only_solver(self):
@@ -166,3 +194,10 @@ class Settings:
             return conf.instance["general"]["inversion"]["log_det_method"]
 
         return self._log_det_method
+
+    @property
+    def regularization_term_method(self):
+        if self._regularization_term_method is None:
+            return conf.instance["general"]["inversion"]["regularization_term_method"]
+
+        return self._regularization_term_method

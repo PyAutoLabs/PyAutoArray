@@ -193,3 +193,38 @@ class GaussianKernel(AbstractRegularization):
         )
 
         return linear_obj.params * np.log(self.coefficient) - log_det_covariance
+
+    def regularization_term_from(
+        self, linear_obj: LinearObj, reconstruction: np.ndarray, xp=np
+    ) -> float:
+        """
+        The regularization term ``s^T H s`` from a single Cholesky solve of the kernel
+        covariance: ``H = coefficient * C^-1``, so
+        ``s^T H s = coefficient * s^T C^-1 s``, with the quadratic form evaluated by
+        solving ``C x = s`` rather than by forming ``C^-1``.
+
+        As with :meth:`log_det_regularization_matrix_term_from`, this is the term of
+        the analytic ``coefficient * C^-1``: it excludes both the symmetrisation and
+        the trace-scaled stabilisation jitter that :meth:`regularization_matrix_from`
+        applies to the formed matrix, since both exist only to guard the
+        factorization of the explicit inverse that this shortcut avoids entirely.
+
+        Consumed by the inversion only when
+        ``Settings.regularization_term_method == "cho_solve"`` (see
+        :meth:`AbstractRegularization.regularization_term_from`); the default
+        ``"matmul"`` path contracts the formed ``H`` and is unchanged.
+        """
+        from autoarray.inversion.regularization.matern_kernel import (
+            quadratic_form_via_cholesky,
+        )
+
+        covariance_matrix = gauss_cov_matrix_from(
+            scale=self.scale,
+            pixel_points=linear_obj.source_plane_mesh_grid.array,
+            jitter=self.jitter_value,
+            xp=xp,
+        )
+
+        return self.coefficient * quadratic_form_via_cholesky(
+            covariance_matrix, reconstruction, xp=xp
+        )
