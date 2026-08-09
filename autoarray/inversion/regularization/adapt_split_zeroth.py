@@ -8,10 +8,12 @@ if TYPE_CHECKING:
 from autoarray.inversion.regularization.adapt import Adapt
 from autoarray.inversion.regularization.brightness_zeroth import BrightnessZeroth
 from autoarray.inversion.regularization import regularization_util
+from autoarray.inversion.regularization.abstract import validate_coefficient
 
 
 class AdaptSplitZeroth(Adapt):
     is_split_regularization = True
+
     def __init__(
         self,
         zeroth_coefficient: float = 1.0,
@@ -77,6 +79,7 @@ class AdaptSplitZeroth(Adapt):
             low signal regions.
         """
 
+        validate_coefficient(coefficient=zeroth_coefficient, name="zeroth_coefficient")
         self.zeroth_coefficient = zeroth_coefficient
         self.zeroth_signal_scale = zeroth_signal_scale
 

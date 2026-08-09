@@ -2,8 +2,46 @@ from __future__ import annotations
 import numpy as np
 from typing import Optional, TYPE_CHECKING
 
+from autoarray import validate
+
 if TYPE_CHECKING:
     from autoarray.inversion.linear_obj.linear_obj import LinearObj
+
+
+def validate_coefficient(coefficient, name: str = "coefficient"):
+    """
+    Raise if a regularization coefficient is a concrete scalar which is negative or
+    non-finite.
+
+    Every regularization scheme calls this from its constructor, so the message for
+    this class of mistake is written once here rather than per scheme.
+
+    Zero is permitted: it is a degenerate but meaningful request for no regularization.
+    Negative is not, and is **not** inert despite appearances — see the note below.
+
+    Coefficients are free model parameters, so under a JAX-traced fit this receives a
+    tracer rather than a number. `autoarray.validate` gates on concreteness before
+    comparing, so the guard costs nothing inside a trace.
+
+    Parameters
+    ----------
+    coefficient
+        The regularization coefficient to validate.
+    name
+        The parameter's name, used in the error message (schemes with more than one
+        coefficient pass their own, e.g. ``inner_coefficient``).
+    """
+    validate.validate_non_negative_finite(
+        value=coefficient,
+        name=name,
+        extra=(
+            "A regularization coefficient sets the strength of the smoothing applied "
+            "to the reconstruction, which cannot be negative. A negative value is not "
+            "inert: `regularization_matrix_from` squares it, which hides the sign, but "
+            "`regularization_weights_from` returns it unsquared and so leaks negative "
+            "regularization weights into every consumer of that method"
+        ),
+    )
 
 
 class AbstractRegularization:

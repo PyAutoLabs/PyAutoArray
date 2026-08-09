@@ -20,6 +20,7 @@ from autoarray.mask.abstract_mask import Mask
 
 from autoarray import exc
 from autoarray import type as ty
+from autoarray import validate
 from autoarray.geometry.geometry_2d import Geometry2D
 from autoarray.mask.derive.mask_2d import DeriveMask2D
 from autoarray.mask.derive.grid_2d import DeriveGrid2D
@@ -218,6 +219,13 @@ class Mask2D(Mask):
 
         if len(mask.shape) != 2:
             raise exc.MaskException("The input mask is not a two dimensional array")
+
+        # Every `Mask2D` factory returns through this constructor, and `Grid2D.uniform`
+        # reaches it via `Grid2D.no_mask` -> `Mask2D.all_false`, so a degenerate shape
+        # is caught once here rather than at each construction site.
+        validate.validate_shape_native(
+            shape_native=mask.shape, name="shape_native", exc_type=exc.MaskException
+        )
 
         super().__init__(
             mask=mask,
@@ -426,6 +434,12 @@ class Mask2D(Mask):
             and visa versa.
         """
 
+        validate.validate_radii_ordered(
+            inner_radius=inner_radius,
+            outer_radius=outer_radius,
+            exc_type=exc.MaskException,
+        )
+
         pixel_scales = geometry_util.convert_pixel_scales_2d(pixel_scales=pixel_scales)
 
         mask = mask_2d_util.mask_2d_circular_annular_from(
@@ -549,6 +563,14 @@ class Mask2D(Mask):
             If `True`, the `bool`'s of the input `mask` are inverted, for example `False`'s become `True`
             and visa versa.
         """
+        validate.validate_radii_ordered(
+            inner_radius=inner_major_axis_radius,
+            outer_radius=outer_major_axis_radius,
+            inner_name="inner_major_axis_radius",
+            outer_name="outer_major_axis_radius",
+            exc_type=exc.MaskException,
+        )
+
         pixel_scales = geometry_util.convert_pixel_scales_2d(pixel_scales=pixel_scales)
 
         mask = mask_2d_util.mask_2d_elliptical_annular_from(

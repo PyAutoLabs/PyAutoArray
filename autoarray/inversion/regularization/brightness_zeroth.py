@@ -6,6 +6,7 @@ if TYPE_CHECKING:
     from autoarray.inversion.linear_obj.linear_obj import LinearObj
 
 from autoarray.inversion.regularization.abstract import AbstractRegularization
+from autoarray.inversion.regularization.abstract import validate_coefficient
 
 
 def brightness_zeroth_regularization_weights_from(
@@ -104,6 +105,7 @@ class BrightnessZeroth(AbstractRegularization):
 
         super().__init__()
 
+        validate_coefficient(coefficient=coefficient)
         self.coefficient = coefficient
         self.signal_scale = signal_scale
 

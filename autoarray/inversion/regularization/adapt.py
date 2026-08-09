@@ -6,6 +6,7 @@ if TYPE_CHECKING:
     from autoarray.inversion.linear_obj.linear_obj import LinearObj
 
 from autoarray.inversion.regularization.abstract import AbstractRegularization
+from autoarray.inversion.regularization.abstract import validate_coefficient
 
 
 def adapt_regularization_weights_from(
@@ -193,7 +194,9 @@ class Adapt(AbstractRegularization):
 
         super().__init__()
 
+        validate_coefficient(coefficient=inner_coefficient, name="inner_coefficient")
         self.inner_coefficient = inner_coefficient
+        validate_coefficient(coefficient=outer_coefficient, name="outer_coefficient")
         self.outer_coefficient = outer_coefficient
         self.signal_scale = signal_scale
 

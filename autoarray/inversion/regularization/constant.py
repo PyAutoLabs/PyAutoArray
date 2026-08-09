@@ -6,6 +6,7 @@ if TYPE_CHECKING:
     from autoarray.inversion.linear_obj.linear_obj import LinearObj
 
 from autoarray.inversion.regularization.abstract import AbstractRegularization
+from autoarray.inversion.regularization.abstract import validate_coefficient
 
 
 def constant_regularization_matrix_from(
@@ -101,6 +102,7 @@ class Constant(AbstractRegularization):
             The regularization coefficient which controls the degree of smooth of the inversion reconstruction.
         """
 
+        validate_coefficient(coefficient=coefficient)
         self.coefficient = coefficient
 
         super().__init__()
