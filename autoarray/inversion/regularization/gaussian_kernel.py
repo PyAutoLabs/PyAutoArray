@@ -12,6 +12,7 @@ def gauss_cov_matrix_from(
     scale: float,
     pixel_points: np.ndarray,  # shape (N, 2)
     jitter: float = 1e-8,
+    jitter_relative: bool = False,
     xp=np,
 ) -> np.ndarray:
     """
@@ -46,7 +47,9 @@ def gauss_cov_matrix_from(
 
     # Add tiny jitter on the diagonal
     N = pts.shape[0]
-    cov = cov + xp.eye(N, dtype=cov.dtype) * jitter
+    from autoarray.inversion.regularization.matern_kernel import apply_jitter
+
+    cov = apply_jitter(cov, jitter=jitter, jitter_relative=jitter_relative, xp=xp)
 
     return cov
 
@@ -57,6 +60,7 @@ class GaussianKernel(AbstractRegularization):
         coefficient: float = 1.0,
         scale: float = 1.0,
         jitter: Optional[float] = None,
+        jitter_relative: bool = False,
     ):
         """
         Regularization which uses a Gaussian smoothing kernel to regularize the solution.
@@ -89,10 +93,17 @@ class GaussianKernel(AbstractRegularization):
             ``None`` (default) uses the historical value 1e-8 — behaviour is identical
             to not having this parameter (it is a fixed setting, not a free model
             parameter, hence the ``None`` default).
+        jitter_relative
+            If ``True`` the jitter is applied *relative* to each pixel's own variance
+            (``C_ii *= 1 + jitter``) rather than as a fixed absolute ``jitter * I``.
+            ``False`` (default) preserves the historical behaviour exactly. The absolute
+            convention assumes ``C_ii ~ 1``, which holds for this unweighted kernel but not
+            for the adaptive one; see :func:`apply_jitter` for why and when to switch.
         """
         self.coefficient = coefficient
         self.scale = scale
         self.jitter = jitter
+        self.jitter_relative = jitter_relative
         super().__init__()
 
     @property
@@ -139,6 +150,7 @@ class GaussianKernel(AbstractRegularization):
             scale=self.scale,
             pixel_points=linear_obj.source_plane_mesh_grid.array,
             jitter=self.jitter_value,
+            jitter_relative=self.jitter_relative,
             xp=xp,
         )
 
@@ -157,9 +169,10 @@ class GaussianKernel(AbstractRegularization):
         N = regularization_matrix.shape[0]
         diag_mean = xp.mean(xp.diag(regularization_matrix))
         h_jitter = 1e-8 * xp.abs(diag_mean)
-        regularization_matrix = regularization_matrix + xp.eye(
-            N, dtype=regularization_matrix.dtype
-        ) * h_jitter
+        regularization_matrix = (
+            regularization_matrix
+            + xp.eye(N, dtype=regularization_matrix.dtype) * h_jitter
+        )
 
         return regularization_matrix
 
@@ -185,6 +198,7 @@ class GaussianKernel(AbstractRegularization):
             scale=self.scale,
             pixel_points=linear_obj.source_plane_mesh_grid.array,
             jitter=self.jitter_value,
+            jitter_relative=self.jitter_relative,
             xp=xp,
         )
 
@@ -222,6 +236,7 @@ class GaussianKernel(AbstractRegularization):
             scale=self.scale,
             pixel_points=linear_obj.source_plane_mesh_grid.array,
             jitter=self.jitter_value,
+            jitter_relative=self.jitter_relative,
             xp=xp,
         )
 

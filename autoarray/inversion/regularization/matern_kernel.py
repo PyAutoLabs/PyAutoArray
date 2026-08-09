@@ -90,6 +90,7 @@ def matern_cov_matrix_from(
     pixel_points,
     weights=None,
     jitter: float = 1e-8,
+    jitter_relative: bool = False,
     xp=np,
 ):
     """
@@ -112,6 +113,9 @@ def matern_cov_matrix_from(
         Optional array-like of shape [N]. If None, treated as all ones.
     jitter
         The small value added to the covariance diagonal for numerical stability.
+    jitter_relative
+        If ``True`` the jitter is scaled by each pixel's own variance (``C_ii *= 1 + jitter``)
+        rather than added as a fixed absolute value; see :func:`apply_jitter`.
     xp
         Backend (numpy or jax.numpy).
 
@@ -148,12 +152,58 @@ def matern_cov_matrix_from(
     # --------------------------------
     # Add diagonal jitter (JAX-safe)
     # --------------------------------
-    pixels = pts.shape[0]
-    covariance_matrix = covariance_matrix + jitter * xp.eye(
-        pixels, dtype=covariance_matrix.dtype
+    return apply_jitter(
+        covariance_matrix, jitter=jitter, jitter_relative=jitter_relative, xp=xp
     )
 
-    return covariance_matrix
+
+def apply_jitter(
+    covariance_matrix, jitter: float, jitter_relative: bool = False, xp=np
+):
+    """
+    Add the stabilisation jitter to a kernel covariance's diagonal.
+
+    Two conventions, selected by ``jitter_relative``:
+
+    - ``False`` (default, historical) — an **absolute** ``jitter * I``. This is only
+      meaningful when the covariance's diagonal is itself ~1, which holds for the
+      unweighted kernels (``K(0) == 1``) but *not* for the weighted ones, where
+      ``C_ii = w_i^2`` spans the dynamic range of the adaptive weights.
+    - ``True`` — a **relative** ``jitter * diag(diag(C))``, i.e. ``C_ii *= (1 + jitter)``.
+      Writing ``C = D^(1/2) R D^(1/2)`` for the correlation matrix ``R`` (unit diagonal),
+      this is exactly ``D^(1/2) (R + jitter I) D^(1/2)`` — the jitter is applied to the
+      *correlation* matrix, so every pixel receives the same relative protection whatever
+      its own scale, and the conditioning of the correlation part is bounded exactly as in
+      the absolute convention.
+
+    The absolute convention silently breaks down on ``MaternAdaptKernel`` at wide
+    adaptive-weight ranges: with ``inner_coefficient=0.1``/``outer_coefficient=100`` the
+    faintest pixel's ``C_ii`` reaches ``1e-8``, at which point a fixed ``1e-8`` jitter is
+    100% of that pixel's variance and its kernel structure is destroyed. Under the
+    relative convention that pixel is perturbed by ``1e-8`` relative, like every other.
+
+    Parameters
+    ----------
+    covariance_matrix
+        The (N, N) kernel covariance, before jitter.
+    jitter
+        The jitter magnitude — absolute or relative per the flag below.
+    jitter_relative
+        If ``True`` scale the jitter by each pixel's own variance; if ``False`` (default)
+        add it as a fixed absolute value.
+    xp
+        Backend (numpy or jax.numpy).
+
+    Returns
+    -------
+    The covariance matrix with the jitter added to its diagonal.
+    """
+    if jitter_relative:
+        return covariance_matrix + jitter * xp.diag(xp.diag(covariance_matrix))
+
+    pixels = covariance_matrix.shape[0]
+
+    return covariance_matrix + jitter * xp.eye(pixels, dtype=covariance_matrix.dtype)
 
 
 def inv_via_cholesky(C, xp=np):
@@ -218,6 +268,7 @@ class MaternKernel(AbstractRegularization):
         scale: float = 1.0,
         nu: float = 0.5,
         jitter: Optional[float] = None,
+        jitter_relative: bool = False,
     ):
         """
         Regularization which uses a Matern smoothing kernel to regularize the solution.
@@ -259,12 +310,19 @@ class MaternKernel(AbstractRegularization):
             ``None`` (default) uses the historical value 1e-8 — behaviour is identical
             to not having this parameter (it is a fixed setting, not a free model
             parameter, hence the ``None`` default).
+        jitter_relative
+            If ``True`` the jitter is applied *relative* to each pixel's own variance
+            (``C_ii *= 1 + jitter``) rather than as a fixed absolute ``jitter * I``.
+            ``False`` (default) preserves the historical behaviour exactly. The absolute
+            convention assumes ``C_ii ~ 1``, which holds for this unweighted kernel but not
+            for the adaptive one; see :func:`apply_jitter` for why and when to switch.
         """
 
         self.coefficient = coefficient
         self.scale = scale
         self.nu = nu
         self.jitter = jitter
+        self.jitter_relative = jitter_relative
         super().__init__()
 
     @property
@@ -310,6 +368,7 @@ class MaternKernel(AbstractRegularization):
             pixel_points=linear_obj.source_plane_mesh_grid.array,
             nu=self.nu,
             jitter=self.jitter_value,
+            jitter_relative=self.jitter_relative,
             xp=xp,
         )
 
@@ -332,6 +391,7 @@ class MaternKernel(AbstractRegularization):
             pixel_points=linear_obj.source_plane_mesh_grid.array,
             nu=self.nu,
             jitter=self.jitter_value,
+            jitter_relative=self.jitter_relative,
             xp=xp,
         )
 
@@ -360,6 +420,7 @@ class MaternKernel(AbstractRegularization):
             pixel_points=linear_obj.source_plane_mesh_grid.array,
             nu=self.nu,
             jitter=self.jitter_value,
+            jitter_relative=self.jitter_relative,
             xp=xp,
         )
 
