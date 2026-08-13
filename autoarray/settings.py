@@ -84,6 +84,8 @@ class Settings:
         no_regularization_add_to_curvature_diag_value
             If a linear func object does not have a corresponding regularization, this value is added to its
             diagonal entries of the curvature regularization matrix to ensure the matrix is positive-definite.
+            The packaged configuration defaults to `1.0e-3`; workspaces may override it. The addition is absolute,
+            so its effect depends on the scale of the curvature matrix.
         nnls_solver_tol
             Convergence tolerance (infinity-norm KKT residual) of the JAX positive-only (NNLS) interior-point
             solve. `None` (default) uses jaxnnls's own tolerance ``min(n * eps * 5e3, 1e-2)`` (~1.7e-9 at

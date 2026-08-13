@@ -46,15 +46,30 @@ def curvature_matrix_with_added_to_diag_from(
     It is common for the `curvature_matrix` computed to not be positive-definite, leading for the inversion
     via `np.linalg.solve` to fail and raise a `LinAlgError`.
 
-    In many circumstances, adding a small numerical value of `1.0e-8` to the diagonal of the `curvature_matrix`
+    In many circumstances, adding a small numerical value to the diagonal of the `curvature_matrix`
     makes it positive definite, such that the inversion is performed without raising an error.
 
-    This function adds this numerical value to the diagonal of the curvature matrix.
+    This function adds the caller-supplied `value` to the diagonal entries selected by
+    `no_regularization_index_list`. The normal inversion path reads this value from
+    `Settings.no_regularization_add_to_curvature_diag_value`; the packaged configuration defaults to
+    `1.0e-3`, and workspaces may override it. The addition is absolute, so its effect depends on the scale of
+    the curvature matrix.
 
     Parameters
     ----------
     curvature_matrix
         The curvature matrix which is being constructed in order to solve a linear system of equations.
+    value
+        The numerical value added to each selected diagonal entry.
+    no_regularization_index_list
+        The indices of parameters without regularization whose diagonal entries receive `value`.
+    xp
+        The array module to use (`numpy` by default; pass `jax.numpy` for JAX support).
+
+    Returns
+    -------
+    ndarray
+        The curvature matrix with `value` added to the selected diagonal entries.
     """
     if xp.__name__.startswith("jax"):
         return curvature_matrix.at[
