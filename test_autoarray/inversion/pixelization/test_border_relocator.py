@@ -4,6 +4,7 @@ import pytest
 import autoarray as aa
 
 from autoarray.inversion.mesh.border_relocator import (
+    ellipse_params_via_border_pca_from,
     sub_border_pixel_slim_indexes_from,
 )
 
@@ -376,3 +377,40 @@ def test__relocated_grid_from__positive_origin_included_in_relocate():
     relocated_grid = border_relocator.relocated_grid_from(grid=grid)
 
     assert relocated_grid.over_sampled[1] == pytest.approx([1.95, 1.0], 1e-4)
+
+def test__ellipse_params__near_isotropic_border_uses_deterministic_axis():
+    border_grid = np.array(
+        [
+            [-0.0960155108, 0.0960155108],
+            [-0.55, 0.0],
+            [-0.0960155108, -0.0960155108],
+            [0.0, 0.55],
+            [0.0, -0.55],
+            [0.0960155108, 0.0960155108],
+            [0.55, 0.0],
+            [0.0960155108, -0.0960155108],
+        ]
+    )
+
+    _, a, b, phi = ellipse_params_via_border_pca_from(border_grid=border_grid)
+
+    assert float(phi) == 0.0
+    assert float(a) == pytest.approx(0.55 + 1.0e-12)
+    assert float(b) == pytest.approx(0.55 + 1.0e-12)
+
+
+def test__ellipse_params__anisotropic_border_retains_pca_major_axis():
+    border_grid = np.array(
+        [
+            [-2.0, 0.0],
+            [0.0, 1.0],
+            [2.0, 0.0],
+            [0.0, -1.0],
+        ]
+    )
+
+    _, a, b, phi = ellipse_params_via_border_pca_from(border_grid=border_grid)
+
+    assert abs(float(phi)) == pytest.approx(np.pi / 2.0)
+    assert float(a) > float(b)
+

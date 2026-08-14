@@ -249,6 +249,15 @@ def ellipse_params_via_border_pca_from(border_grid, xp=np, eps=1e-12):
 
     phi = xp.arctan2(v_major[1], v_major[0])
 
+    # PCA eigenvectors are undefined for an isotropic covariance. NumPy and
+    # JAX may therefore choose different, equally valid orientations whose
+    # downstream max-extent ellipses are not equivalent. Use a deterministic
+    # axis-aligned frame when the eigenvalue gap is at floating-point scale.
+    eigenvalue_scale = xp.maximum(xp.max(xp.abs(evals)), eps)
+    relative_gap = (evals[-1] - evals[0]) / eigenvalue_scale
+    isotropy_tolerance = xp.sqrt(xp.finfo(C.dtype).eps)
+    phi = xp.where(relative_gap <= isotropy_tolerance, 0.0, phi)
+
     # Rotate border points into ellipse-aligned frame
     c = xp.cos(phi)
     s = xp.sin(phi)
