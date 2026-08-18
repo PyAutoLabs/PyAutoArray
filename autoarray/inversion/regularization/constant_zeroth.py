@@ -68,7 +68,7 @@ def constant_zeroth_regularization_matrix_from(
 
     reg_coeff = coefficient_zeroth**2.0
     # Identity matrix scaled by reg_coeff does exactly ∑_i reg_coeff * e_i e_i^T
-    zeroth = xp.eye(P) * reg_coeff
+    zeroth = xp.eye(S) * reg_coeff
 
     return const + zeroth
 
@@ -122,5 +122,6 @@ class ConstantZeroth(AbstractRegularization):
             coefficient=self.coefficient_neighbor,
             coefficient_zeroth=self.coefficient_zeroth,
             neighbors=linear_obj.neighbors,
+            neighbors_sizes=linear_obj.neighbors.sizes,
             xp=xp,
         )
