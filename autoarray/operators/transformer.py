@@ -23,10 +23,29 @@ from autoarray.structures.arrays import array_2d_util
 from autoarray.operators import transformer_util
 
 
-try:
-    import nufftax as _nufftax
-except ModuleNotFoundError:
-    _nufftax = None
+# nufftax pulls in jax at import (~0.7s), which sessions that never touch an
+# interferometer transformer should not pay for — deferred to _load_nufftax(),
+# called from TransformerNUFFT's entry points (not only __init__, because
+# unpickled instances in multiprocessing workers never re-run __init__).
+_nufftax = None
+_nufftax_loaded = False
+
+
+def _load_nufftax():
+    global _nufftax, _nufftax_loaded
+    if _nufftax_loaded:
+        return _nufftax
+    _nufftax_loaded = True
+    try:
+        import nufftax
+    except ModuleNotFoundError:
+        return None
+    _nufftax = nufftax
+    _version = tuple(int(v) for v in _nufftax.__version__.split(".")[:2])
+    # Only the 0.6.x series both has the primitives module and needs the shim.
+    if (0, 6) <= _version < (0, 7):
+        _patch_nufftax_batchers()
+    return _nufftax
 
 
 def _patch_nufftax_batchers():
@@ -85,13 +104,6 @@ def _patch_nufftax_batchers():
         batching.primitive_batchers[prim] = guarded_batcher(
             prim, impl, source_idx, base_rank
         )
-
-
-if _nufftax is not None:
-    _version = tuple(int(v) for v in _nufftax.__version__.split(".")[:2])
-    # Only the 0.6.x series both has the primitives module and needs the shim.
-    if (0, 6) <= _version < (0, 7):
-        _patch_nufftax_batchers()
 
 
 def pynufft_exception():
@@ -643,7 +655,7 @@ class TransformerNUFFT:
         """
         from astropy import units
 
-        if _nufftax is None:
+        if _load_nufftax() is None:
             nufftax_exception()
 
         if chunk_size is not None and chunk_size <= 0:
@@ -685,6 +697,8 @@ class TransformerNUFFT:
         fixed-size chunks via ``jax.lax.scan`` (JAX path) or a Python loop
         (numpy path) — caps the nufftax gather-buffer allocation per call.
         """
+        _load_nufftax()
+
         K = int(self._x.shape[0])
 
         if xp.__name__.startswith("jax"):
@@ -789,6 +803,8 @@ class TransformerNUFFT:
         the sparse-operator dirty image is scale-consistent across all three
         transformers.
         """
+        _load_nufftax()
+
         n_y, n_x = self.real_space_mask.shape_native
         n_modes = (n_x, n_y)  # nufftax wants (n1, n2) = (N_x, N_y)
         K = int(self._x.shape[0])
@@ -860,6 +876,8 @@ class TransformerNUFFT:
         ``n_src`` separate NUFFT invocations and blow up the JIT graph
         for pixelization-heavy fits (notably double-source-plane).
         """
+        _load_nufftax()
+
         n_src = mapping_matrix.shape[1]
         rows, cols = self.real_space_mask.slim_to_native_tuple
         n_y, n_x = self.real_space_mask.shape_native
