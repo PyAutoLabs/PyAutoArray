@@ -24,10 +24,9 @@ classifiers = [
 ]
 keywords = ["cli"]
 dependencies = [
-    # Floor, not a pin. Without one, pip backtracking the extras chain
-    # (autoarray[jax] -> autonerves[jax]) may walk the release history to 2022:
-    # "version X does not provide the extra 'jax'" is a pip *warning*, not an
-    # error, so a pre-extras release is a legal solution. PyAutoLens#687.
+    # Floor, not a pin (PyAutoLens#687) — bump to the first release with JAX
+    # in autonerves' base dependencies once it exists (PyAutoLens#702), so
+    # backtracking cannot pair this autoarray with a jax-optional autonerves.
     "autonerves>=2026.7.29.2",
     "astropy>=5.0",
     "decorator>=4.0.0",
@@ -54,7 +53,11 @@ local_scheme = "no-local-version"
 
 
 [project.optional-dependencies]
-jax = ["autonerves[jax]>=2026.7.29.2"]
+# JAX moved into autonerves' base dependencies (PyAutoLens#702). Kept as a
+# declared no-op so `pip install autoarray[jax]` keeps resolving
+# (PyAutoLens#687). The interferometer JAX extras (nufftax, tfp-nightly)
+# deliberately stay in `optional` — they are NOT part of the default install.
+jax = []
 optional = [
     "autoarray[jax]",
     "numba",
