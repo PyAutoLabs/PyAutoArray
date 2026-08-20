@@ -221,18 +221,34 @@ def cholinsertlast_inplace(Ubuf, k, x):
     return k + 1
 
 
+@numba_util.jit()
+def _choldelete_shift_buffer(Ubuf, k, index):
+    """
+    Shift the active k x k factor's rows/columns to close the gap left by
+    deleting row+column ``index``: the top-right block moves one column left,
+    the trailing block moves one step up-left along the diagonal. Pure value
+    movement (bitwise), touching only the upper triangle — the numba loops
+    write destinations strictly behind their sources, so no temporary is
+    needed (numpy's overlapping slice assignment buffers the source instead,
+    which at ~100 deletes per fnnls solve is real allocation traffic).
+    """
+    for i in range(index):
+        for j in range(index, k - 1):
+            Ubuf[i, j] = Ubuf[i, j + 1]
+    for i in range(index, k - 1):
+        for j in range(i, k - 1):
+            Ubuf[i, j] = Ubuf[i + 1, j + 1]
+
+
 def choldeleteindexes_inplace(Ubuf, k, indexes):
     """
     In-place variant of `choldeleteindexes` for a factor held in a
     preallocated buffer: remove the given positions from the active k x k
     factor `Ubuf[:k, :k]` by shifting the surviving rows/columns within the
-    buffer, then re-triangularize the trailing block with the same numba
-    Givens kernel (`_cholupdate`) on the same values — no `np.delete`
-    reallocations (two full-factor copies per deleted index).
-
-    NumPy guarantees correct results for the overlapping same-array slice
-    assignments used for the shifts (it buffers the source when views
-    overlap). Only the upper triangle is maintained, as in
+    buffer (`_choldelete_shift_buffer`), then re-triangularize the trailing
+    block with the same numba Givens kernel (`_cholupdate`) on the same
+    values — no `np.delete` reallocations (two full-factor copies per
+    deleted index). Only the upper triangle is maintained, as in
     `cholinsertlast_inplace`.
 
     Returns the new active size; the factor is ``Ubuf[:k', :k']``.
@@ -242,10 +258,7 @@ def choldeleteindexes_inplace(Ubuf, k, indexes):
         # block — copied out before the shifts overwrite it.
         x = Ubuf[index, index + 1 : k].copy()
 
-        # Deleting row+column `index`: the top-right block shifts one column
-        # left; the trailing block shifts one step up-left along the diagonal.
-        Ubuf[:index, index : k - 1] = Ubuf[:index, index + 1 : k]
-        Ubuf[index : k - 1, index : k - 1] = Ubuf[index + 1 : k, index + 1 : k]
+        _choldelete_shift_buffer(Ubuf, k, index)
 
         k -= 1
 
