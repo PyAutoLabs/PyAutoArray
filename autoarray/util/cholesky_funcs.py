@@ -152,3 +152,119 @@ def choldeleteindexes(U, indexes):
             U = L
 
     return U
+
+
+@numba_util.jit()
+def _solve_upper_transposed_buffer(Ubuf, k, b):
+    """
+    Solve ``U^T y = b`` for the active k x k upper factor ``Ubuf[:k, :k]``,
+    overwriting ``b`` with ``y`` (row-oriented forward substitution, touching
+    only contiguous row slices of the buffer's upper triangle).
+
+    This replaces `scipy.linalg.solve_triangular(..., trans=1)` on the buffer
+    view: scipy copies a non-contiguous view into a fresh array and scans it
+    for non-finite values on every call, which at n ~ 1000 and ~150 calls per
+    fnnls solve re-creates the very memory traffic the in-place buffer
+    removes.
+    """
+    for i in range(k):
+        yi = b[i] / Ubuf[i, i]
+        b[i] = yi
+        for j in range(i + 1, k):
+            b[j] -= Ubuf[i, j] * yi
+    return b
+
+
+@numba_util.jit()
+def _cho_solve_buffer(Ubuf, k, b):
+    """
+    Solve ``(U^T U) s = b`` for the active k x k upper factor
+    ``Ubuf[:k, :k]``, overwriting ``b`` with ``s`` — LAPACK ``cho_solve`` for
+    an upper factor, reading only the buffer's upper triangle and making no
+    copies (see `_solve_upper_transposed_buffer` for why that matters).
+    """
+    b = _solve_upper_transposed_buffer(Ubuf, k, b)
+    for i in range(k - 1, -1, -1):
+        b[i] = (b[i] - np.dot(Ubuf[i, i + 1 : k], b[i + 1 : k])) / Ubuf[i, i]
+    return b
+
+
+def cholinsertlast_inplace(Ubuf, k, x):
+    """
+    In-place variant of `cholinsertlast` for a factor held in a preallocated
+    buffer: the active k x k factor is `Ubuf[:k, :k]` and the new row/column is
+    written directly into row/column `k` of the buffer.
+
+    Same arithmetic as `cholinsertlast` (a transposed-triangular solve for
+    the new column, the same `_pivot_from_schur` pivot, on the same values),
+    but with a copy-free numba substitution in place of scipy's
+    `solve_triangular` and without the two full O(k^2) `np.insert`
+    reallocations per call — which dominate the
+    positive-only inversion solve at n ~ 1000 (one such insertion per fnnls
+    active-set iteration, ~150 iterations per likelihood evaluation).
+
+    Only the upper triangle of the active region is maintained; entries below
+    the diagonal are never written or read (every consumer — the solve and
+    update kernels above — references the upper triangle only). ``x[:k]`` is
+    overwritten by the solve.
+
+    Returns the new active size ``k + 1``; the factor is ``Ubuf[:k+1, :k+1]``.
+    """
+    S12 = _solve_upper_transposed_buffer(Ubuf, k, x[:k])
+
+    Ubuf[:k, k] = S12
+
+    Ubuf[k, k] = _pivot_from_schur(
+        schur=x[k] - S12.dot(S12), diagonal=x[k], index=k
+    )
+
+    return k + 1
+
+
+@numba_util.jit()
+def _choldelete_shift_buffer(Ubuf, k, index):
+    """
+    Shift the active k x k factor's rows/columns to close the gap left by
+    deleting row+column ``index``: the top-right block moves one column left,
+    the trailing block moves one step up-left along the diagonal. Pure value
+    movement (bitwise), touching only the upper triangle — the numba loops
+    write destinations strictly behind their sources, so no temporary is
+    needed (numpy's overlapping slice assignment buffers the source instead,
+    which at ~100 deletes per fnnls solve is real allocation traffic).
+    """
+    for i in range(index):
+        for j in range(index, k - 1):
+            Ubuf[i, j] = Ubuf[i, j + 1]
+    for i in range(index, k - 1):
+        for j in range(i, k - 1):
+            Ubuf[i, j] = Ubuf[i + 1, j + 1]
+
+
+def choldeleteindexes_inplace(Ubuf, k, indexes):
+    """
+    In-place variant of `choldeleteindexes` for a factor held in a
+    preallocated buffer: remove the given positions from the active k x k
+    factor `Ubuf[:k, :k]` by shifting the surviving rows/columns within the
+    buffer (`_choldelete_shift_buffer`), then re-triangularize the trailing
+    block with the same numba Givens kernel (`_cholupdate`) on the same
+    values — no `np.delete` reallocations (two full-factor copies per
+    deleted index). Only the upper triangle is maintained, as in
+    `cholinsertlast_inplace`.
+
+    Returns the new active size; the factor is ``Ubuf[:k', :k']``.
+    """
+    for index in sorted(indexes, reverse=True):
+        # The deleted row's tail is the rank-1 update vector for the trailing
+        # block — copied out before the shifts overwrite it.
+        x = Ubuf[index, index + 1 : k].copy()
+
+        _choldelete_shift_buffer(Ubuf, k, index)
+
+        k -= 1
+
+        # If the deleted index was at the end, the factor needs no update.
+
+        if index < k:
+            _cholupdate(Ubuf[index:k, index:k], x)
+
+    return k

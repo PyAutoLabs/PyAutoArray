@@ -1,6 +1,10 @@
 import numpy as np
 
-from autoarray.util.cholesky_funcs import cholinsertlast, choldeleteindexes
+from autoarray.util.cholesky_funcs import (
+    _cho_solve_buffer,
+    cholinsertlast_inplace,
+    choldeleteindexes_inplace,
+)
 
 from autoarray import exc
 
@@ -50,6 +54,18 @@ def fnnls_cholesky(
     w = ZTx - (ZTZ) @ d
     s_chol = np.zeros(n)
 
+    # The Cholesky factor of ZTZ[passive][:, passive] lives in the top-left
+    # k_active x k_active corner of a single preallocated buffer, updated in
+    # place by cholinsertlast_inplace / choldeleteindexes_inplace as the
+    # active set changes. The buffer is allocated once (first factorisation)
+    # instead of the factor being rebuilt with np.insert/np.delete every
+    # iteration — the dominant cost of this solver at n ~ 1000. Zeroed, not
+    # empty: the update/solve kernels only ever read the upper triangle, but
+    # keeping the rest exactly zero costs one memset and keeps every k x k
+    # view a valid dense factor for inspection and tests.
+    U_buffer = np.zeros((n, n))
+    k_active = 0
+
     if P_initial.shape[0] != 0:
         P_number = np.arange(len(P), dtype="int")
         P_inorder = P_number[P_initial]
@@ -76,22 +92,27 @@ def fnnls_cholesky(
         if loop_count == 0:
             # We need to initialize the Cholesky factorisation, U, for the first loop.
             U = slg.cholesky(ZTZ[P_inorder][:, P_inorder])
+            k_active = U.shape[0]
+            U_buffer[:k_active, :k_active] = U
         else:
-            U = cholinsertlast(U, ZTZ[idmax][P_inorder])
+            k_active = cholinsertlast_inplace(
+                U_buffer, k_active, ZTZ[idmax][P_inorder]
+            )
 
-        # solve the lstsq problem by cho_solve
+        # solve the lstsq problem via the copy-free buffer cho_solve
 
-        s_chol[P_inorder] = slg.cho_solve((U, False), ZTx[P_inorder])
+        s_chol[P_inorder] = _cho_solve_buffer(U_buffer, k_active, ZTx[P_inorder])
 
         P[idmax] = True
         while np.any(P) and np.min(s_chol[P]) <= tolerance:
-            s_chol, d, P, P_inorder, U = fix_constraint_cholesky(
+            s_chol, d, P, P_inorder, k_active = fix_constraint_cholesky(
                 ZTx=ZTx,
                 s_chol=s_chol,
                 d=d,
                 P=P,
                 P_inorder=P_inorder,
-                U=U,
+                U_buffer=U_buffer,
+                k_active=k_active,
                 tolerance=tolerance,
             )
 
@@ -132,18 +153,18 @@ def fnnls_cholesky(
     return d
 
 
-def fix_constraint_cholesky(ZTx, s_chol, d, P, P_inorder, U, tolerance):
+def fix_constraint_cholesky(ZTx, s_chol, d, P, P_inorder, U_buffer, k_active, tolerance):
     """
     Similar to fix_constraint, but solve the lstsq by Cholesky factorisation.
     If this function is called, it means some solutions in the current passive sets needed to be
         taken out and put into the active set.
     So, this function involves 3 procedure:
         1. Identifying what solutions should be taken out of the current passive set.
-        2. Updating the P, P_inorder and the Cholesky factorisation U.
-        3. Solving the lstsq by using the new Cholesky factorisation U.
+        2. Updating the P, P_inorder and the Cholesky factorisation (the active
+           k_active x k_active corner of U_buffer, updated in place).
+        3. Solving the lstsq by using the new Cholesky factorisation.
     As some solutions are taken out from the passive set, the Cholesky factorisation needs to be
-            updated by choldeleteindexes. To realize that, we call the `choldeleteindexes` from
-            cholesky_funcs.
+            updated in place by `choldeleteindexes_inplace` from cholesky_funcs.
     """
     q = P * (s_chol <= tolerance)
     alpha = np.min(d[q] / (d[q] - s_chol[q]))
@@ -153,20 +174,20 @@ def fix_constraint_cholesky(ZTx, s_chol, d, P, P_inorder, U, tolerance):
 
     id_delete = np.where(d[P_inorder] <= tolerance)[0]
 
-    U = choldeleteindexes(U, id_delete)  # update the Cholesky factorisation
+    # update the Cholesky factorisation
+
+    k_active = choldeleteindexes_inplace(U_buffer, k_active, id_delete)
 
     P_inorder = np.delete(P_inorder, id_delete)  # update the P_inorder
 
     P[d <= tolerance] = False  # update the P
 
-    # solve the lstsq problem by cho_solve
+    # solve the lstsq problem via the copy-free buffer cho_solve
 
     if len(P_inorder):
-        from scipy import linalg as slg
-
         # there could be a case where P_inorder is empty.
-        s_chol[P_inorder] = slg.cho_solve((U, False), ZTx[P_inorder])
+        s_chol[P_inorder] = _cho_solve_buffer(U_buffer, k_active, ZTx[P_inorder])
 
     s_chol[~P] = 0.0  # set solutions taken out of the passive set to be 0
 
-    return s_chol, d, P, P_inorder, U
+    return s_chol, d, P, P_inorder, k_active
