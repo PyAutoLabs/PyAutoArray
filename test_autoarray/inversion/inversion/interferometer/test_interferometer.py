@@ -64,6 +64,179 @@ def test__fast_chi_squared(
     assert inversion.fast_chi_squared == pytest.approx(chi_squared, 1.0e-4)
 
 
+def test__operated_mapping_matrix_list__override_is_honored():
+    mask = aa.Mask2D(
+        mask=[
+            [True, True, True, True, True, True, True],
+            [True, True, True, True, True, True, True],
+            [True, True, True, False, True, True, True],
+            [True, True, False, False, False, True, True],
+            [True, True, True, False, True, True, True],
+            [True, True, True, True, True, True, True],
+            [True, True, True, True, True, True, True],
+        ],
+        pixel_scales=2.0,
+    )
+
+    n_visibilities = 5
+    rng = np.random.default_rng(seed=0)
+    data = aa.Visibilities(
+        visibilities=rng.normal(size=(n_visibilities, 2)).astype(np.float64)
+    )
+    noise_map = aa.VisibilitiesNoiseMap(
+        visibilities=np.ones((n_visibilities, 2), dtype=np.float64)
+    )
+    uv_wavelengths = rng.normal(size=(n_visibilities, 2)).astype(np.float64)
+
+    dataset = aa.Interferometer(
+        data=data,
+        noise_map=noise_map,
+        uv_wavelengths=uv_wavelengths,
+        real_space_mask=mask,
+        transformer_class=aa.TransformerDFT,
+    )
+
+    mapping_matrix = np.ones((mask.pixels_in_mask, 1))
+    override = (999.0 + 1.0j) * np.ones((n_visibilities, 1))
+
+    linear_obj_override = aa.m.MockLinearObjFuncList(
+        parameters=1,
+        mapping_matrix=mapping_matrix,
+        operated_mapping_matrix_override=override,
+    )
+    linear_obj_no_override = aa.m.MockLinearObjFuncList(
+        parameters=1,
+        mapping_matrix=mapping_matrix,
+    )
+
+    inversion = aa.Inversion(
+        dataset=dataset,
+        linear_obj_list=[linear_obj_override, linear_obj_no_override],
+    )
+
+    operated_mapping_matrix_list = inversion.operated_mapping_matrix_list
+
+    assert operated_mapping_matrix_list[0] == pytest.approx(override, 1.0e-8)
+
+    transformed_mapping_matrix = dataset.transformer.transform_mapping_matrix(
+        mapping_matrix=mapping_matrix
+    )
+
+    assert operated_mapping_matrix_list[1] == pytest.approx(
+        transformed_mapping_matrix, 1.0e-8
+    )
+
+    assert inversion.operated_mapping_matrix[:, 0] == pytest.approx(
+        override[:, 0], 1.0e-8
+    )
+    assert inversion.curvature_matrix.shape == (2, 2)
+    assert inversion.data_vector.shape == (2,)
+
+
+def test__operated_mapping_matrix_override__wrong_shape_raises():
+    mask = aa.Mask2D(
+        mask=[
+            [True, True, True, True, True, True, True],
+            [True, True, True, True, True, True, True],
+            [True, True, True, False, True, True, True],
+            [True, True, False, False, False, True, True],
+            [True, True, True, False, True, True, True],
+            [True, True, True, True, True, True, True],
+            [True, True, True, True, True, True, True],
+        ],
+        pixel_scales=2.0,
+    )
+
+    n_visibilities = 7
+    rng = np.random.default_rng(seed=0)
+    data = aa.Visibilities(
+        visibilities=rng.normal(size=(n_visibilities, 2)).astype(np.float64)
+    )
+    noise_map = aa.VisibilitiesNoiseMap(
+        visibilities=np.ones((n_visibilities, 2), dtype=np.float64)
+    )
+    uv_wavelengths = rng.normal(size=(n_visibilities, 2)).astype(np.float64)
+
+    dataset = aa.Interferometer(
+        data=data,
+        noise_map=noise_map,
+        uv_wavelengths=uv_wavelengths,
+        real_space_mask=mask,
+        transformer_class=aa.TransformerDFT,
+    )
+
+    # A real-space shaped override (e.g. [total_mask_pixels, params]) is not valid for an
+    # interferometer inversion, whose override must be in visibility space.
+    linear_obj = aa.m.MockLinearObjFuncList(
+        parameters=1,
+        mapping_matrix=np.ones((mask.pixels_in_mask, 1)),
+        operated_mapping_matrix_override=np.ones((mask.pixels_in_mask, 1)),
+    )
+
+    inversion = aa.Inversion(dataset=dataset, linear_obj_list=[linear_obj])
+
+    with pytest.raises(aa.exc.InversionException):
+        inversion.operated_mapping_matrix_list
+
+
+def test__operated_mapping_matrix_override__sparse_operator_raises():
+    mask = aa.Mask2D(
+        mask=[
+            [True, True, True, True, True, True, True],
+            [True, True, True, True, True, True, True],
+            [True, True, True, False, True, True, True],
+            [True, True, False, False, False, True, True],
+            [True, True, True, False, True, True, True],
+            [True, True, True, True, True, True, True],
+            [True, True, True, True, True, True, True],
+        ],
+        pixel_scales=2.0,
+    )
+
+    grid = aa.Grid2D.from_mask(mask=mask, over_sample_size=1)
+
+    mesh = aa.mesh.Delaunay(pixels=9)
+    image_mesh = aa.image_mesh.Overlay(shape=(3, 3))
+    image_mesh_grid = image_mesh.image_plane_mesh_grid_from(mask=mask, adapt_data=None)
+
+    interpolator = mesh.interpolator_from(
+        source_plane_data_grid=grid,
+        source_plane_mesh_grid=image_mesh_grid,
+    )
+    mapper = aa.Mapper(interpolator=interpolator)
+
+    n_visibilities = 5
+    rng = np.random.default_rng(seed=0)
+    data = aa.Visibilities(
+        visibilities=rng.normal(size=(n_visibilities, 2)).astype(np.float64)
+    )
+    noise_map = aa.VisibilitiesNoiseMap(
+        visibilities=np.ones((n_visibilities, 2), dtype=np.float64)
+    )
+    uv_wavelengths = rng.normal(size=(n_visibilities, 2)).astype(np.float64)
+
+    dataset_sparse = aa.Interferometer(
+        data=data,
+        noise_map=noise_map,
+        uv_wavelengths=uv_wavelengths,
+        real_space_mask=mask,
+        transformer_class=aa.TransformerDFT,
+    ).apply_sparse_operator(use_jax=False)
+
+    linear_obj = aa.m.MockLinearObjFuncList(
+        parameters=1,
+        mapping_matrix=np.ones((mask.pixels_in_mask, 1)),
+        operated_mapping_matrix_override=(999.0 + 1.0j)
+        * np.ones((n_visibilities, 1)),
+    )
+
+    with pytest.raises(aa.exc.InversionException):
+        aa.Inversion(
+            dataset=dataset_sparse,
+            linear_obj_list=[mapper, linear_obj],
+        )
+
+
 def test__curvature_matrix__interferometer_sparse_operator__delaunay__identical_to_mapping():
     mask = aa.Mask2D(
         mask=[
