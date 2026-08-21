@@ -61,9 +61,28 @@ def psf_weighted_data_from(
 
         for k0_y in range(kernel_native.shape[0]):
             for k0_x in range(kernel_native.shape[1]):
-                weight_value = weight_map_native[
-                    ip0_y + k0_y + kernel_shift_y, ip0_x + k0_x + kernel_shift_x
-                ]
+                iy = ip0_y + k0_y + kernel_shift_y
+                ix = ip0_x + k0_x + kernel_shift_x
+
+                # numba @jit() does not bounds-check array reads. Without this
+                # guard, a kernel position that lands off the weight-map array
+                # (e.g. a mask pixel within `kernel_shift` of the array edge)
+                # silently reads uninitialized memory, producing astronomical
+                # or non-finite contributions that poison `psf_weighted_data`
+                # and the data vector computed from it. A negative index is
+                # just as unsafe: it wraps to the opposite edge and quietly
+                # convolves in unrelated pixels. Positions off the array
+                # contribute zero, matching the zero-padded reference in
+                # `inversion_imaging_util.psf_weighted_data_from`.
+                if (
+                    iy < 0
+                    or iy >= weight_map_native.shape[0]
+                    or ix < 0
+                    or ix >= weight_map_native.shape[1]
+                ):
+                    continue
+
+                weight_value = weight_map_native[iy, ix]
 
                 if not np.isnan(weight_value):
                     value += kernel_native[k0_y, k0_x] * weight_value
