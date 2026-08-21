@@ -1,3 +1,7 @@
+import hashlib
+import os
+import pickle
+
 import numpy as np
 from typing import Dict, List, Optional, Union
 
@@ -13,6 +17,39 @@ from autoarray.inversion.mappers.abstract import Mapper
 from autoarray.structures.arrays.uniform_2d import Array2D
 
 from autoarray.inversion.inversion.imaging_numba import inversion_imaging_numba_util
+
+# Cross-evaluation memo for linear-func operated mapping matrices (the MGE
+# lens-light PSF-convolved images). A sampler builds fresh linear-func objects
+# for every likelihood evaluation, so when the light profiles are FIXED in the
+# model the identical ~60-Gaussian convolution stack is recomputed each call —
+# ~0.5 s of a ~2.4 s euclid-resolution numba CPU evaluation (autolens_profiling
+# issue #151). Entries are keyed by a fingerprint of the linear-func object's
+# full pickled state (profiles + grids + PSF), so the memo engages only when
+# the profile parameters are genuinely unchanged; any varying parameter changes
+# the key and the matrix is recomputed exactly as before. Failure modes are
+# misses, never stale hits. Scoped to this numba inversion module on purpose —
+# no other path is touched. Disable with AUTOARRAY_NUMBA_OPERATED_MEMO=0.
+_operated_mapping_matrix_memo: Dict[str, np.ndarray] = {}
+
+_OPERATED_MAPPING_MATRIX_MEMO_MAX_ENTRIES = 8
+
+
+def _operated_mapping_matrix_memo_key(linear_func) -> Optional[str]:
+    """
+    Fingerprint a linear-func object's state for the cross-evaluation memo,
+    or None if it cannot be fingerprinted (unpicklable), in which case the
+    caller falls back to the uncached computation.
+
+    Must be called before the object's own cached properties are populated:
+    a fingerprint taken afterwards would include the cached arrays and never
+    match the pre-computation fingerprint of the next evaluation (a
+    miss-every-time cache, still never a stale one).
+    """
+    try:
+        state = pickle.dumps(linear_func, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception:
+        return None
+    return hashlib.sha256(state).hexdigest()
 
 
 class InversionImagingSparseNumba(AbstractInversionImaging):
@@ -62,6 +99,76 @@ class InversionImagingSparseNumba(AbstractInversionImaging):
             kernel_native=self.psf.kernel.native.array,
             native_index_for_slim_index=self.data.mask.derive_indexes.native_for_slim,
         )
+
+    @cached_property
+    def linear_func_operated_mapping_matrix_dict(self) -> Dict:
+        """
+        The parent property, wrapped in two caches specific to this numba CPU
+        inversion:
+
+        1. `cached_property` — the dict is built once per inversion instead of
+           on every access (this inversion reads it from several matrices).
+        2. A module-level cross-evaluation memo — when a linear func's full
+           state (light profiles + grids + PSF) fingerprints identically to a
+           previous evaluation's, its operated mapping matrix (the PSF-convolved
+           MGE image stack, ~0.5 s/eval at euclid resolution) is reused instead
+           of recomputed. Fixed-profile models hit every evaluation; models with
+           free profile parameters change the fingerprint and recompute exactly
+           as before. See the memo's module docstring for the safety argument.
+
+        Memoized matrices are returned read-only; every consumer in this class
+        copies or derives from them (`np.array(...)`, divisions), never mutates.
+        """
+        parent_fget = AbstractInversionImaging.linear_func_operated_mapping_matrix_dict.fget
+
+        if os.environ.get("AUTOARRAY_NUMBA_OPERATED_MEMO", "1") == "0":
+            return parent_fget(self)
+
+        linear_func_list = self.cls_list_from(cls=AbstractLinearObjFuncList)
+
+        key_list = [
+            _operated_mapping_matrix_memo_key(linear_func)
+            for linear_func in linear_func_list
+        ]
+
+        if any(key is None for key in key_list):
+            return parent_fget(self)
+
+        operated_mapping_matrix_dict = {}
+
+        for linear_func, key in zip(linear_func_list, key_list):
+            operated_mapping_matrix = _operated_mapping_matrix_memo.get(key)
+
+            if operated_mapping_matrix is None:
+                operated_mapping_matrix = linear_func.operated_mapping_matrix_override
+                if operated_mapping_matrix is None:
+                    operated_mapping_matrix = self.psf.convolved_mapping_matrix_from(
+                        mapping_matrix=self._mapping_matrix_for_convolution_from(
+                            linear_func
+                        ),
+                        mask=self.mask,
+                        xp=self._xp,
+                    )
+
+                # A copy, not a view: the memo owns its buffer outright, so
+                # marking it read-only cannot leak onto the linear func's own
+                # cached override array.
+                operated_mapping_matrix = np.array(operated_mapping_matrix)
+                operated_mapping_matrix.setflags(write=False)
+
+                while (
+                    len(_operated_mapping_matrix_memo)
+                    >= _OPERATED_MAPPING_MATRIX_MEMO_MAX_ENTRIES
+                ):
+                    _operated_mapping_matrix_memo.pop(
+                        next(iter(_operated_mapping_matrix_memo))
+                    )
+
+                _operated_mapping_matrix_memo[key] = operated_mapping_matrix
+
+            operated_mapping_matrix_dict[linear_func] = operated_mapping_matrix
+
+        return operated_mapping_matrix_dict
 
     @property
     def _data_vector_mapper(self) -> np.ndarray:
