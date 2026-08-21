@@ -2,7 +2,7 @@ import numpy as np
 
 import autoarray as aa
 
-from autoarray.inversion.mesh.mesh.rectangular_adapt_density import (
+from autoarray.inversion.mesh.mesh.rectangular_rtu_adapt_density import (
     overlay_grid_from,
 )
 from autoarray.inversion.mesh.interpolator.rectangular_uniform import (
@@ -61,7 +61,7 @@ def test__pixel_signals_from__rectangular_adapt_density_mesh__matches_util(
         shape_native=(3, 3), grid=grid_2d_sub_1_7x7.over_sampled, buffer=1e-8
     )
 
-    mesh = aa.mesh.RectangularAdaptDensity(shape=(3, 3))
+    mesh = aa.mesh.RectangularRTUAdaptDensity(shape=(3, 3))
 
     # The adapt image is defined on the data's own mask, as it is for a real fit.
 

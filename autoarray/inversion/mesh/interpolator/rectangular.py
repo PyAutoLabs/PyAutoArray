@@ -1,10 +1,23 @@
 """
-The adaptive rectangular interpolator, built on a kernel-density CDF transform.
+The adaptive rectangular interpolator, built on a per-axis CDF transform of
+the traced source-plane coordinates so that the uniform mesh pixels adapt to
+the density (or weight) of the traced points. Two transforms are provided,
+selected by the ``transform`` argument threaded through this module:
 
-The adaptive rectangular mesh transforms source-plane coordinates through a
-per-axis CDF so that the uniform mesh pixels adapt to the density (or weight)
-of the traced points.  The CDF is a smooth kernel-density CDF (the RTU
-formulation of Enzi et al., arXiv:2606.30620): per axis
+**Empirical rank CDF** (``transform="rank"`` — the ``RectangularBilinear*``
+meshes). The per-axis CDF is the empirical (weighted) rank CDF of the traced
+points: a sort plus a cumulative sum, linearly interpolated between points.
+O(N log N) per likelihood evaluation with no kernel hyperparameters — the
+fast, conceptually simple CPU default. The trade-off is smoothness: the
+transform is piecewise-linear in the queries and its dependence on the
+traced-point *positions* passes through ranks, so with pixelization
+over-sampling 1 (and on the interferometer sparse path, which has no
+over-sampling) the likelihood is exactly piecewise-constant in mass/shear —
+gradients are identically zero. Gradient (JAX sampler) users need
+``over_sample_size_pixelization >= 4`` on imaging, or the kernel-CDF meshes.
+
+**Kernel-density CDF** (``transform="kernel"`` — the ``RectangularRTU*``
+meshes, the RTU formulation of Enzi et al., arXiv:2606.30620): per axis
 
     F(x) = sum_i w_i * Phi((x - x_i) / h)
 
@@ -12,23 +25,28 @@ where ``Phi`` is the standard normal CDF, ``x_i`` the traced points, ``w_i``
 uniform weights (density adaption) or the normalized adapt-image weights
 (image adaption), and ``h`` a bandwidth tied to the mesh resolution.
 
-Properties, by construction:
+Properties of the kernel CDF, by construction:
 
 - strictly monotone;
 - C-infinity in the queries AND the traced-point positions — no ranks, no
   sorts, no ``argsort`` anywhere, so there is nothing to swap and the
   likelihood carries smooth mass/shear gradients in every configuration
   (including pixelization over-sampling 1 and the interferometer sparse
-  path, where an empirical point-rank CDF is exactly piecewise-constant);
+  path, where the empirical rank CDF is exactly piecewise-constant);
 - duplicate-safe: coincident traced points simply stack their weights.
 
-The forward transform is evaluated exactly at the query points (keeping the
-C-infinity guarantee) and rescaled so the data bounding box maps onto the
-unit square exactly, clamping to [0, 1] outside the data range.  The
-inverse — only needed at fixed unit-square grid values (mesh pixel
-centres/edges) — is a linear-interp lookup on a small fixed table of
+The kernel forward transform is evaluated exactly at the query points
+(keeping the C-infinity guarantee) and rescaled so the data bounding box
+maps onto the unit square exactly, clamping to [0, 1] outside the data
+range.  The inverse — only needed at fixed unit-square grid values (mesh
+pixel centres/edges) — is a linear-interp lookup on a small fixed table of
 ``n_knots`` knots spanning the data range; because the inverse queries are
-constants, gradients flow smoothly through the table values.
+constants, gradients flow smoothly through the table values. The exact
+kernel sum is the O(M_sub x N_data) erf evaluation that dominates the CPU
+likelihood at production scale — the reason the rank CDF is the CPU default.
+
+Both transforms warp the same lattice; the 4-pixel bilinear interpolation of
+``adaptive_rectangular_mappings_weights_via_interpolation_from`` is shared.
 """
 
 import math
@@ -42,6 +60,35 @@ from autonerves import cached_property
 from autoarray import numba_util
 
 from autoarray.inversion.mesh.interpolator.abstract import AbstractInterpolator
+
+
+def forward_interp(xp, yp, x):
+    import jax
+    import jax.numpy as jnp
+
+    return jax.vmap(jnp.interp, in_axes=(1, 1, 1, None, None), out_axes=(1))(
+        x, xp, yp, 0, 1
+    )
+
+
+def forward_interp_np(xp, yp, x):
+    """
+    xp: (N, M)
+    yp: (N, M)
+    x : (K, M)  ← query points per column
+    """
+
+    if yp.ndim == 1 and xp.ndim == 2:
+        yp = np.broadcast_to(yp[:, None], xp.shape)
+
+    K, M = x.shape
+
+    out = np.empty((K, 2), dtype=xp.dtype)
+
+    for j in range(2):
+        out[:, j] = np.interp(x[:, j], xp[:, j], yp[:, j], left=0, right=1)
+
+    return out
 
 
 def reverse_interp(xp, yp, x):
@@ -134,6 +181,55 @@ def _norm_cdf(t, xp):
         from jax.scipy.special import erf
 
     return 0.5 * (1.0 + erf(t / _SQRT2))
+
+
+def create_transforms_rank(traced_points, mesh_weight_map=None, xp=np):
+    """
+    Build the per-axis empirical rank-CDF transform pair (the ``Bilinear``
+    meshes' lattice transform).
+
+    The CDF is the empirical (weighted) rank CDF of the traced points — a
+    sort plus a cumulative sum, linearly interpolated between points — so a
+    likelihood evaluation costs O(N log N) with no kernel hyperparameters.
+    Recovered from the pre-consolidation implementation (PR #402 deleted it
+    when the kernel CDF took the plain class names); see the module
+    docstring for the gradient trade-off versus the kernel CDF.
+
+    The returned ``transform`` maps (scaled) source-plane coordinates into
+    the unit square and ``inv_transform`` maps unit-square coordinates back
+    to the (scaled) source plane.
+
+    Parameters
+    ----------
+    traced_points
+        The (N, 2) scaled source-plane coordinates the CDF adapts to.
+    mesh_weight_map
+        Optional (N,) weights from the adapt image (image adaption). ``None``
+        gives uniform weights (density adaption).
+    xp
+        The array library to use (numpy or jax.numpy).
+    """
+    N = traced_points.shape[0]
+
+    if mesh_weight_map is None:
+        t = xp.arange(1, N + 1) / (N + 1)
+        t = xp.stack([t, t], axis=1)
+        sort_points = xp.sort(traced_points, axis=0)
+    else:
+        sdx = xp.argsort(traced_points, axis=0)
+        sort_points = xp.take_along_axis(traced_points, sdx, axis=0)
+        t = xp.stack([mesh_weight_map, mesh_weight_map], axis=1)
+        t = xp.take_along_axis(t, sdx, axis=0)
+        t = xp.cumsum(t, axis=0)
+
+    if xp.__name__.startswith("jax"):
+        transform = partial(forward_interp, sort_points, t)
+        inv_transform = partial(reverse_interp, t, sort_points)
+        return transform, inv_transform
+
+    transform = partial(forward_interp_np, sort_points, t)
+    inv_transform = partial(reverse_interp_np, t, sort_points)
+    return transform, inv_transform
 
 
 def create_transforms(
@@ -253,6 +349,36 @@ def create_transforms(
     return transform, inv_transform
 
 
+def _transforms_from(
+    source_grid_scaled,
+    mesh_pixels: int,
+    mesh_weight_map,
+    bandwidth: float,
+    n_knots: int,
+    transform: str,
+    xp,
+):
+    """
+    Dispatch to the requested lattice-transform pair: the empirical rank CDF
+    (``"rank"``, the Bilinear meshes — ``bandwidth`` / ``n_knots`` unused) or
+    the kernel-density CDF (``"kernel"``, the RTU meshes).
+    """
+    if transform == "rank":
+        return create_transforms_rank(
+            source_grid_scaled, mesh_weight_map=mesh_weight_map, xp=xp
+        )
+    if transform != "kernel":
+        raise ValueError(f"transform must be 'rank' or 'kernel', got {transform!r}.")
+    return create_transforms(
+        source_grid_scaled,
+        mesh_pixels=mesh_pixels,
+        mesh_weight_map=mesh_weight_map,
+        bandwidth=bandwidth,
+        n_knots=n_knots,
+        xp=xp,
+    )
+
+
 def adaptive_rectangular_transformed_grid_from(
     data_grid,
     grid,
@@ -260,19 +386,21 @@ def adaptive_rectangular_transformed_grid_from(
     mesh_weight_map=None,
     bandwidth: float = KERNEL_CDF_DEFAULT_BANDWIDTH,
     n_knots: int = KERNEL_CDF_DEFAULT_KNOTS,
+    transform: str = "kernel",
     xp=np,
 ):
-    """Map unit-square coordinates back to the source plane via the kernel CDF."""
+    """Map unit-square coordinates back to the source plane via the adaptive CDF."""
     mu = data_grid.mean(axis=0)
     scale = data_grid.std(axis=0).min()
     source_grid_scaled = (data_grid - mu) / scale
 
-    _, inv_transform = create_transforms(
+    _, inv_transform = _transforms_from(
         source_grid_scaled,
         mesh_pixels=mesh_pixels,
         mesh_weight_map=mesh_weight_map,
         bandwidth=bandwidth,
         n_knots=n_knots,
+        transform=transform,
         xp=xp,
     )
 
@@ -288,9 +416,10 @@ def adaptive_rectangular_areas_from(
     mesh_weight_map=None,
     bandwidth: float = KERNEL_CDF_DEFAULT_BANDWIDTH,
     n_knots: int = KERNEL_CDF_DEFAULT_KNOTS,
+    transform: str = "kernel",
     xp=np,
 ):
-    """The source-plane area of every mesh pixel under the kernel-CDF transform."""
+    """The source-plane area of every mesh pixel under the adaptive CDF transform."""
     edges_y = xp.linspace(1, 0, source_grid_shape[0] + 1)
     edges_x = xp.linspace(0, 1, source_grid_shape[1] + 1)
 
@@ -298,12 +427,13 @@ def adaptive_rectangular_areas_from(
     scale = data_grid.std(axis=0).min()
     source_grid_scaled = (data_grid - mu) / scale
 
-    _, inv_transform = create_transforms(
+    _, inv_transform = _transforms_from(
         source_grid_scaled,
         mesh_pixels=source_grid_shape[0],
         mesh_weight_map=mesh_weight_map,
         bandwidth=bandwidth,
         n_knots=n_knots,
+        transform=transform,
         xp=xp,
     )
 
@@ -326,6 +456,7 @@ def adaptive_rectangular_mappings_weights_via_interpolation_from(
     mesh_weight_map=None,
     bandwidth: float = KERNEL_CDF_DEFAULT_BANDWIDTH,
     n_knots: int = KERNEL_CDF_DEFAULT_KNOTS,
+    transform: str = "kernel",
     xp=np,
 ):
     """
@@ -347,8 +478,9 @@ def adaptive_rectangular_mappings_weights_via_interpolation_from(
     Steps performed:
       1. Normalize the source-plane grid by subtracting its mean and dividing by
          the minimum axis standard deviation (to balance scaling).
-      2. Construct the kernel-CDF forward/inverse transforms which map the grid
-         into the unit square [0,1]^2.
+      2. Construct the adaptive-CDF forward/inverse transforms (rank or
+         kernel, per ``transform``) which map the grid into the unit square
+         [0,1]^2.
       3. Transform the oversampled source-plane grid into [0,1]^2, then scale it
          to index space `[0, source_grid_size)`.
       4. Compute floor/ceil along x and y axes to find the enclosing rectangular cell.
@@ -373,9 +505,14 @@ def adaptive_rectangular_mappings_weights_via_interpolation_from(
         The weight map used to weight the creation of the rectangular mesh grid, which
         adapts the size of the mesh pixels to where the source is reconstructed.
     bandwidth
-        Bandwidth in units of the mesh pixel scale (see ``create_transforms``).
+        Bandwidth in units of the mesh pixel scale (see ``create_transforms``;
+        kernel transform only).
     n_knots
-        Size of the fixed knot table used to invert the CDF.
+        Size of the fixed knot table used to invert the CDF (kernel transform
+        only).
+    transform
+        The lattice transform: ``"rank"`` (empirical rank CDF, the Bilinear
+        meshes) or ``"kernel"`` (kernel-density CDF, the RTU meshes).
 
     Returns
     -------
@@ -392,18 +529,19 @@ def adaptive_rectangular_mappings_weights_via_interpolation_from(
     source_grid_scaled = (data_grid - mu) / scale
 
     # --- Step 2. Build transforms ---
-    transform, _ = create_transforms(
+    transform_func, _ = _transforms_from(
         source_grid_scaled,
         mesh_pixels=source_grid_size,
         mesh_weight_map=mesh_weight_map,
         bandwidth=bandwidth,
         n_knots=n_knots,
+        transform=transform,
         xp=xp,
     )
 
     # --- Step 3. Transform oversampled grid into index space ---
     grid_over_sampled_scaled = (data_grid_over_sampled - mu) / scale
-    grid_over_sampled_transformed = transform(grid_over_sampled_scaled)
+    grid_over_sampled_transformed = transform_func(grid_over_sampled_scaled)
     grid_over_index = (source_grid_size - 3) * grid_over_sampled_transformed + 1
 
     # --- Step 4. Floor/ceil indices ---
@@ -445,13 +583,15 @@ def adaptive_rectangular_mappings_weights_via_interpolation_from(
 
 
 class InterpolatorRectangular(AbstractInterpolator):
-    """Adaptive rectangular interpolator (kernel-density CDF).
+    """Adaptive rectangular interpolator (rank or kernel-density CDF).
 
     A grid of (y,x) coordinates which represent an adaptive rectangular
     pixelization, ordered such that pixels begin from the top-row and go
     rightwards and then downwards. The mesh pixels adapt to the density (or
-    adapt-image weights) of the traced points through the smooth kernel-CDF
-    transform of ``create_transforms``.
+    adapt-image weights) of the traced points through the per-axis CDF
+    transform selected by ``transform``: the empirical rank CDF of
+    ``create_transforms_rank`` (the Bilinear meshes) or the smooth kernel
+    CDF of ``create_transforms`` (the RTU meshes).
 
     This class is used in conjunction with the `inversion/pixelizations`
     package to create rectangular pixelizations and mappers that perform an
@@ -467,6 +607,7 @@ class InterpolatorRectangular(AbstractInterpolator):
         adapt_data: Optional[np.ndarray] = None,
         bandwidth: float = KERNEL_CDF_DEFAULT_BANDWIDTH,
         n_knots: int = KERNEL_CDF_DEFAULT_KNOTS,
+        transform: str = "kernel",
         xp=np,
     ):
         super().__init__(
@@ -479,6 +620,7 @@ class InterpolatorRectangular(AbstractInterpolator):
         self.mesh_weight_map = mesh_weight_map
         self.bandwidth = bandwidth
         self.n_knots = n_knots
+        self.transform = transform
 
     @cached_property
     def mesh_geometry(self):
@@ -493,6 +635,7 @@ class InterpolatorRectangular(AbstractInterpolator):
             mesh_weight_map=self.mesh_weight_map,
             kernel_bandwidth=self.bandwidth,
             kernel_knots=self.n_knots,
+            transform=self.transform,
             xp=self._xp,
         )
 
@@ -506,6 +649,7 @@ class InterpolatorRectangular(AbstractInterpolator):
                 mesh_weight_map=self.mesh_weight_map,
                 bandwidth=self.bandwidth,
                 n_knots=self.n_knots,
+                transform=self.transform,
                 xp=self._xp,
             )
         )

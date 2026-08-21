@@ -36,7 +36,7 @@ class Pixelization:
         - **Left:** Observed image of a galaxy.
         - **Centre:** The (y,x) grid of coordinates corresponding to the centre of each pixel in the observed image.
           The centre of each pixel is shown by a magenta point.
-        - **Right:** An overlaid ``RectangularAdaptDensity`` ``mesh``, where the square pixel boundaries of this mesh are shown by
+        - **Right:** An overlaid ``RectangularBilinearAdaptDensity`` ``mesh``, where the square pixel boundaries of this mesh are shown by
           dashed black lines.
 
         Red points highlight a subset of points. They are used below to illustrate additional behaviour
@@ -44,7 +44,7 @@ class Pixelization:
 
         The **centre** and **right** panels show the core functionality of a ``Pixelization``. It represents the
         mappings between an image's (y,x) grid of coordinates and a ``Mesh``'s (y,x) grid of coordinates (in the
-        example above the centres of ``RectangularAdaptDensity`` pixels, shown by the dashed black lines).
+        example above the centres of ``RectangularBilinearAdaptDensity`` pixels, shown by the dashed black lines).
 
 
         **Image-Plane Example (Masked)**
@@ -63,7 +63,7 @@ class Pixelization:
           :width: 240
 
         The behaviour is analogous to the non-masked case, however only unmasked pixel's in the image's (y,x) grid
-        of coordinates are included when pairing with the ``RectangularAdaptDensity`` mesh.
+        of coordinates are included when pairing with the ``RectangularBilinearAdaptDensity`` mesh.
 
 
         **Source-Plane Example (Masked)**
@@ -94,7 +94,7 @@ class Pixelization:
         - ``Inversion``: Use the ``Pixelization`` to reconstruct the data on the mesh via linear algebra.
         - ``Regularization``: Apply smoothing to the solutions computed using an ``Inversion``.
 
-        In the example above, a ``RectangularAdaptDensity`` ``Mesh`` object is used. Other meshes are available (e.g.
+        In the example above, a ``RectangularBilinearAdaptDensity`` ``Mesh`` object is used. Other meshes are available (e.g.
         ``Delaunay``).
 
         **Source Code API**
@@ -112,7 +112,7 @@ class Pixelization:
         Parameters
         ----------
         mesh
-            The mesh object (e.g. RectangularAdaptDensity grid of pixels, Delaunay triangulation) describing the
+            The mesh object (e.g. RectangularBilinearAdaptDensity grid of pixels, Delaunay triangulation) describing the
             pixels of the `Pixelization`.
         regularization
             The regularization object that can smooth ``Pixelization`` pixels with one another when it is used to
@@ -127,7 +127,7 @@ class Pixelization:
 
             grid_2d = al.Grid2D.uniform(shape_native=(50, 50), pixel_scales=0.1)
 
-            mesh = al.mesh.RectangularAdaptDensity(shape=(10, 10))
+            mesh = al.mesh.RectangularBilinearAdaptDensity(shape=(10, 10))
 
             pixelization = al.Pixelization(mesh=mesh)
 
@@ -137,7 +137,7 @@ class Pixelization:
 
             import autogalaxy as ag
 
-            mesh = af.Model(ag.mesh.RectangularAdaptDensity)
+            mesh = af.Model(ag.mesh.RectangularBilinearAdaptDensity)
             mesh.shape_0 = af.UniformPrior(lower_limit=10, upper_limit=20)
             mesh.shape_1 = af.UniformPrior(lower_limit=10, upper_limit=20)
 
@@ -164,7 +164,8 @@ class Pixelization:
 
                 Split regularization regularizes using a cross of four points around each pixel centre,
                 which requires the mesh to provide split-cross mappings. The rectangular meshes
-                (`RectangularUniform`, `RectangularAdaptDensity`, `RectangularAdaptImage`) do not
+                (`RectangularUniform`, `RectangularBilinearAdaptDensity`, `RectangularBilinearAdaptImage`,
+                `RectangularRTUAdaptDensity`, `RectangularRTUAdaptImage`) do not
                 provide them.
 
                 Use either:

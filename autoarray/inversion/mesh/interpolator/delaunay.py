@@ -786,10 +786,10 @@ class InterpolatorDelaunay(AbstractInterpolator):
         The `sub_slim_index` refers to the masked data sub-pixels and `pix_indexes` the pixelization pixel indexes,
         for example:
 
-        - `pix_indexes_for_sub_slim_index[0, 0] = 2`: The data's first (index 0) sub-pixel maps to the RectangularAdaptDensity
+        - `pix_indexes_for_sub_slim_index[0, 0] = 2`: The data's first (index 0) sub-pixel maps to the RectangularRTUAdaptDensity
         pixelization's third (index 2) pixel.
 
-        - `pix_indexes_for_sub_slim_index[2, 0] = 4`: The data's third (index 2) sub-pixel maps to the RectangularAdaptDensity
+        - `pix_indexes_for_sub_slim_index[2, 0] = 4`: The data's third (index 2) sub-pixel maps to the RectangularRTUAdaptDensity
         pixelization's fifth (index 4) pixel.
 
         The second dimension of the array `pix_indexes_for_sub_slim_index`, which is 0 in both examples above, is used

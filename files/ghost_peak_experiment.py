@@ -16,7 +16,7 @@ Method
    for the geometric diagnostic).
 2. Build a synthetic adapt image as a sum of K isotropic Gaussian peaks of
    matched amplitude.
-3. Compute ``mesh_weight_map`` exactly as ``RectangularAdaptImage`` does:
+3. Compute ``mesh_weight_map`` exactly as ``RectangularRTUAdaptImage`` does:
    ``clip(b, eps, None) ** power`` then normalise.
 4. Build the spline CDF transforms via ``create_transforms_spline`` (the same
    function ``RectangularSplineAdaptImage`` uses).
@@ -146,7 +146,7 @@ def run_experiment(peaks_label, peaks, real_zones, ghost_zones,
                    probe_radius=0.15):
     traced = sample_traced_points(n_traced, seed=0)
     brightness = brightness_at(traced, peaks=peaks, sigma=sigma)
-    # Mimic RectangularAdaptImage.mesh_weight_map_from with power=1, floor=0
+    # Mimic RectangularRTUAdaptImage.mesh_weight_map_from with power=1, floor=0
     weight_map = np.clip(brightness, 1e-12, None)
     weight_map = weight_map / weight_map.sum()
 

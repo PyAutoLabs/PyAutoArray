@@ -1,12 +1,12 @@
 import numpy as np
 from typing import Optional, Tuple
 
-from autoarray.inversion.mesh.mesh.rectangular_adapt_density import (
-    RectangularAdaptDensity,
+from autoarray.inversion.mesh.mesh.rectangular_rtu_adapt_density import (
+    RectangularRTUAdaptDensity,
 )
 
 
-class RectangularAdaptImage(RectangularAdaptDensity):
+class RectangularRTUAdaptImage(RectangularRTUAdaptDensity):
 
     def __init__(
         self,
@@ -76,7 +76,7 @@ class RectangularAdaptImage(RectangularAdaptDensity):
             regions.
         bandwidth : float, optional
             Kernel bandwidth in units of the mesh pixel scale (see
-            `RectangularAdaptDensity`). Defaults to the kernel default.
+            `RectangularRTUAdaptDensity`). Defaults to the kernel default.
         n_knots : int, optional
             Size of the fixed knot table used to invert the CDF. Defaults to
             the kernel default.

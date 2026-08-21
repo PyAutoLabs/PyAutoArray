@@ -464,6 +464,7 @@ class MeshGeometryRectangular(AbstractMeshGeometry):
             mesh_weight_map=self.mesh_weight_map,
             bandwidth=bandwidth,
             n_knots=n_knots,
+            transform=self.transform,
             xp=self._xp,
         )
 
@@ -532,6 +533,7 @@ class MeshGeometryRectangular(AbstractMeshGeometry):
             mesh_weight_map=self.mesh_weight_map,
             bandwidth=bandwidth,
             n_knots=n_knots,
+            transform=self.transform,
             xp=self._xp,
         )
 

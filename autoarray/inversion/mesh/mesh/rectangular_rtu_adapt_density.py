@@ -61,9 +61,9 @@ def overlay_grid_from(
     return grid_slim
 
 
-class RectangularAdaptDensity(AbstractMesh):
+class RectangularRTUAdaptDensity(AbstractMesh):
     # Rectangular meshes do not support split regularization -- their interpolators provide no
-    # split-cross mappings. Inherited by `RectangularUniform` and `RectangularAdaptImage`.
+    # split-cross mappings. Inherited by `RectangularUniform` and `RectangularRTUAdaptImage`.
     supports_split_regularization = False
 
     def __init__(
@@ -75,7 +75,8 @@ class RectangularAdaptDensity(AbstractMesh):
         """
         A rectangular mesh of pixels used to reconstruct a source on a regular
         grid, whose pixels adapt to the density of the traced source-plane
-        coordinates.
+        coordinates through the smooth RTU kernel-density CDF transform
+        (Enzi et al., arXiv:2606.30620).
 
         The mesh is defined by a 2D shape `(total_y_pixels, total_x_pixels)` and
         is indexed in row-major order:
@@ -83,6 +84,17 @@ class RectangularAdaptDensity(AbstractMesh):
             - Index 0 corresponds to the top-left pixel.
             - Indices increase from left to right across each row,
               and from top to bottom across rows.
+
+        When to use RTU vs Bilinear
+        ---------------------------
+        The RTU meshes are the recommended advanced option: on GPU, for JAX
+        gradient-based samplers, and on the interferometer sparse path (where
+        they are the only adaptive rectangular meshes with usable gradients).
+        Their kernel-CDF evaluation is an O(M_sub x N_data) erf sum that
+        dominates the CPU likelihood at production scale, so for CPU-only
+        fitting the `RectangularBilinearAdaptDensity` /
+        `RectangularBilinearAdaptImage` meshes (empirical rank-CDF transform,
+        no hyperparameters) are the faster default.
 
         Adaptive behaviour
         ------------------

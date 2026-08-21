@@ -1,4 +1,5 @@
-"""Unit tests for the adaptive rectangular interpolator (kernel-density CDF).
+"""Unit tests for the adaptive rectangular interpolator (rank and
+kernel-density CDF transforms).
 
 Pure numpy — no JAX imports here. Cross-xp / gradient certification lives in
 autolens_workspace_test/scripts/jax_grad per the project's "no JAX in unit
@@ -16,6 +17,7 @@ from autoarray.inversion.mesh.interpolator.rectangular import (
     adaptive_rectangular_areas_from,
     adaptive_rectangular_mappings_weights_via_interpolation_from,
     create_transforms,
+    create_transforms_rank,
 )
 
 
@@ -138,6 +140,139 @@ def test__create_transforms__chunked_forward_is_block_size_invariant():
 
 
 # ---------------------------------------------------------------------------
+# Empirical rank-CDF transform (the Bilinear meshes)
+# ---------------------------------------------------------------------------
+
+
+def test__create_transforms_rank__unweighted_cdf_is_ranks_at_points():
+    data_grid, _, _ = _seeded_inputs(seed=1)
+    N = data_grid.shape[0]
+
+    fwd, _ = create_transforms_rank(data_grid, xp=np)
+
+    # At the sorted points themselves the empirical CDF is exactly the rank
+    # values (i + 1) / (N + 1), per axis.
+    sort_points = np.sort(data_grid, axis=0)
+    expected = np.arange(1, N + 1) / (N + 1)
+    F = fwd(sort_points)
+    assert F[:, 0] == pytest.approx(expected, abs=1e-12)
+    assert F[:, 1] == pytest.approx(expected, abs=1e-12)
+
+
+def test__create_transforms_rank__weighted_cdf_is_cumsum_at_points():
+    data_grid, _, weights = _seeded_inputs(seed=2)
+
+    fwd, _ = create_transforms_rank(data_grid, mesh_weight_map=weights, xp=np)
+
+    for d in range(2):
+        order = np.argsort(data_grid[:, d])
+        expected = np.cumsum(weights[order])
+        F = fwd(np.sort(data_grid, axis=0))
+        assert F[:, d] == pytest.approx(expected, abs=1e-12)
+
+
+def test__create_transforms_rank__monotone_and_bounded():
+    data_grid, _, weights = _seeded_inputs(seed=3)
+
+    fwd, _ = create_transforms_rank(data_grid, mesh_weight_map=weights, xp=np)
+
+    q = np.linspace(data_grid.min(axis=0) - 0.5, data_grid.max(axis=0) + 0.5, 500)
+    F = fwd(q)
+    assert np.all(np.diff(F, axis=0) >= 0.0)
+    assert F.min() >= 0.0
+    assert F.max() <= 1.0
+
+
+def test__create_transforms_rank__roundtrip_matches_identity():
+    data_grid, _, _ = _seeded_inputs(seed=4)
+    N = data_grid.shape[0]
+
+    fwd, rev = create_transforms_rank(data_grid, xp=np)
+
+    # Interior unit-square probes (inside [1/(N+1), N/(N+1)] where the
+    # piecewise-linear CDF is invertible) round-trip exactly.
+    probe = np.array([[0.1, 0.1], [0.5, 0.5], [0.9, 0.9]])
+    assert 0.1 > 1.0 / (N + 1) and 0.9 < N / (N + 1)
+    roundtrip = fwd(rev(probe))
+    assert roundtrip == pytest.approx(probe, abs=1e-12)
+
+
+def test__rank__mappings_sizes_weights__shapes_and_weight_normalization():
+    data_grid, over, weights = _seeded_inputs()
+
+    idx, w = adaptive_rectangular_mappings_weights_via_interpolation_from(
+        source_grid_size=16,
+        data_grid=data_grid,
+        data_grid_over_sampled=over,
+        mesh_weight_map=weights,
+        transform="rank",
+        xp=np,
+    )
+
+    assert idx.shape == (400, 4)
+    assert w.shape == (400, 4)
+    assert np.allclose(w.sum(axis=1), 1.0, atol=1e-10)
+
+
+def test__rank__areas__positive_finite__total_is_bounding_box_area():
+    data_grid, _, weights = _seeded_inputs(seed=6)
+
+    areas = adaptive_rectangular_areas_from(
+        source_grid_shape=(12, 12),
+        data_grid=data_grid,
+        mesh_weight_map=weights,
+        transform="rank",
+        xp=np,
+    )
+
+    assert areas.shape == (144,)
+    assert np.all(np.isfinite(areas))
+    assert np.all(areas > 0.0)
+    span = data_grid.max(axis=0) - data_grid.min(axis=0)
+    assert areas.sum() == pytest.approx(span[0] * span[1], rel=1e-8)
+
+
+def test__rank__areas__adapt_to_point_density():
+    """A dense cluster of traced points must shrink the mesh pixels covering
+    it relative to a sparse region — the adaptive property the rank CDF
+    exists to provide."""
+    rng = np.random.default_rng(11)
+    cluster = rng.normal(loc=-1.0, scale=0.05, size=(400, 2))
+    sparse = rng.uniform(low=-2.0, high=2.0, size=(100, 2))
+    data_grid = np.concatenate([cluster, sparse])
+
+    areas = adaptive_rectangular_areas_from(
+        source_grid_shape=(10, 10),
+        data_grid=data_grid,
+        transform="rank",
+        xp=np,
+    )
+
+    # Strong adaptivity: the cluster holds 80% of the rank mass, so the cells
+    # covering it shrink by orders of magnitude relative to the sparse
+    # outskirts. A uniform lattice would have every cell equal.
+    assert areas.min() < areas.max() / 100.0
+
+    # The smallest cells cover the cluster: every cell of side <~ 4 sigma
+    # contains cluster points, so its area is far below the uniform cell area.
+    uniform_cell = areas.sum() / areas.size
+    assert areas.min() < uniform_cell / 100.0
+
+
+def test__transforms_from__invalid_transform_raises():
+    data_grid, over, _ = _seeded_inputs()
+
+    with pytest.raises(ValueError):
+        adaptive_rectangular_mappings_weights_via_interpolation_from(
+            source_grid_size=16,
+            data_grid=data_grid,
+            data_grid_over_sampled=over,
+            transform="spline",
+            xp=np,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Mapper output shapes
 # ---------------------------------------------------------------------------
 
@@ -201,7 +336,7 @@ def test__InterpolatorRectangular__mappings_sizes_weights_via_property():
     rng = np.random.default_rng(5)
     data_grid = _StubGrid(rng.standard_normal((64, 2)))
 
-    mesh = aa.mesh.RectangularAdaptDensity(shape=(6, 6), bandwidth=0.8)
+    mesh = aa.mesh.RectangularRTUAdaptDensity(shape=(6, 6), bandwidth=0.8)
     interpolator = InterpolatorRectangular(
         mesh=mesh,
         mesh_grid=_StubGrid(rng.standard_normal((36, 2))),
@@ -221,6 +356,50 @@ def test__InterpolatorRectangular__mappings_sizes_weights_via_property():
     geometry = interpolator.mesh_geometry
     assert geometry.kernel_bandwidth == 0.8
     assert geometry.kernel_knots == KERNEL_CDF_DEFAULT_KNOTS
+    assert geometry.transform == "kernel"
+
+    areas = geometry.areas_transformed
+    assert areas.shape == (36,)
+    assert np.all(np.isfinite(areas))
+    assert np.all(areas > 0.0)
+
+
+def test__InterpolatorRectangular__rank_transform_via_property():
+    class _StubGrid:
+        def __init__(self, arr):
+            self.array = arr
+            self.over_sampled = self
+            self._array = arr
+
+        def __getattr__(self, item):
+            return getattr(self._array, item)
+
+    rng = np.random.default_rng(5)
+    data_grid = _StubGrid(rng.standard_normal((64, 2)))
+
+    mesh = aa.mesh.RectangularBilinearAdaptDensity(shape=(6, 6))
+    interpolator = InterpolatorRectangular(
+        mesh=mesh,
+        mesh_grid=_StubGrid(rng.standard_normal((36, 2))),
+        data_grid=data_grid,
+        mesh_weight_map=None,
+        **mesh.interpolator_kwargs,
+        xp=np,
+    )
+
+    assert interpolator.transform == "rank"
+
+    mappings, sizes, weights = interpolator._mappings_sizes_weights
+    assert mappings.shape == (64, 4)
+    assert sizes.shape == (64,)
+    assert weights.shape == (64, 4)
+    assert np.all(sizes == 4)
+    assert np.allclose(weights.sum(axis=1), 1.0, atol=1e-10)
+
+    # The geometry routes areas / edges through the same rank transform as
+    # the mapper, so the two stay consistent.
+    geometry = interpolator.mesh_geometry
+    assert geometry.transform == "rank"
 
     areas = geometry.areas_transformed
     assert areas.shape == (36,)
@@ -258,8 +437,13 @@ def test__forward_transform__windowed_numba_matches_dense_reference(weighted):
     data_grid, data_grid_over, weights = _seeded_inputs(M=300, K=500, seed=7)
 
     # queries beyond the data bounding box exercise the saturated tails
-    q = np.concatenate([data_grid_over, data_grid.min(axis=0) - 1.0 + np.zeros((1, 2)),
-                        data_grid.max(axis=0) + 1.0 + np.zeros((1, 2))])
+    q = np.concatenate(
+        [
+            data_grid_over,
+            data_grid.min(axis=0) - 1.0 + np.zeros((1, 2)),
+            data_grid.max(axis=0) + 1.0 + np.zeros((1, 2)),
+        ]
+    )
 
     fwd, _ = create_transforms(
         data_grid, mesh_pixels=16, mesh_weight_map=weights if weighted else None, xp=np

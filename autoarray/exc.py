@@ -72,7 +72,7 @@ class MeshException(Exception):
     """
     Raises exceptions associated with the `inversion/mesh` modules and `Mesh` classes.
 
-    For example if a `RectangularAdaptDensity` mesh has dimensions below 3x3.
+    For example if a `RectangularRTUAdaptDensity` mesh has dimensions below 3x3.
     """
 
     pass

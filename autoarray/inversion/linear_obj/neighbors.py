@@ -4,14 +4,14 @@ import numpy as np
 class Neighbors(np.ndarray):
     def __new__(cls, arr: np.ndarray, sizes: np.ndarray):
         """
-        Class packaging ndarrays describing the neighbors of every pixel in a mesh (e.g. `RectangularAdaptDensity`).
+        Class packaging ndarrays describing the neighbors of every pixel in a mesh (e.g. `RectangularRTUAdaptDensity`).
 
         The array `arr` contains the pixel indexes of the neighbors of every pixel. Its has shape [total_pixels,
         max_neighbors_in_single_pixel].
 
         The array `sizes` contains the number of neighbors of every pixel in the pixelixzation.
 
-        For example, for a 3x3 `RectangularAdaptDensity` grid:
+        For example, for a 3x3 `RectangularRTUAdaptDensity` grid:
 
         - `total_pixels=9` and `max_neighbors_in_single_pixel=4` (because the central pixel has 4 neighbors whereas
           edge / corner pixels have 3 and 2).

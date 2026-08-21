@@ -11,6 +11,7 @@ class AbstractMeshGeometry:
         mesh_weight_map=None,
         kernel_bandwidth=None,
         kernel_knots=None,
+        transform="kernel",
         xp=np,
     ):
 
@@ -22,6 +23,11 @@ class AbstractMeshGeometry:
         # areas / edges transforms; None falls back to the kernel defaults.
         self.kernel_bandwidth = kernel_bandwidth
         self.kernel_knots = kernel_knots
+        # The rectangular lattice transform the areas / edges route through:
+        # "kernel" (the RTU meshes and the uniform mesh's fallback) or "rank"
+        # (the Bilinear meshes) — must match the mapper's transform so the
+        # geometry is consistent with where the mapper scatters its flux.
+        self.transform = transform
         self._use_jax = xp is not np
 
     @property
