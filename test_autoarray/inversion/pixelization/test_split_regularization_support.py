@@ -7,7 +7,7 @@ inversion and neither naming the real cause:
 
 - ``RectangularUniform``  -> ``AttributeError: 'InterpolatorRectangularUniform' object has no
                               attribute '_mappings_sizes_weights_split'``
-- ``RectangularAdaptDensity`` / ``RectangularAdaptImage``
+- ``RectangularRTUAdaptDensity`` / ``RectangularRTUAdaptImage``
                           -> ``IndexError: index 4 is out of bounds for axis 0 with size 4``
                              (``InterpolatorRectangular`` returned the plain 4-corner mappings
                              from a pass-through that claimed split "reuses the same mappings")
@@ -21,11 +21,12 @@ import pytest
 import autoarray as aa
 from autoarray import exc
 
-
 RECTANGULAR_MESHES = [
     aa.mesh.RectangularUniform,
-    aa.mesh.RectangularAdaptDensity,
-    aa.mesh.RectangularAdaptImage,
+    aa.mesh.RectangularBilinearAdaptDensity,
+    aa.mesh.RectangularBilinearAdaptImage,
+    aa.mesh.RectangularRTUAdaptDensity,
+    aa.mesh.RectangularRTUAdaptImage,
 ]
 
 SPLIT_REGULARIZATIONS = [
@@ -43,8 +44,10 @@ ADAPTIVE_MESHES = [
 
 @pytest.mark.parametrize("mesh_cls", RECTANGULAR_MESHES)
 @pytest.mark.parametrize("regularization_cls", SPLIT_REGULARIZATIONS)
-def test__rectangular_mesh_with_split_regularization__raises(mesh_cls, regularization_cls):
-    """All 9 rectangular-mesh x split-regularization combinations are rejected."""
+def test__rectangular_mesh_with_split_regularization__raises(
+    mesh_cls, regularization_cls
+):
+    """All 15 rectangular-mesh x split-regularization combinations are rejected."""
 
     with pytest.raises(exc.PixelizationException) as error:
         aa.Pixelization(
@@ -73,7 +76,9 @@ def test__rectangular_mesh_with_non_split_regularization__is_allowed(mesh_cls):
 
 @pytest.mark.parametrize("mesh_cls", ADAPTIVE_MESHES)
 @pytest.mark.parametrize("regularization_cls", SPLIT_REGULARIZATIONS)
-def test__adaptive_mesh_with_split_regularization__is_allowed(mesh_cls, regularization_cls):
+def test__adaptive_mesh_with_split_regularization__is_allowed(
+    mesh_cls, regularization_cls
+):
     """Split regularization remains supported on the meshes that implement it."""
 
     pixelization = aa.Pixelization(
@@ -96,9 +101,18 @@ def test__rectangular_mesh_without_regularization__is_allowed(mesh_cls):
 def test__capability_flags():
     """The flags the guard reads, asserted directly so a future mesh can't silently regress."""
 
-    assert aa.mesh.RectangularUniform(shape=(15, 15)).supports_split_regularization is False
-    assert aa.mesh.RectangularAdaptDensity(shape=(15, 15)).supports_split_regularization is False
-    assert aa.mesh.RectangularAdaptImage(shape=(15, 15)).supports_split_regularization is False
+    assert (
+        aa.mesh.RectangularUniform(shape=(15, 15)).supports_split_regularization
+        is False
+    )
+    assert (
+        aa.mesh.RectangularRTUAdaptDensity(shape=(15, 15)).supports_split_regularization
+        is False
+    )
+    assert (
+        aa.mesh.RectangularRTUAdaptImage(shape=(15, 15)).supports_split_regularization
+        is False
+    )
     assert aa.mesh.Delaunay(pixels=100).supports_split_regularization is True
     assert aa.mesh.DelaunayNN(pixels=100).supports_split_regularization is True
     assert aa.mesh.KNNBarycentric(pixels=100).supports_split_regularization is True
@@ -116,7 +130,9 @@ def test__interpolator_rectangular_has_no_split_mappings():
     would reintroduce a silent-looking API that fails one frame later.
     """
 
-    from autoarray.inversion.mesh.interpolator.rectangular import InterpolatorRectangular
+    from autoarray.inversion.mesh.interpolator.rectangular import (
+        InterpolatorRectangular,
+    )
     from autoarray.inversion.mesh.interpolator.rectangular_uniform import (
         InterpolatorRectangularUniform,
     )

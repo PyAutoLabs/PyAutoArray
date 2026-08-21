@@ -368,7 +368,7 @@ def make_border_relocator_2d_7x7():
 
 def make_rectangular_mapper_7x7_3x3():
 
-    from autoarray.inversion.mesh.mesh.rectangular_adapt_density import (
+    from autoarray.inversion.mesh.mesh.rectangular_rtu_adapt_density import (
         overlay_grid_from,
     )
 

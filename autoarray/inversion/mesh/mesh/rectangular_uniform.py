@@ -1,9 +1,9 @@
-from autoarray.inversion.mesh.mesh.rectangular_adapt_density import (
-    RectangularAdaptDensity,
+from autoarray.inversion.mesh.mesh.rectangular_rtu_adapt_density import (
+    RectangularRTUAdaptDensity,
 )
 
 
-class RectangularUniform(RectangularAdaptDensity):
+class RectangularUniform(RectangularRTUAdaptDensity):
     """
     A uniform rectangular mesh of pixels used to reconstruct a source on a
     regular grid, with no adaptive weighting.
@@ -21,7 +21,7 @@ class RectangularUniform(RectangularAdaptDensity):
 
     Uniform behaviour
     -----------------
-    Unlike `RectangularAdaptDensity` and `RectangularAdaptImage`, this mesh
+    Unlike the adaptive rectangular meshes (`RectangularBilinearAdapt*`, `RectangularRTUAdapt*`), this mesh
     applies no adaptive weighting based on data density or an adapt image.
     All pixels are treated equally in the reconstruction, and the effective
     resolution is determined solely by the fixed mesh geometry and the

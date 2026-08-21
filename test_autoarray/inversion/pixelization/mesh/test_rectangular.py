@@ -11,7 +11,7 @@ from autoarray.inversion.mesh.interpolator.rectangular import (
 from autoarray.inversion.mesh.interpolator.rectangular_uniform import (
     InterpolatorRectangularUniform,
 )
-from autoarray.inversion.mesh.mesh.rectangular_adapt_density import (
+from autoarray.inversion.mesh.mesh.rectangular_rtu_adapt_density import (
     overlay_grid_from,
 )
 
@@ -150,8 +150,8 @@ def test__overlay_grid_from__pixel_centres__3x3_grid__pixel_centres():
 
 
 def test__construction__shape_and_kernel_kwargs__default():
-    density = aa.mesh.RectangularAdaptDensity(shape=(5, 7))
-    image = aa.mesh.RectangularAdaptImage(shape=(5, 7))
+    density = aa.mesh.RectangularRTUAdaptDensity(shape=(5, 7))
+    image = aa.mesh.RectangularRTUAdaptImage(shape=(5, 7))
 
     assert density.shape == (5, 7)
     assert density.bandwidth == KERNEL_CDF_DEFAULT_BANDWIDTH
@@ -165,8 +165,10 @@ def test__construction__shape_and_kernel_kwargs__default():
 
 
 def test__construction__kernel_kwargs__overridden():
-    density = aa.mesh.RectangularAdaptDensity(shape=(3, 3), bandwidth=0.5, n_knots=128)
-    image = aa.mesh.RectangularAdaptImage(
+    density = aa.mesh.RectangularRTUAdaptDensity(
+        shape=(3, 3), bandwidth=0.5, n_knots=128
+    )
+    image = aa.mesh.RectangularRTUAdaptImage(
         shape=(3, 3), weight_power=2.0, weight_floor=0.1, bandwidth=2.0, n_knots=32
     )
 
@@ -180,9 +182,9 @@ def test__construction__kernel_kwargs__overridden():
 
 def test__construction__minimum_shape_raises():
     with pytest.raises(aa.exc.MeshException):
-        aa.mesh.RectangularAdaptDensity(shape=(2, 3))
+        aa.mesh.RectangularRTUAdaptDensity(shape=(2, 3))
     with pytest.raises(aa.exc.MeshException):
-        aa.mesh.RectangularAdaptImage(shape=(3, 2))
+        aa.mesh.RectangularRTUAdaptImage(shape=(3, 2))
     with pytest.raises(aa.exc.MeshException):
         aa.mesh.RectangularUniform(shape=(2, 2))
 
@@ -193,8 +195,10 @@ def test__construction__minimum_shape_raises():
 
 
 def test__interpolator_cls_and_kwargs():
-    density = aa.mesh.RectangularAdaptDensity(shape=(3, 3), bandwidth=0.5, n_knots=128)
-    image = aa.mesh.RectangularAdaptImage(shape=(3, 3))
+    density = aa.mesh.RectangularRTUAdaptDensity(
+        shape=(3, 3), bandwidth=0.5, n_knots=128
+    )
+    image = aa.mesh.RectangularRTUAdaptImage(shape=(3, 3))
     uniform = aa.mesh.RectangularUniform(shape=(3, 3))
 
     assert density.interpolator_cls is InterpolatorRectangular
@@ -216,12 +220,12 @@ def test__interpolator_cls_and_kwargs():
 
 
 def test__mesh_weight_map_from__density__returns_none():
-    density = aa.mesh.RectangularAdaptDensity(shape=(3, 3))
+    density = aa.mesh.RectangularRTUAdaptDensity(shape=(3, 3))
     assert density.mesh_weight_map_from(adapt_data=None) is None
 
 
 def test__mesh_weight_map_from__image__returns_weighted_normalized():
-    image = aa.mesh.RectangularAdaptImage(
+    image = aa.mesh.RectangularRTUAdaptImage(
         shape=(3, 3), weight_power=2.0, weight_floor=0.0
     )
 
@@ -235,3 +239,78 @@ def test__mesh_weight_map_from__image__returns_weighted_normalized():
     expected = np.array([1.0, 4.0, 16.0, 1e-24, 64.0])
     expected = expected / expected.sum()
     assert w == pytest.approx(expected, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Bilinear (rank-CDF) meshes
+# ---------------------------------------------------------------------------
+
+
+def test__bilinear__construction_and_interpolator_dispatch():
+    density = aa.mesh.RectangularBilinearAdaptDensity(shape=(5, 7))
+    image = aa.mesh.RectangularBilinearAdaptImage(
+        shape=(5, 7), weight_power=2.0, weight_floor=0.1
+    )
+
+    assert density.shape == (5, 7)
+    assert image.shape == (5, 7)
+    assert image.weight_power == 2.0
+    assert image.weight_floor == 0.1
+
+    assert density.interpolator_cls is InterpolatorRectangular
+    assert image.interpolator_cls is InterpolatorRectangular
+
+    # The rank CDF has no kernel hyperparameters — only the transform selector.
+    assert density.interpolator_kwargs == {"transform": "rank"}
+    assert image.interpolator_kwargs == {"transform": "rank"}
+
+
+def test__bilinear__no_kernel_hyperparameters_in_signature():
+    with pytest.raises(TypeError):
+        aa.mesh.RectangularBilinearAdaptDensity(shape=(3, 3), bandwidth=0.5)
+    with pytest.raises(TypeError):
+        aa.mesh.RectangularBilinearAdaptImage(shape=(3, 3), n_knots=128)
+
+
+def test__bilinear__minimum_shape_raises():
+    with pytest.raises(aa.exc.MeshException):
+        aa.mesh.RectangularBilinearAdaptDensity(shape=(2, 3))
+    with pytest.raises(aa.exc.MeshException):
+        aa.mesh.RectangularBilinearAdaptImage(shape=(3, 2))
+
+
+def test__bilinear__mesh_weight_map_matches_rtu():
+    class _Stub:
+        def __init__(self, arr):
+            self.array = arr
+
+    adapt = _Stub(np.array([1.0, 2.0, 4.0, 0.0, 8.0]))
+
+    bilinear = aa.mesh.RectangularBilinearAdaptImage(
+        shape=(3, 3), weight_power=2.0, weight_floor=0.0
+    )
+    rtu = aa.mesh.RectangularRTUAdaptImage(
+        shape=(3, 3), weight_power=2.0, weight_floor=0.0
+    )
+
+    assert bilinear.mesh_weight_map_from(adapt_data=adapt) == pytest.approx(
+        rtu.mesh_weight_map_from(adapt_data=adapt), rel=1e-12
+    )
+
+    density = aa.mesh.RectangularBilinearAdaptDensity(shape=(3, 3))
+    assert density.mesh_weight_map_from(adapt_data=None) is None
+
+
+def test__bilinear__split_regularization_not_supported():
+    assert (
+        aa.mesh.RectangularBilinearAdaptDensity(
+            shape=(15, 15)
+        ).supports_split_regularization
+        is False
+    )
+    assert (
+        aa.mesh.RectangularBilinearAdaptImage(
+            shape=(15, 15)
+        ).supports_split_regularization
+        is False
+    )

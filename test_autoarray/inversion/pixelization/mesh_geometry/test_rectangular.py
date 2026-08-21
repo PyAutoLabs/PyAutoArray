@@ -3,7 +3,7 @@ import pytest
 
 import autoarray as aa
 
-from autoarray.inversion.mesh.mesh.rectangular_adapt_density import (
+from autoarray.inversion.mesh.mesh.rectangular_rtu_adapt_density import (
     overlay_grid_from,
 )
 
@@ -18,7 +18,7 @@ def test__rectangular_neighbors_from():
     # I3I4I5I
     # I6I7I8I
 
-    (neighbors, neighbors_sizes) = rectangular_neighbors_from(shape_native=(3, 3))
+    neighbors, neighbors_sizes = rectangular_neighbors_from(shape_native=(3, 3))
 
     # TODO : Use pytest.parameterize
 
@@ -38,7 +38,7 @@ def test__rectangular_neighbors_from():
     # I4I5I 6I 7I
     # I8I9I10I11I
 
-    (neighbors, neighbors_sizes) = rectangular_neighbors_from(shape_native=(3, 4))
+    neighbors, neighbors_sizes = rectangular_neighbors_from(shape_native=(3, 4))
 
     assert (neighbors[0] == [1, 4, -1, -1]).all()
     assert (neighbors[1] == [0, 2, 5, -1]).all()
@@ -60,7 +60,7 @@ def test__rectangular_neighbors_from():
     # I6I 7I 8I
     # I9I10I11I
 
-    (neighbors, neighbors_sizes) = rectangular_neighbors_from(shape_native=(4, 3))
+    neighbors, neighbors_sizes = rectangular_neighbors_from(shape_native=(4, 3))
 
     assert (neighbors[0] == [1, 3, -1, -1]).all()
     assert (neighbors[1] == [0, 2, 4, -1]).all()
@@ -82,7 +82,7 @@ def test__rectangular_neighbors_from():
     # I8 I 9I10I11I
     # I12I13I14I15I
 
-    (neighbors, neighbors_sizes) = rectangular_neighbors_from(shape_native=(4, 4))
+    neighbors, neighbors_sizes = rectangular_neighbors_from(shape_native=(4, 4))
 
     assert (neighbors[0] == [1, 4, -1, -1]).all()
     assert (neighbors[1] == [0, 2, 5, -1]).all()
@@ -122,7 +122,7 @@ def test__neighbors__compare_to_mesh_util():
         mesh=mesh, mesh_grid=mesh_grid, data_grid=None
     )
 
-    (neighbors_util, neighbors_sizes_util) = rectangular_neighbors_from(
+    neighbors_util, neighbors_sizes_util = rectangular_neighbors_from(
         shape_native=(7, 5)
     )
 
@@ -151,7 +151,7 @@ def test__areas_transformed(mask_2d_7x7):
 
     mesh_grid = overlay_grid_from(shape_native=(3, 3), grid=grid, buffer=1e-8)
 
-    mesh = aa.mesh.RectangularAdaptDensity(shape=(3, 3))
+    mesh = aa.mesh.RectangularRTUAdaptDensity(shape=(3, 3))
 
     interpolator = mesh.interpolator_from(
         source_plane_data_grid=grid,
@@ -198,7 +198,7 @@ def test__edges_transformed(mask_2d_7x7):
 
     mesh_grid = overlay_grid_from(shape_native=(3, 3), grid=grid, buffer=1e-8)
 
-    mesh = aa.mesh.RectangularAdaptDensity(shape=(3, 3))
+    mesh = aa.mesh.RectangularRTUAdaptDensity(shape=(3, 3))
 
     interpolator = mesh.interpolator_from(
         source_plane_data_grid=grid,

@@ -174,8 +174,8 @@ class AbstractInversion:
 
         - If the input is `cls=aa.mesh.Mesh`, a list containing all pixelizations in the class are returned.
 
-        - If `cls=aa.mesh.Mesh` and `cls_filtered=aa.mesh.RectangularAdaptDensity`, a list of all pixelizations
-        excluding those which are `RectangularAdaptDensity` pixelizations will be returned.
+        - If `cls=aa.mesh.Mesh` and `cls_filtered=aa.mesh.RectangularRTUAdaptDensity`, a list of all pixelizations
+        excluding those which are `RectangularRTUAdaptDensity` pixelizations will be returned.
 
         Parameters
         ----------
