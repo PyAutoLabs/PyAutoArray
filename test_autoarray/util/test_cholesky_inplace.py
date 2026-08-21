@@ -167,3 +167,29 @@ def test__fnnls_cholesky__warm_start_matches_cold_start(seed):
     d_warm = fnnls_cholesky(ZTZ, ZTx, P_initial=P_initial)
 
     assert d_warm == pytest.approx(d_cold, rel=1e-8, abs=1e-10)
+
+
+@pytest.mark.parametrize("seed", [0, 1])
+def test__fnnls_cholesky__accepts_jax_arrays(seed):
+    """
+    The sparse-operator inversion path hands fnnls_cholesky JAX arrays even
+    when the fit runs the numba CPU path. Indexing a JAX array yields another
+    JAX array, which numba maps to a readonly buffer — before the boundary
+    coercion in fnnls_cholesky this failed kernel compilation with
+    "Cannot modify readonly array" (HowToLens smoke, 2026-08-20).
+    """
+    jnp = pytest.importorskip("jax.numpy")
+
+    rng = np.random.default_rng(seed)
+    n = 30
+    Z = rng.normal(size=(50, n))
+    x = Z @ rng.normal(size=n) + rng.normal(size=50)
+
+    ZTZ = Z.T @ Z
+    ZTx = Z.T @ x
+
+    d_np = fnnls_cholesky(ZTZ, ZTx)
+    d_jax = fnnls_cholesky(jnp.asarray(ZTZ), jnp.asarray(ZTx))
+
+    assert np.all(np.asarray(d_jax) >= 0.0)
+    assert np.asarray(d_jax) == pytest.approx(d_np, rel=1e-6, abs=1e-8)
