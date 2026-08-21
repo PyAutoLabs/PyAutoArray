@@ -32,6 +32,20 @@ def fnnls_cholesky(
     """
     from scipy import linalg as slg
 
+    # The buffer kernels below (_cho_solve_buffer / cholinsertlast_inplace)
+    # overwrite their vector argument in place, so every slice handed to them
+    # must be a writeable numpy array. A JAX ZTZ / ZTx — the sparse-operator
+    # inversion path hands one over even when the fit itself runs the numba
+    # CPU path — breaks that contract: indexing a JAX array yields another
+    # JAX array, which numba maps to a *readonly* buffer and rejects at
+    # compile time ("Cannot modify readonly array"). Coerce once at the
+    # boundary — fancy indexing a numpy parent then hands the kernels fresh
+    # writeable arrays, exactly as the scipy solvers this replaced tolerated
+    # by copying internally.
+    ZTZ = np.asarray(ZTZ)
+    ZTx = np.asarray(ZTx)
+    P_initial = np.asarray(P_initial)
+
     lstsq = lambda A, x: slg.solve(
         A,
         x,
