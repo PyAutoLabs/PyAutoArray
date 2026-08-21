@@ -1,6 +1,7 @@
 import numpy as np
 from typing import Dict, List, Optional, Union
 
+from autoarray import exc
 from autoarray.dataset.interferometer.dataset import Interferometer
 from autoarray.inversion.inversion.dataset_interface import DatasetInterface
 from autoarray.inversion.inversion.abstract import AbstractInversion
@@ -69,13 +70,41 @@ class AbstractInversionInterferometer(AbstractInversion):
         This is used to construct the simultaneous linear equations which reconstruct the data.
 
         This property returns the a list of each linear object's transformed mapping matrix.
+
+        A linear object may have a `operated_mapping_matrix_override` property, which bypasses the `mapping_matrix`
+        computation and transformer operation and is directly placed in the `operated_mapping_matrix_list`. Because
+        the override bypasses the transformer it must already be in the data's visibility space, with (complex)
+        shape [total_visibilities, params] (e.g. computed via an analytic Fourier transform).
         """
-        return [
-            self.transformer.transform_mapping_matrix(
-                mapping_matrix=linear_obj.mapping_matrix, xp=self._xp
-            )
-            for linear_obj in self.linear_obj_list
-        ]
+        operated_mapping_matrix_list = []
+
+        for linear_obj in self.linear_obj_list:
+            operated_mapping_matrix_override = linear_obj.operated_mapping_matrix_override
+
+            if operated_mapping_matrix_override is not None:
+                expected_shape = (self.data.shape[0], linear_obj.params)
+
+                if tuple(operated_mapping_matrix_override.shape) != expected_shape:
+                    raise exc.InversionException(
+                        f"The `operated_mapping_matrix_override` of a linear object input to an interferometer "
+                        f"inversion has shape {tuple(operated_mapping_matrix_override.shape)} but shape "
+                        f"{expected_shape} ([total_visibilities, params]) is required.\n\n"
+                        f"For an interferometer dataset the override bypasses the transformer entirely and is "
+                        f"placed directly in the `operated_mapping_matrix_list`, therefore it must be in the "
+                        f"data's visibility space (unlike the real-space `mapping_matrix`, which the transformer "
+                        f"maps to visibilities)."
+                    )
+
+                operated_mapping_matrix_list.append(operated_mapping_matrix_override)
+
+            else:
+                operated_mapping_matrix_list.append(
+                    self.transformer.transform_mapping_matrix(
+                        mapping_matrix=linear_obj.mapping_matrix, xp=self._xp
+                    )
+                )
+
+        return operated_mapping_matrix_list
 
     @property
     def mapped_reconstructed_data_dict(

@@ -1,6 +1,7 @@
 import numpy as np
 from typing import Dict, List, Union
 
+from autoarray import exc
 from autoarray.dataset.interferometer.dataset import Interferometer
 from autoarray.inversion.inversion.dataset_interface import DatasetInterface
 from autoarray.inversion.inversion.interferometer.abstract import (
@@ -45,6 +46,16 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
             The linear objects used to reconstruct the data's observed values. If multiple linear objects are passed
             the simultaneous linear equations are combined and solved simultaneously.
         """
+        for linear_obj in linear_obj_list:
+            if linear_obj.operated_mapping_matrix_override is not None:
+                raise exc.InversionException(
+                    "A linear object with an `operated_mapping_matrix_override` was passed to the sparse "
+                    "(w-tilde) interferometer inversion, which constructs its linear algebra without an "
+                    "explicit operated mapping matrix and therefore cannot apply the override.\n\n"
+                    "Use the mapping formalism instead (e.g. do not call `apply_sparse_operator` on the "
+                    "interferometer dataset)."
+                )
+
         super().__init__(
             dataset=dataset,
             linear_obj_list=linear_obj_list,

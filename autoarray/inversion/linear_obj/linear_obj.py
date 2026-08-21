@@ -122,7 +122,8 @@ class LinearObj:
     def operated_mapping_matrix_override(self) -> Optional[np.ndarray]:
         """
         An `Inversion` takes the `mapping_matrix` of each linear object and combines it with the data's operators
-        (e.g. a PSF for `Imaging` data) to compute the `operated_mapping_matrix`.
+        (e.g. a PSF for `Imaging` data, the transformer for `Interferometer` data) to compute the
+        `operated_mapping_matrix`.
 
         If this property is overwritten this operation is not performed, with the `operated_mapping_matrix` output
         by this property automatically used instead.
@@ -132,9 +133,19 @@ class LinearObj:
         region which is blurred into the masked region which is linear solved for. This flux is outside the region
         that defines the `mapping_matrix` and thus this override is required to properly incorporate it.
 
+        Because the override bypasses the data's operators entirely, it must be in the data's space, which depends
+        on the dataset type being fitted:
+
+        - `Imaging`: a real matrix of dimensions (total_mask_pixels, total_parameters), e.g. the PSF-convolved
+          image of each linear object's parameter.
+
+        - `Interferometer`: a complex matrix of dimensions (total_visibilities, total_parameters), e.g. the
+          visibilities of each linear object's parameter computed via an analytic Fourier transform. The
+          transformer (NUFFT / DFT) is not applied to the override.
+
         Returns
         -------
-        An operated mapping matrix of dimensions (total_mask_pixels, total_parameters) which overrides the mapping
+        An operated mapping matrix in the data's space (see above) which overrides the mapping
         matrix calculations performed in the linear equation solvers.
         """
         return None
