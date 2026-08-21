@@ -36,6 +36,51 @@ def test__psf_weighted_noise_imaging_from():
     )
 
 
+def test__psf_weighted_data_from__unmasked_pixels_on_array_edge():
+    """
+    Regression test: an unmasked pixel within `kernel_shape // 2` of the array
+    edge drives the kernel off the weight map.
+
+    numba `@jit()` does not bounds-check array reads, so those positions
+    silently returned uninitialized memory (values of order 1e299) rather than
+    raising, poisoning `psf_weighted_data` and the data vector built from it.
+    Because the values read depend on whatever the allocator left next to the
+    weight map, the corruption was heap-state dependent: deterministic on the
+    first call after a cold-cache compile, and intermittent in forked
+    multiprocessing workers.
+
+    The zero-padded numpy implementation is the reference — kernel positions
+    off the array contribute zero. Every other test in this module masks a
+    one-pixel border, so none of them exercise this path.
+    """
+
+    image = np.arange(1.0, 26.0).reshape(5, 5)
+    noise_map = np.ones((5, 5))
+
+    kernel = np.array([[0.0, 1.0, 2.0], [3.0, 4.0, 1.0], [2.0, 0.0, 1.0]])
+
+    # Every pixel unmasked, so the border pixels push the kernel off the array.
+    native_index_for_slim_index = np.array(
+        [[y, x] for y in range(5) for x in range(5)]
+    )
+
+    psf_weighted_data = aa.util.inversion_imaging_numba.psf_weighted_data_from(
+        image_native=image,
+        noise_map_native=noise_map,
+        kernel_native=kernel,
+        native_index_for_slim_index=native_index_for_slim_index,
+    )
+
+    psf_weighted_data_numpy = aa.util.inversion_imaging.psf_weighted_data_from(
+        weight_map_native=image / noise_map**2.0,
+        kernel_native=kernel,
+        native_index_for_slim_index=native_index_for_slim_index,
+    )
+
+    assert np.all(np.isfinite(psf_weighted_data))
+    assert psf_weighted_data == pytest.approx(psf_weighted_data_numpy, 1.0e-8)
+
+
 def test__psf_weighted_data_from():
 
     mask = aa.Mask2D(
