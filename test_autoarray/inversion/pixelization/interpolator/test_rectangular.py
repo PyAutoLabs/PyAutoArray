@@ -226,3 +226,47 @@ def test__InterpolatorRectangular__mappings_sizes_weights_via_property():
     assert areas.shape == (36,)
     assert np.all(np.isfinite(areas))
     assert np.all(areas > 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Windowed numba fast path (numpy branch)
+# ---------------------------------------------------------------------------
+
+
+def _dense_reference_forward(data_grid, mesh_pixels, weights, q):
+    """The pre-fast-path definition: dense O(M x N) normal-CDF sum, rescaled
+    so the data bounding box maps onto the unit square, clipped to [0, 1]."""
+    from scipy.special import erf
+
+    points = data_grid
+    N = points.shape[0]
+    w = np.full(N, 1.0 / N) if weights is None else weights / weights.sum()
+    lo, hi = points.min(axis=0), points.max(axis=0)
+    h = 1.0 * (hi - lo) / mesh_pixels
+
+    def F_raw(qq):
+        t = (qq[:, None, :] - points[None, :, :]) / h[None, None, :]
+        return np.sum(w[None, :, None] * (0.5 * (1.0 + erf(t / np.sqrt(2.0)))), axis=1)
+
+    F_lo = F_raw(lo[None, :])[0]
+    F_hi = F_raw(hi[None, :])[0]
+    return np.clip((F_raw(q) - F_lo[None, :]) / (F_hi - F_lo)[None, :], 0.0, 1.0)
+
+
+@pytest.mark.parametrize("weighted", [False, True])
+def test__forward_transform__windowed_numba_matches_dense_reference(weighted):
+    data_grid, data_grid_over, weights = _seeded_inputs(M=300, K=500, seed=7)
+
+    # queries beyond the data bounding box exercise the saturated tails
+    q = np.concatenate([data_grid_over, data_grid.min(axis=0) - 1.0 + np.zeros((1, 2)),
+                        data_grid.max(axis=0) + 1.0 + np.zeros((1, 2))])
+
+    fwd, _ = create_transforms(
+        data_grid, mesh_pixels=16, mesh_weight_map=weights if weighted else None, xp=np
+    )
+
+    reference = _dense_reference_forward(
+        data_grid, 16, weights if weighted else None, q
+    )
+
+    np.testing.assert_allclose(fwd(q), reference, rtol=0.0, atol=1e-12)
