@@ -509,6 +509,10 @@ class AbstractInversion:
 
         if self.settings.use_positive_only_solver:
 
+            # `use_edge_zeroed_pixels` is deliberately nested here rather than checked alongside
+            # `use_positive_only_solver`: edge-zeroing is scoped to the positive-only solver, and the
+            # positive-negative branch below solves the full system regardless of its value. This is
+            # intended, not an oversight -- do not "fix" it by hoisting the check out of this branch.
             if self.settings.use_edge_zeroed_pixels and self.has(cls=Mapper):
 
                 # Use advanced indexing to select rows/columns
