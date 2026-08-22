@@ -125,6 +125,16 @@ def _set_stamp(file_path, stamp):
 
     - ``True`` / ``False`` -- overwrite the card, so a test can write a dataset
       that *claims* a regime independently of the env it was written under.
+
+      Every test of the READER forces the stamp this way rather than relying on
+      ``aa.output_to_fits`` to write one. That is deliberate layering, not
+      convenience: the stamp is written by PyAutoNerves, ``pyproject.toml``
+      floors ``autonerves`` at a release that predates it, and that floor is
+      currently the newest release on PyPI -- so in any environment resolving
+      autonerves from PyPI the writer emits no card at all. Tests that leaned on
+      the writer would fail there, and would silently pass via the shape
+      fallback rather than exercising the stamp. This suite owns the reader; the
+      writer is tested in ``test_autonerves/test_fitsable.py``.
     - ``None`` -- strip the card, producing a **legacy** file byte-equivalent to
       one written before PyAutoNerves#153. This is what keeps the shape-based
       fallback exercised; without it the fallback would silently become dead
@@ -200,9 +210,10 @@ def test__full_regime__stale_small_dataset__is_deleted_and_resimulated(
     # ``SMALLDAT = T``, then read back in the full regime -- the actual
     # sequence that produced the bug. Writing it with the env unset would
     # stamp it ``F`` and describe a dataset that cannot exist.
-    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
-    dataset_path = _write_dataset(tmp_path / "dataset", SMALL_DATASETS_SHAPE_NATIVE)
     monkeypatch.delenv("PYAUTO_SMALL_DATASETS", raising=False)
+    dataset_path = _write_dataset(
+        tmp_path / "dataset", SMALL_DATASETS_SHAPE_NATIVE, stamp=True
+    )
 
     assert should_simulate(str(dataset_path)) is True
     assert not dataset_path.exists()
@@ -389,9 +400,8 @@ def test__interferometer_shaped_dataset__stamp_catches_what_shape_cannot(
     # it fails silently, which is strictly worse than the loud imaging failure.
     #
     # Shape is provably blind to it; the stamp provably is not.
-    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
-    dataset_path = _write_dataset(tmp_path / "dataset", (360, 2))
     monkeypatch.delenv("PYAUTO_SMALL_DATASETS", raising=False)
+    dataset_path = _write_dataset(tmp_path / "dataset", (360, 2), stamp=True)
 
     # The heuristic that fixed the imaging case sees nothing wrong here.
     assert _is_small_datasets_on_disk(str(dataset_path)) is False
@@ -424,9 +434,8 @@ def test__stamp_true_on_a_full_resolution_image__is_contradicted_and_kept(
     # deletes their data, and the pre-stamp shape heuristic explicitly REFUSED
     # to: a stamp-preferring rule must not be a strict weakening of the safety
     # property PyAutoArray#471 established.
-    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
-    dataset_path = _write_dataset(tmp_path / "dataset", (300, 300))
     monkeypatch.delenv("PYAUTO_SMALL_DATASETS", raising=False)
+    dataset_path = _write_dataset(tmp_path / "dataset", (300, 300), stamp=True)
 
     assert _small_datasets_stamp_on_disk(str(dataset_path)) is True
     assert _is_small_datasets_on_disk(str(dataset_path)) is False  # #471 said keep
