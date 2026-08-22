@@ -3,6 +3,89 @@ import numpy as np
 import pytest
 
 
+class _NotAConcreteScalar:
+    """
+    Stand-in for a JAX tracer: not a concrete Python/NumPy scalar, and raising if anything
+    tries to resolve it to a bool, exactly as a tracer does inside `jax.jit`. Mirrors the
+    stand-in in `test_autoarray/test_validate.py` — unit tests here are NumPy-only.
+    """
+
+    def __bool__(self):
+        raise AssertionError("a tracer must never be resolved to a bool")
+
+
+@pytest.mark.parametrize(
+    "pixel_scales", [1, 1.0, np.float64(1.0), np.int32(1), np.float32(1.0)]
+)
+def test__convert_pixel_scales_1d__widens_any_real_scalar(pixel_scales):
+    """
+    Any concrete real scalar widens, not just an exact `float`. `int` is what a user types by
+    hand; `np.floating` is what indexing an array or reading a FITS header returns.
+    """
+    assert aa.util.geometry.convert_pixel_scales_1d(pixel_scales=pixel_scales) == (1.0,)
+
+
+@pytest.mark.parametrize(
+    "pixel_scales", [1, 1.0, np.float64(1.0), np.int32(1), np.float32(1.0)]
+)
+def test__convert_pixel_scales_2d__widens_any_real_scalar(pixel_scales):
+    assert aa.util.geometry.convert_pixel_scales_2d(pixel_scales=pixel_scales) == (
+        1.0,
+        1.0,
+    )
+
+
+@pytest.mark.parametrize("pixel_scales", [1, np.float64(1.0), np.int32(1)])
+def test__convert_pixel_scales__widened_entries_are_python_floats(pixel_scales):
+    """
+    The widened value is cast, so an `int` or a NumPy scalar never reaches the geometry
+    stored on a mask. `1 == 1.0` in Python, so the cast has to be asserted on the type.
+    """
+    (entry_1d,) = aa.util.geometry.convert_pixel_scales_1d(pixel_scales=pixel_scales)
+    assert type(entry_1d) is float
+
+    for entry in aa.util.geometry.convert_pixel_scales_2d(pixel_scales=pixel_scales):
+        assert type(entry) is float
+
+
+def test__convert_pixel_scales__tuple_input_is_returned_unchanged():
+    pixel_scales_1d = (1.0,)
+    assert (
+        aa.util.geometry.convert_pixel_scales_1d(pixel_scales=pixel_scales_1d)
+        is pixel_scales_1d
+    )
+
+    pixel_scales_2d = (1.0, 2.0)
+    assert (
+        aa.util.geometry.convert_pixel_scales_2d(pixel_scales=pixel_scales_2d)
+        is pixel_scales_2d
+    )
+
+
+def test__convert_pixel_scales__a_tracer_passes_through_untouched():
+    """Inside a `jax.jit` the value is traced; widening it would resolve it to a bool."""
+    tracer_like = _NotAConcreteScalar()
+
+    assert (
+        aa.util.geometry.convert_pixel_scales_1d(pixel_scales=tracer_like)
+        is tracer_like
+    )
+    assert (
+        aa.util.geometry.convert_pixel_scales_2d(pixel_scales=tracer_like)
+        is tracer_like
+    )
+
+
+def test__convert_pixel_scales__a_bool_is_not_treated_as_a_scalar():
+    """
+    `bool` is a subclass of `int`, but `True` reaching a pixel scale is a different mistake
+    than the ones this widening serves — `validate.is_concrete_scalar` excludes it, so it is
+    not silently accepted as a pixel scale of 1.0.
+    """
+    assert aa.util.geometry.convert_pixel_scales_1d(pixel_scales=True) is True
+    assert aa.util.geometry.convert_pixel_scales_2d(pixel_scales=True) is True
+
+
 def test__central_pixel_coordinates_1d_from():
     central_pixel_coordinates = aa.util.geometry.central_pixel_coordinates_1d_from(
         shape_slim=(3,)

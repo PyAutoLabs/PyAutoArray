@@ -124,6 +124,57 @@ def test__b6__control__valid_pixel_scales_still_build():
     assert array.pixel_scales == (0.1, 0.2)
 
 
+@pytest.mark.parametrize("pixel_scales", [0, -1, np.int32(0), np.int32(-1)])
+def test__b6__the_guards_still_fire_on_integer_scalars(pixel_scales):
+    """
+    The guards run before the widening, so broadening what counts as a scalar must not open a
+    hole for the integer forms of the same bad input.
+    """
+    with pytest.raises(ValueError, match="pixel_scales"):
+        aa.Array2D.no_mask(values=np.ones((5, 5)), pixel_scales=pixel_scales)
+
+
+@pytest.mark.parametrize(
+    "pixel_scales", [np.float64(0.0), np.float64(-0.1), np.float64("nan")]
+)
+def test__b6__the_guards_still_fire_on_numpy_scalars(pixel_scales):
+    with pytest.raises(ValueError, match="pixel_scales"):
+        aa.Array2D.no_mask(values=np.ones((5, 5)), pixel_scales=pixel_scales)
+
+
+@pytest.mark.parametrize("pixel_scales", [(0, 1), (1, -1)])
+def test__b6__the_guards_still_fire_on_integer_entries_of_a_tuple(pixel_scales):
+    with pytest.raises(ValueError, match="pixel_scales"):
+        aa.Array2D.no_mask(values=np.ones((5, 5)), pixel_scales=pixel_scales)
+
+
+@pytest.mark.parametrize("pixel_scales", [1, np.float64(1.0), np.int32(1)])
+def test__b6__control__an_integer_or_numpy_pixel_scale_builds_and_is_widened(
+    pixel_scales,
+):
+    """
+    The defect this closes: only an exact `float` used to be widened, so an `int` or a NumPy
+    scalar was stored on the mask unconverted and every later use of it raised
+    `TypeError: 'int' object is not subscriptable`.
+    """
+    array = aa.Array2D.no_mask(values=np.ones((5, 5)), pixel_scales=pixel_scales)
+    assert array.pixel_scales == (1.0, 1.0)
+    assert array.pixel_scale == 1.0
+
+    mask = aa.Mask2D.circular(
+        shape_native=(5, 5), radius=2.0, pixel_scales=pixel_scales
+    )
+    assert mask.pixel_scales == (1.0, 1.0)
+
+    grid = aa.Grid2D.uniform(shape_native=(5, 5), pixel_scales=pixel_scales)
+    assert grid.pixel_scales == (1.0, 1.0)
+
+
+def test__b6__control__an_integer_pixel_scale_builds_a_1d_structure():
+    array = aa.Array1D.no_mask(values=np.ones((5,)), pixel_scales=1)
+    assert array.pixel_scales == (1.0,)
+
+
 # ======================================================================================
 # B7 — annulus radii must be ordered
 # ======================================================================================

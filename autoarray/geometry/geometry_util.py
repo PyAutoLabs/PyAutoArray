@@ -32,16 +32,27 @@ def convert_shape_native_1d(shape_native: Union[int, Tuple[int]]) -> Tuple[int]:
 
 def convert_pixel_scales_1d(pixel_scales: ty.PixelScales) -> Tuple[float]:
     """
-    Convert an input pixel scale of type `float` to a tuple `(float,)`. If the input is already a
-    `(float,)` tuple it is returned unchanged.
+    Convert an input pixel scale given as a single real scalar to a tuple `(float,)`. If the
+    input is already a `(float,)` tuple it is returned unchanged.
 
-    This enables users to input the pixel scale as a single float and have the type automatically
-    normalised to `(float,)` which is used internally by 1D data structures.
+    This enables users to input the pixel scale as a single number and have the type
+    automatically normalised to `(float,)` which is used internally by 1D data structures.
+
+    Any concrete real scalar is widened — `int`, `float`, `np.integer` and `np.floating` — not
+    just an exact `float`. An `int` is a natural thing to type by hand, and an `np.floating` is
+    what indexing a numpy array or reading a FITS header returns, so both reach this function on
+    paths a user would consider ordinary. The widened value is cast to a Python `float`, so the
+    tuple this returns is always `(float,)` regardless of what went in.
+
+    A `bool` is deliberately *not* treated as a scalar here (see
+    :func:`autoarray.validate.is_concrete_scalar`), and neither is a JAX tracer — a traced value
+    passes through untouched so the function stays safe inside a `jax.jit`.
 
     Parameters
     ----------
     pixel_scales
-        The pixel scale to convert, either as a plain `float` or a 1-element tuple `(float,)`.
+        The pixel scale to convert, either as a plain real scalar or a 1-element tuple
+        `(float,)`.
 
     Returns
     -------
@@ -56,8 +67,8 @@ def convert_pixel_scales_1d(pixel_scales: ty.PixelScales) -> Tuple[float]:
 
     validate.validate_pixel_scales(pixel_scales=pixel_scales)
 
-    if type(pixel_scales) is float:
-        pixel_scales = (pixel_scales,)
+    if validate.is_concrete_scalar(pixel_scales):
+        pixel_scales = (float(pixel_scales),)
 
     return pixel_scales
 
@@ -197,17 +208,28 @@ def scaled_coordinates_1d_from(
 
 def convert_pixel_scales_2d(pixel_scales: ty.PixelScales) -> Tuple[float, float]:
     """
-    Convert an input pixel scale of type `float` to a tuple `(float, float)`. If the input is
-    already type `(float, float)` it is returned unchanged.
+    Convert an input pixel scale given as a single real scalar to a tuple `(float, float)`. If
+    the input is already type `(float, float)` it is returned unchanged.
 
-    This enables users to input the pixel scale as a single float and have the type automatically
-    normalised to `(float, float)` which is used internally for rectangular 2D grids (where
-    both axes share the same pixel scale).
+    This enables users to input the pixel scale as a single number and have the type
+    automatically normalised to `(float, float)` which is used internally for rectangular 2D
+    grids (where both axes share the same pixel scale).
+
+    Any concrete real scalar is widened — `int`, `float`, `np.integer` and `np.floating` — not
+    just an exact `float`. An `int` is a natural thing to type by hand, and an `np.floating` is
+    what indexing a numpy array or reading a FITS header returns, so both reach this function on
+    paths a user would consider ordinary. The widened value is cast to a Python `float`, so the
+    tuple this returns is always `(float, float)` regardless of what went in.
+
+    A `bool` is deliberately *not* treated as a scalar here (see
+    :func:`autoarray.validate.is_concrete_scalar`), and neither is a JAX tracer — a traced value
+    passes through untouched so the function stays safe inside a `jax.jit`.
 
     Parameters
     ----------
     pixel_scales
-        The pixel scale to convert, either as a plain `float` or a 2-element tuple `(float, float)`.
+        The pixel scale to convert, either as a plain real scalar or a 2-element tuple
+        `(float, float)`.
 
     Returns
     -------
@@ -228,8 +250,8 @@ def convert_pixel_scales_2d(pixel_scales: ty.PixelScales) -> Tuple[float, float]
 
     validate.validate_pixel_scales(pixel_scales=pixel_scales)
 
-    if type(pixel_scales) is float:
-        pixel_scales = (pixel_scales, pixel_scales)
+    if validate.is_concrete_scalar(pixel_scales):
+        pixel_scales = (float(pixel_scales), float(pixel_scales))
 
     return pixel_scales
 
