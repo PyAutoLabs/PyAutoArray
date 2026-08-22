@@ -4,16 +4,6 @@ import warnings
 from typing import Optional, Tuple
 
 
-class NUFFTPlaceholder:
-    pass
-
-
-try:
-    from pynufft.linalg.nufft_cpu import NUFFT_cpu
-except ModuleNotFoundError:
-    NUFFT_cpu = NUFFTPlaceholder
-
-
 from autoarray.mask.mask_2d import Mask2D
 from autoarray.structures.arrays.uniform_2d import Array2D
 from autoarray.structures.grids.uniform_2d import Grid2D
@@ -21,7 +11,6 @@ from autoarray.structures.visibilities import Visibilities
 
 from autoarray.structures.arrays import array_2d_util
 from autoarray.operators import transformer_util
-
 
 # nufftax pulls in jax at import (~0.7s), which sessions that never touch an
 # interferometer transformer should not pay for — deferred to _load_nufftax(),
@@ -93,9 +82,7 @@ def _patch_nufftax_batchers():
                 new_args[source_idx] = flat
                 out = prim.bind(*new_args, **kwargs)
                 return out.reshape(lead + out.shape[1:]), 0
-            out = jax.vmap(lambda *a: impl_fn(*a, **kwargs), in_axes=tuple(dims))(
-                *args
-            )
+            out = jax.vmap(lambda *a: impl_fn(*a, **kwargs), in_axes=tuple(dims))(*args)
             return out, 0
 
         return batcher
@@ -106,17 +93,6 @@ def _patch_nufftax_batchers():
         )
 
 
-def pynufft_exception():
-    raise ModuleNotFoundError(
-        "\n--------------------\n"
-        "You are attempting to perform interferometer analysis with the legacy "
-        "pynufft-backed `TransformerNUFFTPyNUFFT`.\n\n"
-        "However, the optional library PyNUFFT (https://github.com/jyhmiinlin/pynufft) is not installed.\n\n"
-        "Install it via the command `pip install pynufft==2022.2.2`.\n\n"
-        "----------------------"
-    )
-
-
 def nufftax_exception():
     raise ModuleNotFoundError(
         "\n--------------------\n"
@@ -124,8 +100,8 @@ def nufftax_exception():
         "JAX-native `TransformerNUFFT`.\n\n"
         "However, the optional library nufftax (https://github.com/GragasLab/nufftax) is not installed.\n\n"
         "Install it via the command `pip install nufftax`.\n\n"
-        "If you want to use the legacy pynufft backend instead, pass "
-        "`transformer_class=TransformerNUFFTPyNUFFT` and install pynufft.\n\n"
+        "Note that nufftax requires JAX, which has no wheels for Intel macOS; on\n"
+        "that platform use `transformer_class=TransformerDFT` instead.\n\n"
         "----------------------"
     )
 
@@ -227,13 +203,12 @@ class TransformerDFT:
             The complex visibilities to be transformed into a real-space image.
         use_adjoint_scaling
             If True, normalise the adjoint output onto the common scale shared by
-            every transformer (that of the plain mathematical adjoint). This is a
-            no-op for the DFT, whose adjoint is already on that scale; it is
-            load-bearing for `TransformerNUFFTPyNUFFT`, whose pynufft-internal
-            IFFT normalisation leaves its raw adjoint a factor `4 * N_y * N_x`
-            low. Do not remove it as "unused" — see `Interferometer.
+            every transformer (that of the plain mathematical adjoint). Both
+            remaining transformers already return the plain mathematical
+            adjoint, so this is a no-op for each of them; it is retained as a
+            stable part of the transformer interface. See `Interferometer.
             apply_sparse_operator`, which passes `True` so the sparse-operator
-            dirty image is scale-consistent across all three transformers.
+            dirty image is scale-consistent across both transformers.
 
         Returns
         -------
@@ -279,307 +254,6 @@ class TransformerDFT:
         )
 
 
-class TransformerNUFFTPyNUFFT(NUFFT_cpu):
-    def __init__(
-        self, uv_wavelengths: np.ndarray, real_space_mask: Mask2D, xp=np, **kwargs
-    ):
-        """
-        Performs the Non-Uniform Fast Fourier Transform (NUFFT) for interferometric image reconstruction.
-
-        Legacy pynufft-backed transformer. The default `TransformerNUFFT` is now backed by `nufftax`
-        (JAX-native, differentiable, ~zero gridding error) — this class is retained so users who depend
-        on pynufft's specific gridding behaviour can opt in by passing
-        `transformer_class=TransformerNUFFTPyNUFFT`.
-
-        This transformer uses the PyNUFFT library to efficiently compute the Fourier transform
-        of an image defined on a regular real-space grid to a set of non-uniform uv-plane (Fourier space)
-        coordinates, as is typical in radio interferometry.
-
-        It is initialized with the interferometer uv-wavelengths and a real-space mask, which defines
-        the pixelized image domain.
-
-        Parameters
-        ----------
-        uv_wavelengths
-            The uv-coordinates (Fourier-space sampling points) corresponding to the measured visibilities.
-            Should be an array of shape (n_vis, 2), where the two columns represent u and v coordinates in wavelengths.
-
-        real_space_mask
-            The 2D mask defining the real-space pixel grid on which the image is defined. Used to create the
-            unmasked grid required for NUFFT planning.
-
-        Notes
-        -----
-        - The `initialize_plan()` method builds the internal NUFFT plan based on the input grid and uv sampling.
-        - A complex exponential `shift` factor is applied to align the center of the Fourier transform correctly,
-          accounting for the pixel-center offset in the real-space grid.
-        - The adjoint operation (used in inverse imaging) must be scaled by `adjoint_scaling` to normalize its output.
-        - This transformer inherits directly from PyNUFFT's `NUFFT_cpu` base class.
-        - If `NUFFTPlaceholder` is detected (indicating PyNUFFT is not available), an exception is raised.
-
-        Attributes
-        ----------
-        grid : Grid2D
-            The real-space pixel grid derived from the mask, in radians.
-        native_index_for_slim_index : np.ndarray
-            Index map converting from slim (1D) grid to native (2D) indexing, for image reshaping.
-        shift : np.ndarray
-            Complex exponential phase shift applied to account for real-space pixel centering.
-        total_visibilities : int
-            Total number of visibilities across all uv-wavelength components.
-        adjoint_scaling : float
-            Scaling factor for adjoint operations to normalize reconstructed images.
-        """
-        from astropy import units
-
-        if isinstance(self, NUFFTPlaceholder):
-            pynufft_exception()
-
-        super(TransformerNUFFTPyNUFFT, self).__init__()
-
-        self.uv_wavelengths = uv_wavelengths
-        self.real_space_mask = real_space_mask
-        #        self.grid = self.real_space_mask.unmasked_grid.in_radians
-        self.grid = Grid2D.from_mask(mask=self.real_space_mask).in_radians
-        self.native_index_for_slim_index = copy.copy(
-            real_space_mask.derive_indexes.native_for_slim.astype("int")
-        )
-
-        # NOTE: The plan need only be initialized once
-        self.initialize_plan()
-
-        # ...
-        self.shift = np.exp(
-            -2.0
-            * np.pi
-            * 1j
-            * (
-                self.grid.pixel_scales[0]
-                / 2.0
-                * units.arcsec.to(units.rad)
-                * self.uv_wavelengths[:, 1]
-                + self.grid.pixel_scales[0]
-                / 2.0
-                * units.arcsec.to(units.rad)
-                * self.uv_wavelengths[:, 0]
-            )
-        )
-
-        # NOTE: If reshaped the shape of the operator is (2 x Nvis, Np) else it is (Nvis, Np)
-        self.total_visibilities = int(uv_wavelengths.shape[0] * uv_wavelengths.shape[1])
-
-        # NOTE: This is the scaling factor that needs to be applied to the adjoint operator
-        self.adjoint_scaling = (2.0 * self.grid.shape_native[0]) * (
-            2.0 * self.grid.shape_native[1]
-        )
-
-    def initialize_plan(self, ratio: int = 2, interp_kernel: Tuple[int, int] = (6, 6)):
-        """
-        Initializes the PyNUFFT plan for performing the NUFFT operation.
-
-        This method precomputes the interpolation structure and gridding
-        needed by the NUFFT algorithm to map between the regular real-space
-        image grid and the non-uniform uv-plane sampling defined by the
-        interferometric visibilities.
-
-        Parameters
-        ----------
-        ratio
-            The oversampling ratio used to pad the Fourier grid before interpolation.
-            A higher value improves accuracy at the cost of increased memory and computation.
-            Default is 2 (i.e., the Fourier grid is twice the size of the image grid).
-
-        interp_kernel
-            The interpolation kernel size along each axis, given as (Jy, Jx).
-            This determines how many neighboring Fourier grid points are used
-            to interpolate each uv-point.
-            Default is (6, 6), a good trade-off between accuracy and performance.
-
-        Notes
-        -----
-        - The uv-coordinates are normalized and rescaled into the range expected by PyNUFFT
-          using the real-space grid’s pixel scale and the Nyquist frequency limit.
-        - The plan must be initialized before performing any NUFFT operations (e.g., forward or adjoint).
-        - This method modifies the internal state of the NUFFT object by calling `self.plan(...)`.
-        """
-        from astropy import units
-
-        if not isinstance(ratio, int):
-            ratio = int(ratio)
-
-        # ... NOTE : The u,v coordinated should be given in the order ...
-        visibilities_normalized = np.array(
-            [
-                self.uv_wavelengths[:, 1]
-                / (1.0 / (2.0 * self.grid.pixel_scales[0] * units.arcsec.to(units.rad)))
-                * np.pi,
-                self.uv_wavelengths[:, 0]
-                / (1.0 / (2.0 * self.grid.pixel_scales[0] * units.arcsec.to(units.rad)))
-                * np.pi,
-            ]
-        ).T
-
-        # NOTE:
-        self.plan(
-            om=visibilities_normalized,
-            Nd=self.grid.shape_native,
-            Kd=(ratio * self.grid.shape_native[0], ratio * self.grid.shape_native[1]),
-            Jd=interp_kernel,
-        )
-
-    def _pynufft_forward_numpy(self, image_np: np.ndarray) -> np.ndarray:
-        """
-        NumPy-only forward NUFFT. Runs on host.
-        """
-        warnings.filterwarnings("ignore")
-
-        # Flip vertically (PyNUFFT internal convention)
-        image_np = image_np[::-1, :]
-
-        # PyNUFFT forward
-        vis = self.forward(image_np)
-
-        return vis
-
-    def visibilities_from_jax(self, image: np.ndarray) -> np.ndarray:
-        """
-        JAX-compatible wrapper around PyNUFFT forward.
-        Can be used inside jax.jit.
-        """
-
-        import jax
-        import jax.numpy as jnp
-        from jax import ShapeDtypeStruct
-
-        # You MUST tell JAX the output shape & dtype
-
-        out_shape = (self.total_visibilities // 2,)  # example
-        out_dtype = jnp.complex128
-
-        result_shape = ShapeDtypeStruct(
-            shape=out_shape,
-            dtype=out_dtype,
-        )
-
-        return jax.pure_callback(
-            lambda img: self._pynufft_forward_numpy(img),
-            result_shape,
-            image,
-            vmap_method="sequential",
-        )
-
-    def visibilities_from(self, image, xp=np):
-
-        # start with native image padded with zeros
-        image_native = xp.zeros(image.mask.shape, dtype=image.dtype)
-
-        if xp.__name__.startswith("jax"):
-
-            image_native = image_native.at[image.mask.slim_to_native_tuple].set(
-                image.array
-            )
-
-        else:
-
-            image_native = image.native.array
-
-        if xp is np:
-            warnings.filterwarnings("ignore")
-            return Visibilities(visibilities=self.forward(image_native[::-1, :]))
-
-        else:
-
-            vis = self.visibilities_from_jax(image_native)
-
-            return Visibilities(visibilities=vis)
-
-    def image_from(
-        self, visibilities: Visibilities, use_adjoint_scaling: bool = False, xp=np
-    ) -> Array2D:
-        """
-        Reconstructs a real-space image from visibilities using the NUFFT adjoint transform.
-
-        Parameters
-        ----------
-        visibilities
-            The complex visibilities in the uv-plane to be inverted.
-        use_adjoint_scaling
-            If True, apply a scaling factor to the adjoint result to improve accuracy.
-            Default is False.
-
-        Returns
-        -------
-        The reconstructed real-space image after applying the NUFFT adjoint transform.
-
-        Notes
-        -----
-        - The output image is flipped vertically to align with the input image orientation.
-        - Warnings during the adjoint operation are suppressed.
-        """
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            image = np.real(self.adjoint(visibilities.array))[::-1, :]
-
-        if use_adjoint_scaling:
-            image *= self.adjoint_scaling
-
-        return Array2D(values=image, mask=self.real_space_mask)
-
-    def transform_mapping_matrix(self, mapping_matrix: np.ndarray, xp=np) -> np.ndarray:
-        """
-        Applies the NUFFT forward transform to each column of a mapping matrix, producing transformed visibilities.
-
-        Parameters
-        ----------
-        mapping_matrix
-            A 2D array where each column corresponds to a source-plane pixel intensity distribution flattened into image space.
-
-        Returns
-        -------
-        A complex-valued 2D array where each column contains the visibilities corresponding to the respective column
-        in the input mapping matrix.
-
-        Notes
-        -----
-        - Each column of the input mapping matrix is reshaped into the native 2D image grid before transformation.
-        - This method repeatedly calls `visibilities_from` for each column, which may be computationally intensive.
-        """
-        transformed_mapping_matrix = 0 + 0j * xp.zeros(
-            (self.uv_wavelengths.shape[0], mapping_matrix.shape[1])
-        )
-
-        for source_pixel_1d_index in range(mapping_matrix.shape[1]):
-
-            image_2d = xp.zeros(self.grid.shape_native, dtype=mapping_matrix.dtype)
-
-            if xp.__name__.startswith("jax"):
-
-                image_2d = image_2d.at[self.grid.mask.slim_to_native_tuple].set(
-                    mapping_matrix[:, source_pixel_1d_index]
-                )
-
-            else:
-
-                image_2d[self.grid.mask.slim_to_native_tuple] = mapping_matrix[
-                    :, source_pixel_1d_index
-                ]
-
-            image = Array2D(values=image_2d, mask=self.grid.mask)
-
-            visibilities = self.visibilities_from(image=image, xp=xp)
-
-            if xp.__name__.startswith("jax"):
-                transformed_mapping_matrix = transformed_mapping_matrix.at[
-                    :, source_pixel_1d_index
-                ].set(visibilities.array)
-            else:
-                transformed_mapping_matrix[:, source_pixel_1d_index] = (
-                    visibilities.array
-                )
-
-        return transformed_mapping_matrix
-
-
 class TransformerNUFFT:
     def __init__(
         self,
@@ -596,8 +270,8 @@ class TransformerNUFFT:
         This is the default `TransformerNUFFT` in PyAutoArray. It uses the
         `nufftax` library (https://github.com/GragasLab/nufftax), a pure-JAX
         NUFFT implementation that supports `jax.jit`, `jax.grad`, and
-        `jax.vmap`. It replaces the legacy `TransformerNUFFTPyNUFFT` (which
-        wraps the non-differentiable `pynufft` library) as the default backend.
+        `jax.vmap`. Note that nufftax requires JAX; on platforms with no JAX
+        wheels (notably Intel macOS) use `TransformerDFT` instead.
 
         Convention recipe (matches `TransformerDFT` to ~1e-13 relative across
         odd/even/non-square image sizes):
@@ -612,7 +286,7 @@ class TransformerNUFFT:
 
         The `shift` factor is the half-pixel correction between autoarray's
         grid centre at index `(N - 1) / 2` and nufftax's mode-0 at index
-        `N // 2`; pynufft applies this internally, nufftax does not.
+        `N // 2`; nufftax does not apply it internally.
 
         Parameters
         ----------
@@ -743,9 +417,7 @@ class TransformerNUFFT:
         for k0 in range(0, K, cs):
             k1 = min(k0 + cs, K)
             vis = (
-                _nufftax.nufft2d2(
-                    self._x[k0:k1], self._y[k0:k1], img, self.eps, -1
-                )
+                _nufftax.nufft2d2(self._x[k0:k1], self._y[k0:k1], img, self.eps, -1)
                 * self._shift[k0:k1]
             )
             parts.append(np.asarray(vis))
@@ -783,25 +455,19 @@ class TransformerNUFFT:
 
         Implemented as `nufftax.nufft2d1` with `conj(shift)` applied to the
         visibilities and a final row-flip to return to autoarray's native
-        orientation. The real part is taken to discard imaginary residue,
-        matching the legacy class' behaviour.
+        orientation. The real part is taken to discard imaginary residue.
 
         Note that this is the **mathematical adjoint** of `visibilities_from`,
-        with no kernel deconvolution applied. The dirty image therefore
-        differs in absolute scale from the legacy `TransformerNUFFTPyNUFFT`
-        adjoint (which applies pynufft's internal IFFT and kernel
-        deconvolution). The structure of the dirty image is the same, and
-        the values match `TransformerDFT.image_from` exactly.
+        with no kernel deconvolution applied. The values match
+        `TransformerDFT.image_from` exactly.
 
         `use_adjoint_scaling` normalises the adjoint onto the common scale
         shared by every transformer. It is a no-op here (and for
-        `TransformerDFT`) because the nufftax adjoint is already the plain
-        mathematical adjoint, but it is load-bearing for
-        `TransformerNUFFTPyNUFFT`, whose pynufft-internal IFFT normalisation
-        leaves its raw adjoint a factor `4 * N_y * N_x` low. Do not remove it
-        as "unused" — `Interferometer.apply_sparse_operator` passes `True` so
-        the sparse-operator dirty image is scale-consistent across all three
-        transformers.
+        `TransformerDFT`) because both remaining adjoints are already the plain
+        mathematical adjoint; it is retained as a stable part of the
+        transformer interface. `Interferometer.apply_sparse_operator` passes
+        `True` so the sparse-operator dirty image is scale-consistent across
+        both transformers.
         """
         _load_nufftax()
 

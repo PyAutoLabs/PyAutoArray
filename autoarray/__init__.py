@@ -64,7 +64,6 @@ from .mask.mask_1d import Mask1D
 from .mask.mask_2d import Mask2D
 from .operators.transformer import TransformerDFT
 from .operators.transformer import TransformerNUFFT
-from .operators.transformer import TransformerNUFFTPyNUFFT
 from .operators.over_sampling.decorator import over_sample
 from .operators.contour import Grid2DContour
 from .layout.layout import Layout1D
