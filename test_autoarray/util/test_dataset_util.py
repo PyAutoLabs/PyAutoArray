@@ -112,6 +112,7 @@ from autoarray.util.dataset_util import (
     _is_small_datasets_on_disk,
     _on_disk_shape_native,
     _small_datasets_stamp_on_disk,
+    _stamp_contradicted_by_shape,
     SMALL_DATASETS_HEADER_KEY,
 )
 
@@ -389,7 +390,7 @@ def test__interferometer_shaped_dataset__stamp_catches_what_shape_cannot(
     #
     # Shape is provably blind to it; the stamp provably is not.
     monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
-    dataset_path = _write_dataset(tmp_path / "dataset", (2, 360))
+    dataset_path = _write_dataset(tmp_path / "dataset", (360, 2))
     monkeypatch.delenv("PYAUTO_SMALL_DATASETS", raising=False)
 
     # The heuristic that fixed the imaging case sees nothing wrong here.
@@ -412,3 +413,51 @@ def test__psf_carrying_dataset__is_not_deleted_by_a_glob(monkeypatch, tmp_path):
 
     assert should_simulate(str(dataset_path)) is False
     assert (dataset_path / "psf.fits").exists()
+
+
+def test__stamp_true_on_a_full_resolution_image__is_contradicted_and_kept(
+    monkeypatch, tmp_path
+):
+    # THE DATA-LOSS REGRESSION. A user converting real 300x300 telescope data in
+    # a shell exporting PYAUTO_SMALL_DATASETS=1 -- the documented harness
+    # default -- stamps T on full-resolution data. Acting on that stamp alone
+    # deletes their data, and the pre-stamp shape heuristic explicitly REFUSED
+    # to: a stamp-preferring rule must not be a strict weakening of the safety
+    # property PyAutoArray#471 established.
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
+    dataset_path = _write_dataset(tmp_path / "dataset", (300, 300))
+    monkeypatch.delenv("PYAUTO_SMALL_DATASETS", raising=False)
+
+    assert _small_datasets_stamp_on_disk(str(dataset_path)) is True
+    assert _is_small_datasets_on_disk(str(dataset_path)) is False  # #471 said keep
+    assert _stamp_contradicted_by_shape(str(dataset_path)) is True
+
+    assert should_simulate(str(dataset_path)) is False
+    assert (dataset_path / "data.fits").exists()
+
+
+def test__contradiction_guard__needs_BOTH_axes_over_the_cap(monkeypatch, tmp_path):
+    # Both axes, never either. Interferometer data.fits is (n_visibilities, 2) --
+    # 108384 x 2 for the committed sdp81 dataset -- so an "either axis" test
+    # would refuse to delete the exact family the stamp exists to catch.
+    monkeypatch.delenv("PYAUTO_SMALL_DATASETS", raising=False)
+
+    interferometer = _write_dataset(tmp_path / "interf", (108384, 2), stamp=True)
+    assert _stamp_contradicted_by_shape(str(interferometer)) is False
+
+    imaging = _write_dataset(tmp_path / "imaging", (151, 151), stamp=True)
+    assert _stamp_contradicted_by_shape(str(imaging)) is True
+
+    at_cap = _write_dataset(tmp_path / "at_cap", SMALL_DATASETS_SHAPE_NATIVE, stamp=True)
+    assert _stamp_contradicted_by_shape(str(at_cap)) is False
+
+
+def test__contradiction_guard__unknown_shape_does_not_block_a_deletion(
+    monkeypatch, tmp_path
+):
+    # The guard only ever BLOCKS a delete, so an unreadable file must not
+    # silently protect a dataset the stamp correctly identified as stale.
+    monkeypatch.delenv("PYAUTO_SMALL_DATASETS", raising=False)
+
+    missing = tmp_path / "gone"
+    assert _stamp_contradicted_by_shape(str(missing)) is False

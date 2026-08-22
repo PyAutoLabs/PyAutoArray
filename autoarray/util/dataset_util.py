@@ -171,6 +171,49 @@ def _is_small_datasets_on_disk(dataset_path):
     return _on_disk_shape_native(data_path) == SMALL_DATASETS_SHAPE_NATIVE
 
 
+def _stamp_contradicted_by_shape(dataset_path):
+    """
+    Returns True when ``data.fits`` claims ``SMALLDAT = T`` but its shape says it
+    cannot have been written by a capped run.
+
+    The stamp and this predicate are not about the same thing, and that gap is
+    the whole reason this guard exists. ``stamp_small_datasets_regime`` records
+    *"the env var was set in the writing process"*. ``should_simulate`` acts on
+    *"this data is capped, therefore stale and disposable"*. The library itself
+    already makes those two diverge:
+
+    - ``Kernel2D.from_gaussian`` passes ``respect_small_datasets=False``
+      (``convolver.py``) because a kernel's shape is intrinsic to the
+      convolution operator, so a PSF written under the cap is full resolution;
+    - ``Interferometer.from_fits`` applies no cap at all;
+    - and any user converting real telescope data in a shell that exports
+      ``PYAUTO_SMALL_DATASETS=1`` -- the documented harness default -- stamps
+      ``T`` on genuinely full-resolution data.
+
+    Every capped 2D image, by contrast, is rewritten to *exactly*
+    ``SMALL_DATASETS_SHAPE_NATIVE`` by ``Grid2D.uniform`` or ``Mask2D.circular``.
+    So a stamp of ``T`` on an image larger than the cap in **both** axes is a
+    self-contradiction, and a predicate ending in ``shutil.rmtree`` must resolve
+    a contradiction toward *keep*.
+
+    Both axes, never either: interferometer ``data.fits`` is ``(n_visibilities,
+    2)`` -- 108384 x 2 for the committed sdp81 dataset -- so an "either axis"
+    test would refuse to delete the one family the stamp exists to catch. Real
+    imaging (151x151, 209x209, 300x300) trips both and is protected.
+
+    Unknown shape means not contradicted: this guard only ever *blocks* a
+    deletion, so failing to read the file must not silently protect a genuinely
+    stale dataset the stamp correctly identified.
+    """
+    shape = _on_disk_shape_native(Path(dataset_path) / "data.fits")
+
+    return (
+        shape is not None
+        and shape[0] > SMALL_DATASETS_SHAPE_NATIVE[0]
+        and shape[1] > SMALL_DATASETS_SHAPE_NATIVE[1]
+    )
+
+
 def should_simulate(dataset_path):
     """
     Returns True if the dataset at ``dataset_path`` needs to be simulated.
@@ -211,7 +254,14 @@ def should_simulate(dataset_path):
     The stamp wins over the shape heuristic, and the three states are not
     interchangeable:
 
-    - ``SMALLDAT = T`` -- delete. The writer said so.
+    - ``SMALLDAT = T`` -- delete, **unless the data contradicts the card**. The
+      stamp is preferred over the shape heuristic but it is not unfalsifiable:
+      it records that the env var was set at write time, which is not the same
+      proposition as "this array was capped" (see
+      :func:`_stamp_contradicted_by_shape`). Without that corroboration this
+      predicate would delete a full-resolution dataset the pre-stamp heuristic
+      explicitly refused to delete -- a strict weakening of the safety property
+      PyAutoArray#471 established.
     - ``SMALLDAT = F`` -- **keep**, unconditionally, without consulting shape.
       This also retires a false positive in the heuristic: a dataset that is
       legitimately 16x16 at full resolution used to be deleted on every run.
@@ -274,13 +324,16 @@ def should_simulate(dataset_path):
     if Path(dataset_path).exists():
         stamp = _small_datasets_stamp_on_disk(dataset_path)
 
-        if stamp is True:
-            # Written by a capped run, on the writer's own authority.
+        if stamp is True and not _stamp_contradicted_by_shape(dataset_path):
+            # Written by a capped run, on the writer's own authority -- and the
+            # data does not contradict it.
             shutil.rmtree(dataset_path)
         elif stamp is None and _is_small_datasets_on_disk(dataset_path):
             # No stamp to trust, so fall back to inferring from shape.
             shutil.rmtree(dataset_path)
-        # stamp is False -> known full resolution -> keep it, unconditionally.
+        # stamp is False -> known full resolution -> keep.
+        # stamp is True but contradicted by the data -> keep. The stamp is
+        # preferred over the shape heuristic, but it is not unfalsifiable.
 
     return not Path(dataset_path).exists()
 
