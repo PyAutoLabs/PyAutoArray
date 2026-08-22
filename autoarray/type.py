@@ -1,7 +1,12 @@
 import numpy as np
 from typing import List, Tuple, Union
 
-PixelScales = Union[Tuple[float], Tuple[float, float], float]
+# A pixel scale may be given per-axis as a tuple, or as a single real scalar which
+# `geometry_util.convert_pixel_scales_{1d,2d}` widens to that tuple. The scalar forms are
+# listed out because the widening accepts any real scalar, not just an exact `float`.
+PixelScales = Union[
+    Tuple[float], Tuple[float, float], float, int, np.floating, np.integer
+]
 
 
 from autoarray.mask.mask_1d import Mask1D
