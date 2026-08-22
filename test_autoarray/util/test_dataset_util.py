@@ -113,6 +113,7 @@ from autoarray.util.dataset_util import (
     _on_disk_shape_native,
     _small_datasets_stamp_on_disk,
     _stamp_contradicted_by_shape,
+    _is_capped_at_the_current_cap,
     SMALL_DATASETS_HEADER_KEY,
 )
 
@@ -188,13 +189,88 @@ def test__small_regime__existing_full_dataset__is_deleted_and_resimulated(
     assert not dataset_path.exists()
 
 
-def test__small_regime__existing_small_dataset__is_still_deleted_and_resimulated(
+def test__small_regime__dataset_already_at_the_current_cap__is_kept(
     monkeypatch, tmp_path
 ):
-    # The small path is unconditional by design: it cannot know the capped
-    # dataset on disk was produced by the SAME cap, so it always regenerates.
+    # This branch used to be unconditional because it had no way to tell a
+    # dataset produced by the SAME cap from any other. The stamp gives it one,
+    # so an already-correct dataset is reused instead of re-simulated -- pure
+    # cost otherwise, on every smoke run across ~253 call sites.
     monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
-    dataset_path = _write_dataset(tmp_path / "dataset", SMALL_DATASETS_SHAPE_NATIVE)
+    dataset_path = _write_dataset(
+        tmp_path / "dataset", SMALL_DATASETS_SHAPE_NATIVE, stamp=True
+    )
+
+    assert should_simulate(str(dataset_path)) is False
+    assert (dataset_path / "data.fits").exists()
+
+
+def test__small_regime__stamped_capped_but_at_a_DIFFERENT_cap__is_regenerated(
+    monkeypatch, tmp_path
+):
+    # THE TRAP. `SMALLDAT = T` means "capped at whatever the cap was when this
+    # was written", NOT "capped at today's cap". Reusing on the stamp alone
+    # would silently feed stale wrong-sized data to a run that asked for a
+    # different cap -- the same silent-stale-dataset bug the stamp exists to
+    # prevent, reintroduced through the opposite branch.
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
+    other_cap = (SMALL_DATASETS_SHAPE_NATIVE[0] * 2, SMALL_DATASETS_SHAPE_NATIVE[1] * 2)
+    dataset_path = _write_dataset(tmp_path / "dataset", other_cap, stamp=True)
+
+    assert _small_datasets_stamp_on_disk(str(dataset_path)) is True  # claims capped
+    assert should_simulate(str(dataset_path)) is True  # but not at THIS cap
+    assert not dataset_path.exists()
+
+
+def test__small_regime__unstamped_legacy_dataset__is_regenerated(
+    monkeypatch, tmp_path
+):
+    # Every dataset written before the stamp landed is unstamped. Reuse requires
+    # positive evidence, so these keep the old always-regenerate behaviour.
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
+    dataset_path = _write_dataset(
+        tmp_path / "dataset", SMALL_DATASETS_SHAPE_NATIVE, stamp=None
+    )
+
+    assert should_simulate(str(dataset_path)) is True
+    assert not dataset_path.exists()
+
+
+def test__small_regime__full_resolution_dataset__is_regenerated(monkeypatch, tmp_path):
+    # A dataset stamped F is full resolution; the capped run needs a capped one.
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
+    dataset_path = _write_dataset(tmp_path / "dataset", (180, 180), stamp=False)
+
+    assert should_simulate(str(dataset_path)) is True
+    assert not dataset_path.exists()
+
+
+def test__small_regime__interferometer_dataset__is_always_regenerated(
+    monkeypatch, tmp_path
+):
+    # Deliberate and conservative. An interferometer data.fits is
+    # (n_visibilities, 2) -- its shape is fixed by the committed uv file and does
+    # not change under the cap -- so shape cannot corroborate its stamp. Rather
+    # than trust the stamp alone for precisely the family whose corruption is
+    # invisible, this family keeps regenerating every run, as before.
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
+    dataset_path = _write_dataset(tmp_path / "dataset", (360, 2), stamp=True)
+
+    assert _small_datasets_stamp_on_disk(str(dataset_path)) is True
+    assert should_simulate(str(dataset_path)) is True
+    assert not dataset_path.exists()
+
+
+def test__small_regime__dataset_with_no_top_level_data_fits__is_regenerated(
+    monkeypatch, tmp_path
+):
+    # JSON-only datasets, datacubes nesting FITS in channel_XXX/, multi_dataset's
+    # prefixed names: no readable data.fits means no positive evidence, so they
+    # regenerate exactly as they did before.
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
+    dataset_path = tmp_path / "dataset"
+    dataset_path.mkdir()
+    (dataset_path / "dataset.json").write_text("{}")
 
     assert should_simulate(str(dataset_path)) is True
     assert not dataset_path.exists()

@@ -214,6 +214,44 @@ def _stamp_contradicted_by_shape(dataset_path):
     )
 
 
+def _is_capped_at_the_current_cap(dataset_path):
+    """
+    Returns True only when the dataset on disk was written by a capped run
+    **and** was capped to the size in force right now.
+
+    Both halves are required, and the second is the one that is easy to drop.
+    ``SMALLDAT = T`` does not mean "capped at today's cap" -- it means "capped at
+    whatever ``SMALL_DATASETS_SHAPE_NATIVE`` was when this file was written". If
+    that constant is ever changed, every dataset already on disk goes on claiming
+    ``T`` at the old size, and reusing them on the stamp alone would silently
+    feed stale, wrong-sized data to a run that asked for the new cap -- the exact
+    class of silent-stale-dataset bug the stamp was introduced to prevent,
+    reintroduced through the opposite branch.
+
+    This is the mirror image of :func:`_stamp_contradicted_by_shape` on the
+    full-resolution branch, and it exists for the same reason: the stamp records
+    the writer's *environment*, not a measured property of the data. Neither
+    branch may treat it as unfalsifiable.
+
+    Interferometer datasets deliberately never satisfy this. Their ``data.fits``
+    is ``(n_visibilities, 2)`` -- its shape is fixed by the committed uv file and
+    does not change under the cap -- so shape cannot corroborate their stamp, and
+    a capped interferometer dataset is regenerated on every run exactly as it was
+    before. That is the conservative choice and it is deliberate: the alternative
+    is trusting the stamp alone for precisely the family whose corruption is
+    invisible.
+
+    Anything without a readable ``data.fits`` at the top level -- JSON-only
+    datasets, datacubes nesting theirs in ``channel_XXX/``, multi_dataset's
+    prefixed names -- also returns False and is regenerated, preserving today's
+    behaviour for the families this cannot speak about.
+    """
+    return (
+        _small_datasets_stamp_on_disk(dataset_path) is True
+        and _is_small_datasets_on_disk(dataset_path)
+    )
+
+
 def should_simulate(dataset_path):
     """
     Returns True if the dataset at ``dataset_path`` needs to be simulated.
@@ -223,10 +261,16 @@ def should_simulate(dataset_path):
     masks and grids to ``SMALL_DATASETS_SHAPE_NATIVE``. Both directions are
     checked:
 
-    - Entering the **small** regime, any existing dataset is deleted so the
+    - Entering the **small** regime, an existing dataset is deleted so the
       simulator re-creates it at the reduced resolution, avoiding shape
-      mismatches between full-resolution FITS on disk and the capped
-      mask/grid.
+      mismatches between full-resolution FITS on disk and the capped mask/grid.
+      It is **kept** only when it is already capped to the size in force now --
+      stamped ``SMALLDAT = T`` *and* measuring exactly
+      ``SMALL_DATASETS_SHAPE_NATIVE`` (:func:`_is_capped_at_the_current_cap`).
+      Before the stamp this branch was unconditional because it had no way to
+      tell a dataset produced by the same cap from one produced by a different
+      run; it does now, and re-simulating an already-correct dataset is pure
+      cost on every smoke run across the workspaces.
     - Entering the **full** regime, a dataset left behind by an earlier capped
       run is likewise deleted. Existence alone cannot distinguish the two, so
       the regime is taken from the ``SMALLDAT`` header card that
@@ -316,7 +360,9 @@ def should_simulate(dataset_path):
     that is true of weak lensing only.
     """
     if os.environ.get("PYAUTO_SMALL_DATASETS") == "1":
-        if Path(dataset_path).exists():
+        if Path(dataset_path).exists() and not _is_capped_at_the_current_cap(
+            dataset_path
+        ):
             shutil.rmtree(dataset_path)
 
         return not Path(dataset_path).exists()
