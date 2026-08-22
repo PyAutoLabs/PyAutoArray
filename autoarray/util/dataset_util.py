@@ -237,13 +237,21 @@ def should_simulate(dataset_path):
       subdirectories;
     - **multi_dataset** datasets, which prefix the name (``{waveband}_data.fits``);
     - **sample** datasets, which nest under ``dataset_N/``;
-    - weak-lensing ``simple`` datasets, which are JSON only and have no FITS to
-      stamp under any placement -- the one family a FITS-header stamp can never
-      reach.
+    - the two FITS-less directories, ``dataset/weak/simple`` and
+      ``dataset/point_source/multiple_sources``, which a FITS-header stamp
+      cannot reach under any placement.
 
     All of those fail *safe*: no ``data.fits`` means no stamp, which means
-    unknown, which means keep. Nothing is deleted that should not be. But the
-    stale-capped-dataset bug does survive in those families.
+    unknown, which means keep. Nothing is deleted that should not be.
+
+    Of those, only the first three can actually harbour the stale-capped-dataset
+    bug. The FITS-less pair, which look like the worst gap, are the least
+    urgent: ``dataset/weak/simple`` is regime-**invariant** -- nothing in its
+    write path reads ``PYAUTO_SMALL_DATASETS``, so a capped run and a full run
+    produce an identical ``dataset.json`` and there is nothing to detect -- and
+    ``dataset/point_source/multiple_sources``, which *is* regime-dependent, is
+    excluded from harness execution by ``config/build/no_run.yaml`` pending
+    PyAutoLens#480. Both of those facts will expire; see the follow-up.
 
     Widening the lookup is deliberately **not** done here. This predicate ends
     in ``shutil.rmtree``, and every trap recorded in autolens_workspace_test#260
