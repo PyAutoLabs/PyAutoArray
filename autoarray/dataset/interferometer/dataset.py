@@ -232,6 +232,21 @@ class Interferometer(AbstractDataset):
         the number of visibilities and the real-space mask resolution — potentially hours for large
         datasets). The result can be cached to disk and reloaded to avoid recomputation.
 
+        Both `TransformerDFT` and `TransformerNUFFT` are supported here and agree to ~3e-13 relative.
+        Which is faster is governed by the product `N_vis * N_pix`, because the DFT setup cost scales
+        as `O(N_vis * N_pix)` whereas the NUFFT scales as `O((N_vis + N_pix) log N)` on top of a fixed
+        ~2s overhead:
+
+        - below `N_vis * N_pix ~ 1e7`, `TransformerDFT` is faster (measured 0.2-0.7x the NUFFT time)
+        - above it, `TransformerNUFFT` is faster (1.2-1.9x at 1e7-1e8)
+        - above `~1e8`, the DFT's `O(N_vis * N_pix)` allocation makes it infeasible rather than merely
+          slow — extrapolating a measured 446 MB at N_vis=4e3 / N_pix=1e4 gives ~109 GB at 1M
+          visibilities, whereas the NUFFT path allocates nothing beyond its working buffers.
+
+        As a rule of thumb at a typical 64x64 mask the crossover sits near 5,000 visibilities, but on a
+        coarser mask the DFT stays ahead well beyond that — it is the product that matters, not the
+        visibility count alone.
+
         Parameters
         ----------
         nufft_precision_operator
@@ -263,6 +278,20 @@ class Interferometer(AbstractDataset):
             logger.info(
                 "INTERFEROMETER - Computing NUFFT Precision Operator; runtime scales with visibility count and mask resolution, CPU run times may exceed hours."
             )
+
+            n_vis = self.uv_wavelengths.shape[0]
+            n_pix = self.real_space_mask.pixels_in_mask
+
+            if n_vis * n_pix < 10**7 and not isinstance(
+                self.transformer, TransformerDFT
+            ):
+                logger.info(
+                    f"INTERFEROMETER - This dataset is small for the NUFFT setup path "
+                    f"(N_vis x N_pix = {n_vis * n_pix:.1e}, below the ~1e7 crossover). "
+                    f"`TransformerDFT` computes this operator faster below that point; "
+                    f"`TransformerNUFFT` wins above it, and above ~1e8 it is the only "
+                    f"option that fits in memory. Both are supported here."
+                )
 
             nufft_precision_operator = self.psf_precision_operator_from(
                 chunk_k=chunk_k,
