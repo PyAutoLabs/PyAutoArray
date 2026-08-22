@@ -111,10 +111,41 @@ from autoarray.util.dataset_util import (
     should_simulate,
     _is_small_datasets_on_disk,
     _on_disk_shape_native,
+    _small_datasets_stamp_on_disk,
+    SMALL_DATASETS_HEADER_KEY,
 )
 
-def _write_dataset(dataset_path, shape, extra_files=()):
-    """Write a minimal dataset directory containing a `data.fits` of `shape`."""
+def _set_stamp(file_path, stamp):
+    """
+    Force the ``SMALLDAT`` provenance card on an already-written FITS file.
+
+    ``aa.output_to_fits`` stamps whatever regime is in force when it runs, which
+    is not always the regime a test needs the file to claim. The three values:
+
+    - ``True`` / ``False`` -- overwrite the card, so a test can write a dataset
+      that *claims* a regime independently of the env it was written under.
+    - ``None`` -- strip the card, producing a **legacy** file byte-equivalent to
+      one written before PyAutoNerves#153. This is what keeps the shape-based
+      fallback exercised; without it the fallback would silently become dead
+      code and every pre-stamp dataset on disk would lose its protection.
+    """
+    from astropy.io import fits
+
+    with fits.open(file_path, mode="update") as hdu_list:
+        for hdu in hdu_list:
+            if stamp is None:
+                hdu.header.pop(SMALL_DATASETS_HEADER_KEY, None)
+            else:
+                hdu.header[SMALL_DATASETS_HEADER_KEY] = stamp
+
+
+def _write_dataset(dataset_path, shape, extra_files=(), stamp="auto"):
+    """
+    Write a minimal dataset directory containing a `data.fits` of `shape`.
+
+    ``stamp="auto"`` leaves whatever regime was in force at write time; any
+    other value is forced onto the header via :func:`_set_stamp`.
+    """
     dataset_path.mkdir(parents=True, exist_ok=True)
 
     aa.output_to_fits(
@@ -122,6 +153,9 @@ def _write_dataset(dataset_path, shape, extra_files=()):
         file_path=str(dataset_path / "data.fits"),
         overwrite=True,
     )
+
+    if stamp != "auto":
+        _set_stamp(dataset_path / "data.fits", stamp)
 
     for name, file_shape in extra_files:
         aa.output_to_fits(
@@ -158,13 +192,53 @@ def test__small_regime__existing_small_dataset__is_still_deleted_and_resimulated
 def test__full_regime__stale_small_dataset__is_deleted_and_resimulated(
     monkeypatch, tmp_path
 ):
-    # THE REGRESSION TEST. Before the fix this returned False and the capped
-    # FITS were loaded at full resolution.
-    monkeypatch.delenv("PYAUTO_SMALL_DATASETS", raising=False)
+    # THE REGRESSION TEST. Before autolens_workspace_test#260 this returned
+    # False and the capped FITS were loaded at full resolution.
+    #
+    # The dataset is WRITTEN under the cap so it carries a truthful
+    # ``SMALLDAT = T``, then read back in the full regime -- the actual
+    # sequence that produced the bug. Writing it with the env unset would
+    # stamp it ``F`` and describe a dataset that cannot exist.
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
     dataset_path = _write_dataset(tmp_path / "dataset", SMALL_DATASETS_SHAPE_NATIVE)
+    monkeypatch.delenv("PYAUTO_SMALL_DATASETS", raising=False)
 
     assert should_simulate(str(dataset_path)) is True
     assert not dataset_path.exists()
+
+
+def test__full_regime__stale_small_dataset__no_stamp__shape_fallback_still_deletes(
+    monkeypatch, tmp_path
+):
+    # The fallback is NOT throwaway work: every dataset already on disk when
+    # the stamp landed is unstamped, and the stamp can do nothing for those.
+    # A legacy capped dataset must still be caught by its shape.
+    monkeypatch.delenv("PYAUTO_SMALL_DATASETS", raising=False)
+    dataset_path = _write_dataset(
+        tmp_path / "dataset", SMALL_DATASETS_SHAPE_NATIVE, stamp=None
+    )
+
+    assert _small_datasets_stamp_on_disk(str(dataset_path)) is None
+    assert should_simulate(str(dataset_path)) is True
+    assert not dataset_path.exists()
+
+
+def test__full_regime__full_dataset_at_cap_shape__stamp_keeps_it(
+    monkeypatch, tmp_path
+):
+    # The stamp RETIRES a false positive in the shape heuristic. A dataset that
+    # is legitimately 16x16 at full resolution is indistinguishable from a
+    # capped one by shape alone, so the heuristic deleted it on every single
+    # run. A truthful ``SMALLDAT = F`` is the only thing that can save it --
+    # and it must win WITHOUT the shape check getting a vote.
+    monkeypatch.delenv("PYAUTO_SMALL_DATASETS", raising=False)
+    dataset_path = _write_dataset(
+        tmp_path / "dataset", SMALL_DATASETS_SHAPE_NATIVE, stamp=False
+    )
+
+    assert _is_small_datasets_on_disk(str(dataset_path)) is True
+    assert should_simulate(str(dataset_path)) is False
+    assert (dataset_path / "data.fits").exists()
 
 
 def test__full_regime__full_dataset__is_kept(monkeypatch, tmp_path):
@@ -273,3 +347,68 @@ def test__on_disk_shape_native__is_row_column_ordered(tmp_path):
     dataset_path = _write_dataset(tmp_path / "dataset", (30, 50))
 
     assert _on_disk_shape_native(dataset_path / "data.fits") == (30, 50)
+
+
+def test__stamp_reader__non_boolean_card__is_unknown_not_true(monkeypatch, tmp_path):
+    # bool("F") is True in Python. A string card left by a hand-edit or a
+    # third-party tool must therefore NEVER be coerced: doing so would report
+    # "capped" for a file claiming the opposite and feed that to shutil.rmtree.
+    # Only a genuine FITS boolean counts; anything else is unknown.
+    monkeypatch.delenv("PYAUTO_SMALL_DATASETS", raising=False)
+    dataset_path = _write_dataset(tmp_path / "dataset", (180, 180))
+    _set_stamp(dataset_path / "data.fits", "F")
+
+    assert _small_datasets_stamp_on_disk(str(dataset_path)) is None
+    assert should_simulate(str(dataset_path)) is False
+    assert (dataset_path / "data.fits").exists()
+
+
+def test__stamp_reader__unreadable_and_missing__are_unknown(monkeypatch, tmp_path):
+    # "Unknown regime" must mean "leave it alone", never "delete".
+    monkeypatch.delenv("PYAUTO_SMALL_DATASETS", raising=False)
+
+    missing = tmp_path / "no_such_dataset"
+    assert _small_datasets_stamp_on_disk(str(missing)) is None
+
+    corrupt = tmp_path / "corrupt"
+    corrupt.mkdir()
+    (corrupt / "data.fits").write_text("this is not a FITS file")
+    assert _small_datasets_stamp_on_disk(str(corrupt)) is None
+    assert should_simulate(str(corrupt)) is False
+    assert (corrupt / "data.fits").exists()
+
+
+def test__interferometer_shaped_dataset__stamp_catches_what_shape_cannot(
+    monkeypatch, tmp_path
+):
+    # THE CASE THIS TASK EXISTS FOR. An interferometer dataset's visibility
+    # count is fixed by the committed uv file while the real-space grid behind
+    # it is capped, so a capped run writes a data.fits with IDENTICAL NAXIS and
+    # different values. There is no shape mismatch and no assertion to trip --
+    # it fails silently, which is strictly worse than the loud imaging failure.
+    #
+    # Shape is provably blind to it; the stamp provably is not.
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
+    dataset_path = _write_dataset(tmp_path / "dataset", (2, 360))
+    monkeypatch.delenv("PYAUTO_SMALL_DATASETS", raising=False)
+
+    # The heuristic that fixed the imaging case sees nothing wrong here.
+    assert _is_small_datasets_on_disk(str(dataset_path)) is False
+    # The stamp does.
+    assert _small_datasets_stamp_on_disk(str(dataset_path)) is True
+    assert should_simulate(str(dataset_path)) is True
+    assert not dataset_path.exists()
+
+
+def test__psf_carrying_dataset__is_not_deleted_by_a_glob(monkeypatch, tmp_path):
+    # Guards the predecessor's trap: PSF kernels are legitimately tiny at full
+    # resolution, so anything keying on "the first FITS in the directory"
+    # instead of data.fits by name would delete every PSF-carrying dataset on
+    # every run. The stamp path must not reintroduce that.
+    monkeypatch.delenv("PYAUTO_SMALL_DATASETS", raising=False)
+    dataset_path = _write_dataset(
+        tmp_path / "dataset", (180, 180), extra_files=(("psf.fits", (11, 11)),)
+    )
+
+    assert should_simulate(str(dataset_path)) is False
+    assert (dataset_path / "psf.fits").exists()
