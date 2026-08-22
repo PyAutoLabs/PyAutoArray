@@ -862,6 +862,14 @@ class AbstractInversion:
           `cond ~ 1e12`, against ~3e-16 for the Cholesky solve), while a covariance matrix is symmetric by
           definition.
 
+        Every failure mode raises `LinAlgError`, including a non-finite `curvature_reg_matrix`. That case is
+        checked explicitly because scipy would otherwise raise `ValueError`, which the callers -- here and
+        downstream -- do not catch; the previous implementation returned a silently all-`NaN` matrix instead.
+
+        The matrix is symmetrized on input. `cho_factor` reads only the upper triangle, so an asymmetric input
+        would otherwise be inverted as though its lower triangle matched, silently and with no diagnostic.
+        `curvature_reg_matrix` is `F + H` and symmetric by construction, so this is defensive only.
+
         This property is NumPy-only: the input is coerced with `np.asarray`, so a JAX `curvature_reg_matrix`
         forces a device-to-host transfer. It is a post-fit diagnostic, not part of the likelihood, so it is not on
         the JIT path.
@@ -874,8 +882,21 @@ class AbstractInversion:
 
         matrix = np.asarray(self.curvature_reg_matrix)
 
+        if not np.isfinite(matrix).all():
+            raise np.linalg.LinAlgError(
+                "The curvature_reg_matrix contains non-finite entries (NaN or inf), so the reconstruction "
+                "covariance is undefined. Raised as LinAlgError so the plotting and CSV callers, which guard "
+                "on LinAlgError, degrade gracefully rather than aborting the model-fit."
+            )
+
+        # cho_factor reads only the upper triangle; symmetrize so an asymmetric input cannot be silently
+        # inverted as though its lower triangle matched its upper.
+        matrix = 0.5 * (matrix + matrix.T)
+
         covariance = cho_solve(
-            cho_factor(matrix), np.eye(matrix.shape[0], dtype=matrix.dtype)
+            cho_factor(matrix, check_finite=False),
+            np.eye(matrix.shape[0], dtype=matrix.dtype),
+            check_finite=False,
         )
 
         # cho_solve is accurate but not bitwise symmetric; a covariance matrix is symmetric by definition.
@@ -924,6 +945,12 @@ class AbstractInversion:
 
         It is computed as the square root of the diagonal of `reconstruction_covariance_matrix`, which is the
         inverse of the same matrix used to solve for the reconstruction via the linear inversion.
+
+        This previously took the diagonal of an elementwise-square-rooted matrix. The two are algebraically
+        identical -- `np.sqrt` is elementwise, so it commutes with taking the diagonal -- but only numerically
+        equivalent, since the covariance is now formed by Cholesky rather than LU. The difference is
+        conditioning-limited roundoff, measured at ~7e-15 relative at `cond ~ 1e3` rising to ~4e-5 at
+        `cond ~ 1e13`; neither result is the more correct one.
 
         Returns
         -------
