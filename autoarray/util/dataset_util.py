@@ -69,24 +69,120 @@ def cap_array_2d_for_small_datasets(array_2d, pixel_scales):
     )
 
 
+def _on_disk_shape_native(data_path):
+    """
+    Returns the ``(rows, columns)`` shape of the first 2D image in the FITS file
+    at ``data_path``, or ``None`` if that cannot be determined.
+
+    Only the headers are read, never the pixel data, so this costs a single
+    small read regardless of dataset size.
+
+    ``None`` means "unknown", and every caller must treat it as "leave the
+    dataset alone" — this function feeds a destructive predicate, so an
+    unreadable or unconventional file must never be grounds for deleting it.
+    """
+    from astropy.io import fits
+
+    try:
+        with fits.open(data_path) as hdu_list:
+            for hdu in hdu_list:
+                header = hdu.header
+                if header.get("NAXIS") == 2:
+                    # NAXIS1 is the fastest-varying axis (columns), NAXIS2 the
+                    # rows, so the numpy-order shape is (NAXIS2, NAXIS1).
+                    return (header["NAXIS2"], header["NAXIS1"])
+    except Exception:
+        return None
+
+    return None
+
+
+def _is_small_datasets_on_disk(dataset_path):
+    """
+    Returns True if the dataset on disk at ``dataset_path`` was written by a
+    simulator running under ``PYAUTO_SMALL_DATASETS=1``.
+
+    The regime is not recorded anywhere on disk, so it is inferred from the
+    shape of ``data.fits``: the cap in ``Mask2D.circular`` / ``Grid2D.uniform``
+    rewrites anything larger than ``SMALL_DATASETS_SHAPE_NATIVE`` to *exactly*
+    that shape, so an on-disk ``data.fits`` at exactly (16, 16) can only have
+    come from a capped run.
+
+    Three deliberate narrownesses, all of them because this predicate ends in
+    ``shutil.rmtree`` and a false positive silently deletes a user's data:
+
+    - **Exactly** the cap shape, never "at or below" it. The cap cannot emit
+      12x12, so widening the test buys no detection and only adds risk.
+    - **``data.fits`` by name**, never "the first FITS in the directory". PSF
+      kernels are legitimately tiny at full resolution (11x11 is common), and a
+      glob would regenerate every dataset carrying one on every single run.
+    - **Unknown means no.** A missing, unreadable or non-2D ``data.fits``
+      returns False, preserving the existence-only behaviour for the dataset
+      families this cannot speak about (see the caveat in ``should_simulate``).
+    """
+    data_path = Path(dataset_path) / "data.fits"
+
+    if not data_path.exists():
+        return False
+
+    return _on_disk_shape_native(data_path) == SMALL_DATASETS_SHAPE_NATIVE
+
+
 def should_simulate(dataset_path):
     """
     Returns True if the dataset at ``dataset_path`` needs to be simulated.
 
-    When ``PYAUTO_SMALL_DATASETS=1`` is active, any existing dataset
-    is deleted so the simulator re-creates it at the reduced resolution.  This
-    avoids shape mismatches between full-resolution FITS files on disk and the
-    15x15 mask/grid cap applied by the env var.
+    A dataset is invalid when it was simulated under a different resolution
+    regime than the one in force now, because ``PYAUTO_SMALL_DATASETS=1`` caps
+    masks and grids to ``SMALL_DATASETS_SHAPE_NATIVE``. Both directions are
+    checked:
+
+    - Entering the **small** regime, any existing dataset is deleted so the
+      simulator re-creates it at the reduced resolution, avoiding shape
+      mismatches between full-resolution FITS on disk and the capped
+      mask/grid.
+    - Entering the **full** regime, a dataset left behind by an earlier capped
+      run is likewise deleted. Existence alone cannot distinguish the two, so
+      the regime is inferred from the data on disk
+      (``_is_small_datasets_on_disk``).
+
+    That second check is what makes a local FAIL mean something. ``dataset/``
+    is gitignored in the workspaces, so CI clones fresh and always simulates,
+    while a local checkout keeps its dataset indefinitely — and since
+    ``PYAUTO_SMALL_DATASETS=1`` is the default for most harness runs, a single
+    earlier run would leave capped FITS that every later full-resolution run
+    then loaded silently, producing deterministic, environment-only failures
+    that could not be reproduced in CI (autolens_workspace_test#260).
 
     Use this as a drop-in replacement for ``not path.exists(dataset_path)`` in
     the workspace auto-simulation pattern::
 
         if aa.util.dataset.should_simulate(dataset_path):
             subprocess.run([sys.executable, "scripts/.../simulator.py"], check=True)
+
+    Known gap
+    ---------
+    The full-regime check reads ``data.fits``, so it covers imaging-style
+    datasets only. It cannot see a stale capped dataset whose corruption is not
+    visible in that file's shape:
+
+    - point-source and weak-lensing datasets, which are JSON with no FITS;
+    - interferometer datasets, whose visibility count is fixed by the uv file
+      while the real-space grid behind it is capped, so the capped and full
+      files share a shape and differ only in values.
+
+    Those regress to the previous existence-only behaviour rather than being
+    fixed here. Closing them needs the regime recorded at write time rather
+    than inferred at read time.
     """
     if os.environ.get("PYAUTO_SMALL_DATASETS") == "1":
         if Path(dataset_path).exists():
             shutil.rmtree(dataset_path)
+
+        return not Path(dataset_path).exists()
+
+    if Path(dataset_path).exists() and _is_small_datasets_on_disk(dataset_path):
+        shutil.rmtree(dataset_path)
 
     return not Path(dataset_path).exists()
 
