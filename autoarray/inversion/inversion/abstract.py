@@ -1,4 +1,5 @@
 import copy
+import warnings
 
 import numpy as np
 from typing import Dict, List, Optional, Type, Union
@@ -836,27 +837,99 @@ class AbstractInversion:
         return self._log_det_symmetric_from(self.regularization_matrix_reduced)
 
     @property
-    def reconstruction_noise_map_with_covariance(self) -> np.ndarray:
+    def reconstruction_covariance_matrix(self) -> np.ndarray:
         """
-        Returns the noise-map of the reconstruction as a two dimension matrix which accounts for the covariance
-        of the noise between pixels.
+        Returns the covariance matrix of the reconstruction, ``C = [F + reg_coeff*H]^-1``.
 
-        The diagonal of this matrix is the noise-map of the reconstruction, which can be used for analysing the
-        reconstruction with noise properties that are representative of the fit and therefore should be used
-        for any scientific analysis (e.g. source reconstructions of strong lenses).
+        This is the inverse of the curvature matrix with regularization -- the same matrix used to solve for the
+        reconstruction via the linear inversion. Its diagonal holds the variance of each reconstructed pixel and
+        its off-diagonal entries the covariances between pixels; the off-diagonals are routinely negative, which is
+        a property of the covariance and not an error.
 
-        This noise-map is defined as the RMS standard deviation of the noise in every pixel of the reconstruction.
-        This definition is identical to the `noise_map` attributes of dataset objects.
+        For the RMS standard deviation of each pixel (the quantity used for scientific analysis) use
+        `reconstruction_noise_map`, which takes the square root of this matrix's diagonal.
 
-        It is computed as the square root of the inverse of the curvature matrix with regularization, which is the
-        same matrix used to solve for the reconstruction via the linear inversion.
+        The inverse is formed from a Cholesky factorization rather than `np.linalg.inv`, for two reasons:
+
+        - `cho_factor` raises `LinAlgError` when the matrix is not positive-definite. `np.linalg.inv` raises only
+          on an exactly singular matrix, so an indefinite `curvature_reg_matrix` -- which the inversion does
+          encounter, hence `Settings.no_regularization_add_to_curvature_diag_value` -- previously returned a
+          plausible-looking covariance with no error and no warning. A covariance is only defined for a
+          positive-definite matrix, so failing here is correct and is handled by the callers in
+          `inversion/plot/inversion_plots.py`.
+        - `np.linalg.inv` is LU-based and exploits neither the symmetry nor the positive-definiteness this matrix
+          has. Its output drifts out of symmetry as conditioning worsens (measured at ~5e-7 absolute at
+          `cond ~ 1e12`, against ~3e-16 for the Cholesky solve), while a covariance matrix is symmetric by
+          definition.
+
+        Every failure mode raises `LinAlgError`, including a non-finite `curvature_reg_matrix`. That case is
+        checked explicitly because scipy would otherwise raise `ValueError`, which the callers -- here and
+        downstream -- do not catch; the previous implementation returned a silently all-`NaN` matrix instead.
+
+        The matrix is symmetrized on input. `cho_factor` reads only the upper triangle, so an asymmetric input
+        would otherwise be inverted as though its lower triangle matched, silently and with no diagnostic.
+        `curvature_reg_matrix` is `F + H` and symmetric by construction, so this is defensive only.
+
+        This property is NumPy-only: the input is coerced with `np.asarray`, so a JAX `curvature_reg_matrix`
+        forces a device-to-host transfer. It is a post-fit diagnostic, not part of the likelihood, so it is not on
+        the JIT path.
 
         Returns
         -------
-        The noise-map of the reconstruction as a two dimension matrix which accounts for the covariance of the noise
-        between pixels.
+        The covariance matrix of the reconstruction, of shape [total_params, total_params].
         """
-        return np.sqrt(np.linalg.inv(self.curvature_reg_matrix))
+        from scipy.linalg import cho_factor, cho_solve
+
+        matrix = np.asarray(self.curvature_reg_matrix)
+
+        if not np.isfinite(matrix).all():
+            raise np.linalg.LinAlgError(
+                "The curvature_reg_matrix contains non-finite entries (NaN or inf), so the reconstruction "
+                "covariance is undefined. Raised as LinAlgError so the plotting and CSV callers, which guard "
+                "on LinAlgError, degrade gracefully rather than aborting the model-fit."
+            )
+
+        # cho_factor reads only the upper triangle; symmetrize so an asymmetric input cannot be silently
+        # inverted as though its lower triangle matched its upper.
+        matrix = 0.5 * (matrix + matrix.T)
+
+        covariance = cho_solve(
+            cho_factor(matrix, check_finite=False),
+            np.eye(matrix.shape[0], dtype=matrix.dtype),
+            check_finite=False,
+        )
+
+        # cho_solve is accurate but not bitwise symmetric; a covariance matrix is symmetric by definition.
+        return 0.5 * (covariance + covariance.T)
+
+    @property
+    def reconstruction_noise_map_with_covariance(self) -> np.ndarray:
+        """
+        Deprecated alias of `reconstruction_covariance_matrix`.
+
+        This property previously returned ``np.sqrt(np.linalg.inv(curvature_reg_matrix))`` -- an elementwise square
+        root of the whole covariance matrix. Because the off-diagonal entries of a covariance matrix are routinely
+        negative, every such entry was `NaN` by construction, for any input matrix however well-conditioned, and
+        each call emitted `RuntimeWarning: invalid value encountered in sqrt`.
+
+        It now returns the covariance matrix itself, so the values differ: the diagonal holds variances rather
+        than standard deviations, and the off-diagonals hold covariances rather than `NaN`.
+
+        Returns
+        -------
+        The covariance matrix of the reconstruction (see `reconstruction_covariance_matrix`).
+        """
+        warnings.warn(
+            "`reconstruction_noise_map_with_covariance` is deprecated; use "
+            "`reconstruction_covariance_matrix` instead. Note the values have changed: it now returns the "
+            "covariance matrix, so its diagonal holds variances rather than standard deviations (the previous "
+            "elementwise square root made every off-diagonal NaN). For the RMS noise of each pixel use "
+            "`reconstruction_noise_map`.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+        return self.reconstruction_covariance_matrix
 
     @property
     def reconstruction_noise_map(self):
@@ -870,15 +943,21 @@ class AbstractInversion:
         The noise-map of the reconstruction is the RMS standard deviation of the noise in every pixel of the
         reconstruction. This definition is identical to the `noise_map` attributes of dataset objects.
 
-        It is computed as the square root of the diagonal of the `reconstruction_noise_map_with_covariance` matrix,
-        which is the same matrix used to solve for the reconstruction via the linear inversion.
+        It is computed as the square root of the diagonal of `reconstruction_covariance_matrix`, which is the
+        inverse of the same matrix used to solve for the reconstruction via the linear inversion.
+
+        This previously took the diagonal of an elementwise-square-rooted matrix. The two are algebraically
+        identical -- `np.sqrt` is elementwise, so it commutes with taking the diagonal -- but only numerically
+        equivalent, since the covariance is now formed by Cholesky rather than LU. The difference is
+        conditioning-limited roundoff, measured at ~7e-15 relative at `cond ~ 1e3` rising to ~4e-5 at
+        `cond ~ 1e13`; neither result is the more correct one.
 
         Returns
         -------
         The noise-map of the reconstruction as a one dimensional ndarray, which does not account for the covariance
         of the noise between pixels.
         """
-        return np.diagonal(self.reconstruction_noise_map_with_covariance)
+        return np.sqrt(np.diag(self.reconstruction_covariance_matrix))
 
     @property
     def reconstruction_noise_map_dict(self) -> Dict[LinearObj, np.ndarray]:

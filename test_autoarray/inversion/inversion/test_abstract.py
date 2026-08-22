@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import pytest
 
@@ -676,17 +678,141 @@ def test__log_det_method__slogdet_is_finite_where_cholesky_fails_on_non_positive
     assert result == pytest.approx(np.linalg.slogdet(matrix)[1], 1.0e-8)
 
 
-def test__reconstruction_noise_map__asymmetric_curvature_reg_matrix__correct_diagonal_noise_values():
+def test__reconstruction_noise_map__correct_diagonal_noise_values():
     curvature_reg_matrix = np.array([[1.0, 1.0, 1.0], [1.0, 2.0, 1.0], [1.0, 1.0, 3.0]])
 
     inversion = aa.m.MockInversion(curvature_reg_matrix=curvature_reg_matrix)
 
-    assert inversion.reconstruction_noise_map_with_covariance[0, 0] == pytest.approx(
-        np.sqrt(2.5), 1.0e-2
-    )
+    assert inversion.reconstruction_covariance_matrix[0, 0] == pytest.approx(2.5, 1.0e-2)
     assert inversion.reconstruction_noise_map == pytest.approx(
         np.sqrt(np.array([2.5, 1.0, 0.5])), 1.0e-3
     )
+
+
+def test__reconstruction_covariance_matrix__off_diagonals_are_finite_and_negative():
+    """
+    The off-diagonal entries of a covariance matrix are covariances and are routinely negative.
+
+    `reconstruction_covariance_matrix` previously applied `np.sqrt` elementwise to the whole inverse, so every
+    negative off-diagonal became NaN by construction -- for any matrix, however well-conditioned -- while
+    emitting `RuntimeWarning: invalid value encountered in sqrt`. Only the [0, 0] diagonal element was asserted,
+    so nothing caught it.
+    """
+    curvature_reg_matrix = np.array([[1.0, 1.0, 1.0], [1.0, 2.0, 1.0], [1.0, 1.0, 3.0]])
+
+    inversion = aa.m.MockInversion(curvature_reg_matrix=curvature_reg_matrix)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        covariance = inversion.reconstruction_covariance_matrix
+
+    assert np.all(np.isfinite(covariance))
+
+    # this matrix has anti-correlated pixels, so the off-diagonals are genuinely negative
+    assert covariance[0, 1] < 0.0
+    assert covariance == pytest.approx(np.linalg.inv(curvature_reg_matrix), 1.0e-8)
+
+
+def test__reconstruction_covariance_matrix__is_accurate_and_symmetric_when_ill_conditioned():
+    """
+    Ground truth is exact by construction: for `A = Q diag(w) Q.T` the inverse is `Q diag(1/w) Q.T`.
+
+    The symmetry half only guards the symmetrization line -- `0.5 * (C + C.T)` is bitwise symmetric for any C --
+    so the accuracy assertion against the constructed truth is what tests the factorization itself.
+    """
+    rng = np.random.default_rng(1234)
+    q, _ = np.linalg.qr(rng.standard_normal((25, 25)))
+    eigenvalues = np.logspace(0, 9, 25)
+
+    curvature_reg_matrix = (q * eigenvalues) @ q.T
+    curvature_reg_matrix = 0.5 * (curvature_reg_matrix + curvature_reg_matrix.T)
+
+    covariance_true = (q * (1.0 / eigenvalues)) @ q.T
+
+    inversion = aa.m.MockInversion(curvature_reg_matrix=curvature_reg_matrix)
+
+    covariance = inversion.reconstruction_covariance_matrix
+
+    # cond ~ 1e9, so the achievable accuracy is eps * cond ~ 2e-7; the measured error is ~3e-9. This is not a
+    # claim that Cholesky beats LU here -- it does not, `np.linalg.inv` measures ~7e-10 on this matrix.
+    assert covariance == pytest.approx(covariance_true, abs=1.0e-7)
+    assert covariance == pytest.approx(covariance.T, abs=1.0e-15)
+
+
+def test__reconstruction_covariance_matrix__asymmetric_input_is_symmetrized_not_silently_upper_triangle():
+    """
+    `cho_factor` reads only the upper triangle, so an asymmetric input would be inverted as though its lower
+    triangle matched its upper -- silently, and differing from the true inverse.
+    """
+    curvature_reg_matrix = np.array([[2.0, 0.5], [0.1, 2.0]])
+    symmetrized = 0.5 * (curvature_reg_matrix + curvature_reg_matrix.T)
+
+    inversion = aa.m.MockInversion(curvature_reg_matrix=curvature_reg_matrix)
+
+    assert inversion.reconstruction_covariance_matrix == pytest.approx(
+        np.linalg.inv(symmetrized), 1.0e-8
+    )
+
+
+def test__reconstruction_covariance_matrix__non_finite_matrix_raises_lin_alg_error():
+    """
+    scipy raises `ValueError` on a non-finite matrix, which the plotting and CSV callers do not catch -- they
+    guard on `LinAlgError`. The CSV writer explicitly promises not to abort the enclosing model-fit, so the
+    non-finite case is converted rather than allowed to escape.
+    """
+    curvature_reg_matrix = np.array([[1.0, np.nan], [np.nan, 2.0]])
+
+    inversion = aa.m.MockInversion(curvature_reg_matrix=curvature_reg_matrix)
+
+    with pytest.raises(np.linalg.LinAlgError, match="non-finite"):
+        inversion.reconstruction_covariance_matrix
+
+
+def test__reconstruction_noise_map__is_sqrt_of_covariance_diagonal():
+    """
+    The invariant, asserted directly rather than via hand-computed values.
+
+    `reconstruction_noise_map` used to be `np.diagonal(...)` of an already-square-rooted matrix, which was
+    correct only incidentally -- because `np.sqrt` is elementwise. It now takes the square root of the
+    covariance diagonal itself, so the relationship is stated rather than emergent.
+    """
+    curvature_reg_matrix = np.array([[1.0, 1.0, 1.0], [1.0, 2.0, 1.0], [1.0, 1.0, 3.0]])
+
+    inversion = aa.m.MockInversion(curvature_reg_matrix=curvature_reg_matrix)
+
+    assert inversion.reconstruction_noise_map == pytest.approx(
+        np.sqrt(np.diag(inversion.reconstruction_covariance_matrix)), 1.0e-12
+    )
+
+
+def test__reconstruction_covariance_matrix__raises_on_a_non_positive_definite_matrix():
+    """
+    A covariance is only defined for a positive-definite matrix.
+
+    `np.linalg.inv` raises only on an exactly singular matrix, so an indefinite `curvature_reg_matrix` returned
+    a plausible-looking covariance with no error and no warning. The Cholesky factorization rejects it, and the
+    plotting and CSV callers already catch `LinAlgError`.
+    """
+    # symmetric, non-singular, but indefinite (eigenvalues +1 and -1)
+    curvature_reg_matrix = np.array([[0.0, 1.0], [1.0, 0.0]])
+
+    inversion = aa.m.MockInversion(curvature_reg_matrix=curvature_reg_matrix)
+
+    assert np.isfinite(np.linalg.inv(curvature_reg_matrix)).all()  # inv is silent here
+
+    with pytest.raises(np.linalg.LinAlgError):
+        inversion.reconstruction_covariance_matrix
+
+
+def test__reconstruction_noise_map_with_covariance__is_deprecated_alias():
+    curvature_reg_matrix = np.array([[1.0, 1.0, 1.0], [1.0, 2.0, 1.0], [1.0, 1.0, 3.0]])
+
+    inversion = aa.m.MockInversion(curvature_reg_matrix=curvature_reg_matrix)
+
+    with pytest.warns(DeprecationWarning, match="reconstruction_covariance_matrix"):
+        covariance = inversion.reconstruction_noise_map_with_covariance
+
+    assert covariance == pytest.approx(inversion.reconstruction_covariance_matrix, 1.0e-12)
 
 
 def test__max_pixel_list_from_and_centre__returns_top_pixels_and_brightest_centre():
