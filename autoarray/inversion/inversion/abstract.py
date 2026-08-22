@@ -952,6 +952,34 @@ class AbstractInversion:
         conditioning-limited roundoff, measured at ~7e-15 relative at `cond ~ 1e3` rising to ~4e-5 at
         `cond ~ 1e13`; neither result is the more correct one.
 
+        Caveat -- this is the uncertainty of the UNCONSTRAINED solve
+        ------------------------------------------------------------
+        `reconstruction_covariance_matrix` is `[F + reg_coeff*H]^-1`, the posterior covariance of the
+        positive-negative (unconstrained) solution of Warren & Dye (2003) eq. 12. But
+        `Settings.use_positive_only_solver` defaults to `True`, so the reconstruction is normally a
+        non-negative least-squares solve. Constraining `s >= 0` truncates the posterior, and a truncated
+        Gaussian's covariance is not the untruncated one, so this **overstates** the per-pixel uncertainty --
+        by more for pixels near the `s = 0` boundary, and it is not meaningful at all for pixels the solver
+        pinned at exactly zero.
+
+        The size of the discrepancy was measured on real ray-traced lens fits (`Isothermal` + shear,
+        `RectangularBilinearAdaptDensity`, `Constant` regularization). It depends strongly on the
+        regularization coefficient, and the Bayesian evidence -- which is what a model-fit maximises when
+        choosing that coefficient -- happens to select the regime where it is small:
+
+        - At the evidence-optimal coefficient, this noise map is overstated by a median factor of ~1.01
+          (extended source) to ~1.26 (very compact source), with individual pixels up to ~2x. Source flux
+          and magnification computed through a `S/N >= 5` cut moved by 0.0% to -1.3%.
+        - At coefficients well below the evidence optimum (an under-regularized fit) the factor grows to
+          ~2.8 median and ~10x on individual pixels.
+
+        So for most fits this is a small, one-directional (conservative) bias. Treat per-pixel error bars on
+        a very compact source as good to a few tens of percent rather than exact, and be more careful if the
+        regularization coefficient came out well below its evidence optimum.
+
+        Note that restricting the covariance to the solver's free set is **not** the correction: that treats
+        the active set as known and so understates. The two bracket the true truncated-Gaussian posterior.
+
         Returns
         -------
         The noise-map of the reconstruction as a one dimensional ndarray, which does not account for the covariance
