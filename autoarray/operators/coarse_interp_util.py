@@ -17,7 +17,6 @@ https://github.com/caoxiaoyue/potential_correction_paper.
 """
 
 import numpy as np
-from scipy.sparse import csr_matrix
 
 from autoarray import exc
 from autoarray import numba_util
@@ -242,6 +241,8 @@ def coarse_interp_matrix_from(
     A ``scipy.sparse.csr_matrix`` of shape
     [n_unmasked_fine_pixels, n_unmasked_coarse_pixels].
     """
+    from scipy.sparse import csr_matrix
+
     mask_itp_box = np.asarray(mask_itp_box)
     if np.count_nonzero(~mask_itp_box) == 0:
         raise exc.MeshException(
