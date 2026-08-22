@@ -143,8 +143,6 @@ class TransformerDFT:
             The precomputed sine terms used in the imaginary part of the DFT.
         real_space_pixels : int
             Alias for `total_image_pixels`.
-        adjoint_scaling : float
-            Scaling factor applied to the adjoint operator to normalize the inverse transform.
         """
         super().__init__()
 
@@ -154,11 +152,6 @@ class TransformerDFT:
 
         self.total_visibilities = uv_wavelengths.shape[0]
         self.total_image_pixels = self.real_space_mask.pixels_in_mask
-
-        # NOTE: This is the scaling factor that needs to be applied to the adjoint operator
-        self.adjoint_scaling = (2.0 * self.grid.shape_native[0]) * (
-            2.0 * self.grid.shape_native[1]
-        )
 
     def visibilities_from(self, image: Array2D, xp=np) -> Visibilities:
         """
@@ -187,9 +180,7 @@ class TransformerDFT:
 
         return Visibilities(visibilities=visibilities)
 
-    def image_from(
-        self, visibilities: Visibilities, use_adjoint_scaling: bool = False, xp=np
-    ) -> Array2D:
+    def image_from(self, visibilities: Visibilities, xp=np) -> Array2D:
         """
         Computes the real-space image from a set of visibilities using the adjoint of the DFT.
 
@@ -201,14 +192,6 @@ class TransformerDFT:
         ----------
         visibilities
             The complex visibilities to be transformed into a real-space image.
-        use_adjoint_scaling
-            If True, normalise the adjoint output onto the common scale shared by
-            every transformer (that of the plain mathematical adjoint). Both
-            remaining transformers already return the plain mathematical
-            adjoint, so this is a no-op for each of them; it is retained as a
-            stable part of the transformer interface. See `Interferometer.
-            apply_sparse_operator`, which passes `True` so the sparse-operator
-            dirty image is scale-consistent across both transformers.
 
         Returns
         -------
@@ -322,10 +305,6 @@ class TransformerNUFFT:
             Number of measured visibilities.
         total_image_pixels
             Number of unmasked pixels in the image grid.
-        adjoint_scaling
-            Scaling factor available for callers who want to apply an
-            optional normalisation to the adjoint output. Provided for
-            parity with the legacy class.
         """
         from astropy import units
 
@@ -362,7 +341,6 @@ class TransformerNUFFT:
 
         self.total_visibilities = uv_wavelengths.shape[0]
         self.total_image_pixels = real_space_mask.pixels_in_mask
-        self.adjoint_scaling = (2.0 * n_y) * (2.0 * n_x)
 
     def _forward_native(self, image_native_2d, xp=np):
         """Run nufft2d2 on a 2D native-shape image array, returning visibilities.
@@ -447,7 +425,6 @@ class TransformerNUFFT:
     def image_from(
         self,
         visibilities: Visibilities,
-        use_adjoint_scaling: bool = False,
         xp=np,
     ) -> Array2D:
         """
@@ -459,15 +436,9 @@ class TransformerNUFFT:
 
         Note that this is the **mathematical adjoint** of `visibilities_from`,
         with no kernel deconvolution applied. The values match
-        `TransformerDFT.image_from` exactly.
-
-        `use_adjoint_scaling` normalises the adjoint onto the common scale
-        shared by every transformer. It is a no-op here (and for
-        `TransformerDFT`) because both remaining adjoints are already the plain
-        mathematical adjoint; it is retained as a stable part of the
-        transformer interface. `Interferometer.apply_sparse_operator` passes
-        `True` so the sparse-operator dirty image is scale-consistent across
-        both transformers.
+        `TransformerDFT.image_from` exactly, which is what makes
+        `Interferometer.apply_sparse_operator` scale-consistent across both
+        transformers.
         """
         _load_nufftax()
 
