@@ -274,7 +274,6 @@ class Interferometer(AbstractDataset):
         dirty_image = self.transformer.image_from(
             visibilities=self.data.real * self.noise_map.real**-2.0
             + 1j * self.data.imag * self.noise_map.imag**-2.0,
-            use_adjoint_scaling=True,
         )
 
         sparse_operator = inversion_interferometer_util.InterferometerSparseOperator.from_nufft_precision_operator(
