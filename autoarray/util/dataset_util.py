@@ -354,10 +354,28 @@ def should_simulate(dataset_path):
     the reach of a destructive predicate is its own change, with its own review,
     not a rider on the one that changes where its input comes from.
 
-    Note that point-source datasets are **not** in this gap: they write a
-    top-level ``data.fits`` alongside their JSON and are covered normally. The
-    original issue text grouped them with weak lensing as "JSON with no FITS";
-    that is true of weak lensing only.
+    Note that point-source datasets are **not** in this gap *in
+    ``autolens_workspace``*: there they write a top-level ``data.fits`` alongside
+    their JSON and are covered normally. The original issue text grouped them
+    with weak lensing as "JSON with no FITS"; that is true of weak lensing only
+    in that repo.
+
+    It is **not** true everywhere, and the exception is not hypothetical.
+    Whether a dataset family is reachable by the stamp is decided per repository
+    by that repo's ``.gitignore``, never by the family name.
+    ``autolens_workspace_test`` lists ``data.fits`` under "Generated artifacts —
+    never check in", so its ``dataset/point_source/simple`` is three tracked JSON
+    files and nothing else -- no stamp can exist there under any placement, and
+    the capped branch deleted that committed, allowlist-protected directory on
+    every smoke run (PyAutoArray#470, fixed workspace-side in
+    autolens_workspace_test#264).
+
+    So do not read this paragraph as "point-source is safe". Read it as "point
+    source is safe wherever a top-level ``data.fits`` is actually written".
+    ``PyAutoHands``' ``check_dataset_allowlist`` guard now fails a ``pre_build``
+    run when a ``should_simulate`` call site that has not released
+    ``PYAUTO_SMALL_DATASETS`` would delete git-tracked files, which is the
+    check this docstring cannot itself enforce.
     """
     if os.environ.get("PYAUTO_SMALL_DATASETS") == "1":
         if Path(dataset_path).exists() and not _is_capped_at_the_current_cap(
