@@ -79,8 +79,8 @@ def test__inversion_subplot_of_mapper__singular_curvature_reg_matrix(
 
     monkeypatch.setattr(
         type(inversion),
-        "reconstruction_noise_map_with_covariance",
-        property(lambda self: np.sqrt(np.linalg.inv(np.zeros((params, params))))),
+        "reconstruction_covariance_matrix",
+        property(lambda self: np.linalg.inv(np.zeros((params, params)))),
     )
 
     with pytest.raises(np.linalg.LinAlgError):
@@ -107,8 +107,8 @@ def test__save_reconstruction_csv__singular_curvature_reg_matrix(
 
     monkeypatch.setattr(
         type(inversion),
-        "reconstruction_noise_map_with_covariance",
-        property(lambda self: np.sqrt(np.linalg.inv(np.zeros((params, params))))),
+        "reconstruction_covariance_matrix",
+        property(lambda self: np.linalg.inv(np.zeros((params, params)))),
     )
 
     with pytest.raises(np.linalg.LinAlgError):
