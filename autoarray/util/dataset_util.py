@@ -6,6 +6,14 @@ from pathlib import Path
 SMALL_DATASETS_SHAPE_NATIVE = (16, 16)
 SMALL_DATASETS_PIXEL_SCALES = 0.6
 
+# The FITS header card ``autonerves.fitsable.stamp_small_datasets_regime`` writes
+# on every array the stack outputs. Deliberately duplicated here rather than
+# imported: ``pyproject.toml`` floors autonerves at a release that predates the
+# stamp, so an import would hard-fail against a legitimately-resolved older
+# autonerves. Reading the card by name degrades to "absent" instead, which is
+# exactly the fallback path below. Keep in sync with PyAutoNerves#153.
+SMALL_DATASETS_HEADER_KEY = "SMALLDAT"
+
 
 def cap_array_2d_for_small_datasets(array_2d, pixel_scales):
     """
@@ -97,6 +105,41 @@ def _on_disk_shape_native(data_path):
     return None
 
 
+def _small_datasets_stamp_on_disk(dataset_path):
+    """
+    Returns the small-datasets regime recorded in ``data.fits``'s header, as a
+    tri-state: ``True`` (written by a capped run), ``False`` (written at full
+    resolution), or ``None`` (no usable stamp -- unknown).
+
+    ``None`` is returned for a missing file, an unreadable file, a file with no
+    ``SMALLDAT`` card, **and** a card whose value is not a genuine FITS boolean.
+    That last case is not pedantry: ``bool("F")`` is ``True`` in Python, so
+    coercing a hand-edited or third-party string card would invert the regime
+    and hand a ``True`` to a predicate that ends in ``shutil.rmtree``. A card
+    this code did not write is not a card this code can trust.
+
+    Callers must treat ``None`` as "leave the dataset alone" and fall back to
+    :func:`_is_small_datasets_on_disk`. Unknown must never mean "full".
+    """
+    from astropy.io import fits
+
+    data_path = Path(dataset_path) / "data.fits"
+
+    if not data_path.exists():
+        return None
+
+    try:
+        with fits.open(data_path) as hdu_list:
+            for hdu in hdu_list:
+                value = hdu.header.get(SMALL_DATASETS_HEADER_KEY)
+                if isinstance(value, bool):
+                    return value
+    except Exception:
+        return None
+
+    return None
+
+
 def _is_small_datasets_on_disk(dataset_path):
     """
     Returns True if the dataset on disk at ``dataset_path`` was written by a
@@ -128,6 +171,49 @@ def _is_small_datasets_on_disk(dataset_path):
     return _on_disk_shape_native(data_path) == SMALL_DATASETS_SHAPE_NATIVE
 
 
+def _stamp_contradicted_by_shape(dataset_path):
+    """
+    Returns True when ``data.fits`` claims ``SMALLDAT = T`` but its shape says it
+    cannot have been written by a capped run.
+
+    The stamp and this predicate are not about the same thing, and that gap is
+    the whole reason this guard exists. ``stamp_small_datasets_regime`` records
+    *"the env var was set in the writing process"*. ``should_simulate`` acts on
+    *"this data is capped, therefore stale and disposable"*. The library itself
+    already makes those two diverge:
+
+    - ``Kernel2D.from_gaussian`` passes ``respect_small_datasets=False``
+      (``convolver.py``) because a kernel's shape is intrinsic to the
+      convolution operator, so a PSF written under the cap is full resolution;
+    - ``Interferometer.from_fits`` applies no cap at all;
+    - and any user converting real telescope data in a shell that exports
+      ``PYAUTO_SMALL_DATASETS=1`` -- the documented harness default -- stamps
+      ``T`` on genuinely full-resolution data.
+
+    Every capped 2D image, by contrast, is rewritten to *exactly*
+    ``SMALL_DATASETS_SHAPE_NATIVE`` by ``Grid2D.uniform`` or ``Mask2D.circular``.
+    So a stamp of ``T`` on an image larger than the cap in **both** axes is a
+    self-contradiction, and a predicate ending in ``shutil.rmtree`` must resolve
+    a contradiction toward *keep*.
+
+    Both axes, never either: interferometer ``data.fits`` is ``(n_visibilities,
+    2)`` -- 108384 x 2 for the committed sdp81 dataset -- so an "either axis"
+    test would refuse to delete the one family the stamp exists to catch. Real
+    imaging (151x151, 209x209, 300x300) trips both and is protected.
+
+    Unknown shape means not contradicted: this guard only ever *blocks* a
+    deletion, so failing to read the file must not silently protect a genuinely
+    stale dataset the stamp correctly identified.
+    """
+    shape = _on_disk_shape_native(Path(dataset_path) / "data.fits")
+
+    return (
+        shape is not None
+        and shape[0] > SMALL_DATASETS_SHAPE_NATIVE[0]
+        and shape[1] > SMALL_DATASETS_SHAPE_NATIVE[1]
+    )
+
+
 def should_simulate(dataset_path):
     """
     Returns True if the dataset at ``dataset_path`` needs to be simulated.
@@ -143,8 +229,11 @@ def should_simulate(dataset_path):
       mask/grid.
     - Entering the **full** regime, a dataset left behind by an earlier capped
       run is likewise deleted. Existence alone cannot distinguish the two, so
-      the regime is inferred from the data on disk
-      (``_is_small_datasets_on_disk``).
+      the regime is taken from the ``SMALLDAT`` header card that
+      ``autonerves.fitsable`` stamps into every FITS the stack writes
+      (``_small_datasets_stamp_on_disk``), falling back to inferring it from
+      the data's shape (``_is_small_datasets_on_disk``) for datasets written
+      before that stamp existed.
 
     That second check is what makes a local FAIL mean something. ``dataset/``
     is gitignored in the workspaces, so CI clones fresh and always simulates,
@@ -160,20 +249,71 @@ def should_simulate(dataset_path):
         if aa.util.dataset.should_simulate(dataset_path):
             subprocess.run([sys.executable, "scripts/.../simulator.py"], check=True)
 
+    Precedence
+    ----------
+    The stamp wins over the shape heuristic, and the three states are not
+    interchangeable:
+
+    - ``SMALLDAT = T`` -- delete, **unless the data contradicts the card**. The
+      stamp is preferred over the shape heuristic but it is not unfalsifiable:
+      it records that the env var was set at write time, which is not the same
+      proposition as "this array was capped" (see
+      :func:`_stamp_contradicted_by_shape`). Without that corroboration this
+      predicate would delete a full-resolution dataset the pre-stamp heuristic
+      explicitly refused to delete -- a strict weakening of the safety property
+      PyAutoArray#471 established.
+    - ``SMALLDAT = F`` -- **keep**, unconditionally, without consulting shape.
+      This also retires a false positive in the heuristic: a dataset that is
+      legitimately 16x16 at full resolution used to be deleted on every run.
+    - **absent** -- unknown, so fall back to the shape heuristic. Absence must
+      never be read as "full resolution": every dataset written before the
+      stamp landed is absent, and treating those as full would resurrect the
+      original bug.
+
+    Interferometer datasets are covered by the stamp and were not covered
+    before: their visibility count is fixed by the committed uv file while the
+    real-space grid behind it is capped, so a capped run writes a ``data.fits``
+    with *identical* ``NAXIS`` and different values. That fails silently -- no
+    shape mismatch, no assertion -- which is why a shape heuristic could never
+    reach it (PyAutoNerves#153).
+
     Known gap
     ---------
-    The full-regime check reads ``data.fits``, so it covers imaging-style
-    datasets only. It cannot see a stale capped dataset whose corruption is not
-    visible in that file's shape:
+    This reads ``<dataset_path>/data.fits`` and nothing else, which covers
+    roughly 228 of the 253 ``should_simulate`` call sites in autolens_workspace.
+    The rest have no file of that name at that level and so get no verdict:
 
-    - point-source and weak-lensing datasets, which are JSON with no FITS;
-    - interferometer datasets, whose visibility count is fixed by the uv file
-      while the real-space grid behind it is capped, so the capped and full
-      files share a shape and differ only in values.
+    - interferometer **datacube** datasets, whose FITS sit in ``channel_XXX/``
+      subdirectories;
+    - **multi_dataset** datasets, which prefix the name (``{waveband}_data.fits``);
+    - **sample** datasets, which nest under ``dataset_N/``;
+    - the two FITS-less directories, ``dataset/weak/simple`` and
+      ``dataset/point_source/multiple_sources``, which a FITS-header stamp
+      cannot reach under any placement.
 
-    Those regress to the previous existence-only behaviour rather than being
-    fixed here. Closing them needs the regime recorded at write time rather
-    than inferred at read time.
+    All of those fail *safe*: no ``data.fits`` means no stamp, which means
+    unknown, which means keep. Nothing is deleted that should not be.
+
+    Of those, only the first three can actually harbour the stale-capped-dataset
+    bug. The FITS-less pair, which look like the worst gap, are the least
+    urgent: ``dataset/weak/simple`` is regime-**invariant** -- nothing in its
+    write path reads ``PYAUTO_SMALL_DATASETS``, so a capped run and a full run
+    produce an identical ``dataset.json`` and there is nothing to detect -- and
+    ``dataset/point_source/multiple_sources``, which *is* regime-dependent, is
+    excluded from harness execution by ``config/build/no_run.yaml`` pending
+    PyAutoLens#480. Both of those facts will expire; see the follow-up.
+
+    Widening the lookup is deliberately **not** done here. This predicate ends
+    in ``shutil.rmtree``, and every trap recorded in autolens_workspace_test#260
+    was about a widened match hitting a file it should not have -- a bare
+    ``*.fits`` glob would delete every PSF-carrying dataset on every run. Growing
+    the reach of a destructive predicate is its own change, with its own review,
+    not a rider on the one that changes where its input comes from.
+
+    Note that point-source datasets are **not** in this gap: they write a
+    top-level ``data.fits`` alongside their JSON and are covered normally. The
+    original issue text grouped them with weak lensing as "JSON with no FITS";
+    that is true of weak lensing only.
     """
     if os.environ.get("PYAUTO_SMALL_DATASETS") == "1":
         if Path(dataset_path).exists():
@@ -181,8 +321,19 @@ def should_simulate(dataset_path):
 
         return not Path(dataset_path).exists()
 
-    if Path(dataset_path).exists() and _is_small_datasets_on_disk(dataset_path):
-        shutil.rmtree(dataset_path)
+    if Path(dataset_path).exists():
+        stamp = _small_datasets_stamp_on_disk(dataset_path)
+
+        if stamp is True and not _stamp_contradicted_by_shape(dataset_path):
+            # Written by a capped run, on the writer's own authority -- and the
+            # data does not contradict it.
+            shutil.rmtree(dataset_path)
+        elif stamp is None and _is_small_datasets_on_disk(dataset_path):
+            # No stamp to trust, so fall back to inferring from shape.
+            shutil.rmtree(dataset_path)
+        # stamp is False -> known full resolution -> keep.
+        # stamp is True but contradicted by the data -> keep. The stamp is
+        # preferred over the shape heuristic, but it is not unfalsifiable.
 
     return not Path(dataset_path).exists()
 
