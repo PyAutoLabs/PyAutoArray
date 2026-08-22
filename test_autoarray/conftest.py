@@ -290,8 +290,8 @@ def pytest_collection_modifyitems(config, items):
     ``TransformerNUFFT``, backed by the optional ``nufftax`` dependency. When
     that backend is absent, any test that builds a default interferometer or
     transformer raises ``ModuleNotFoundError`` at construction. Skip exactly
-    those tests while keeping the explicit ``DFT`` and ``pynufft`` transformer
-    tests, which have no ``nufftax`` dependency.
+    those tests while keeping the explicit ``DFT`` transformer tests, which
+    have no ``nufftax`` dependency.
     """
     try:
         import nufftax  # noqa: F401
@@ -305,8 +305,8 @@ def pytest_collection_modifyitems(config, items):
     )
     for item in items:
         name = item.nodeid.rsplit("::", 1)[-1]
-        # Explicit DFT / pynufft backend tests do not use nufftax — keep them.
-        if "__dft__" in name or "pynufft" in name:
+        # Explicit DFT backend tests do not use nufftax — keep them.
+        if "__dft__" in name:
             continue
         nodeid = item.nodeid.replace("\\", "/")
         needs_nufftax = (
