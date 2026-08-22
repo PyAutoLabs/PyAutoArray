@@ -3,7 +3,7 @@ psf:
 inversion:
   check_reconstruction: true          # If True, the inversion's reconstruction is checked to ensure the solution of a meshs's mapper is not an invalid solution where the values are all the same.
   use_positive_only_solver: true      # If True, inversion's use a positive-only linear algebra solver by default, which is slower but prevents unphysical negative values in the reconstructed solutuion.
-  use_edge_zeroed_pixels : true       # If True, the edge pixels of a pixelization are set to zero, which prevents unphysical values in the reconstructed solution at the edge of the pixelization.
+  use_edge_zeroed_pixels : true       # If True, the edge pixels of a pixelization are set to zero, which prevents unphysical values in the reconstructed solution at the edge of the pixelization. NOTE: this is applied ONLY when use_positive_only_solver is True -- with the positive-negative solver it has no effect. That scoping is deliberate, not an oversight.
   no_regularization_add_to_curvature_diag_value : 1.0e-3 # The default value added to the curvature matrix's diagonal when regularization is not applied to a linear object, which prevents inversion's failing due to the matrix being singular.
   use_border_relocator: false          # If True, by default a pixelization's border is used to relocate all pixels outside its border to the border.
   nnls_jacobi_preconditioning: true   # If True (default), the curvature matrix passed to jaxnnls.solve_nnls_primal is Jacobi-preconditioned (D Q D y = D q, x = D y). Fixes NaN backward-pass gradients on ill-conditioned Q and roughly halves forward solve time. Set False to restore the raw unpreconditioned solve.

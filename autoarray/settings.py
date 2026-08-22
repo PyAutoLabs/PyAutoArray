@@ -169,6 +169,17 @@ class Settings:
 
     @property
     def use_edge_zeroed_pixels(self):
+        """
+        Whether a mesh's edge pixels are excluded from the inversion and fixed to zero.
+
+        This is consulted **only when `use_positive_only_solver` is `True`**. Under the
+        positive-negative solver the full system is solved and this setting has no effect, so the two
+        are not independent switches despite reading that way in `config/general.yaml`.
+
+        That scoping is deliberate. It is called out here because the nesting is not visible from the
+        config, and has been mistaken for a bug (a setting "silently ignored") by someone reading the
+        control flow in `AbstractInversion.reconstruction` without it.
+        """
         if self._use_edge_zeroed_pixels is None:
             return conf.instance["general"]["inversion"]["use_edge_zeroed_pixels"]
 
