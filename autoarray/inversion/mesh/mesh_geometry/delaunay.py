@@ -1,5 +1,4 @@
 import numpy as np
-import scipy.spatial
 from typing import Tuple
 
 from autonerves import cached_property
@@ -147,6 +146,7 @@ class MeshGeometryDelaunay(AbstractMeshGeometry):
         The neighbors of a Voronoi mesh are computed using the `ridge_points` attribute of the scipy `Voronoi`
         object, as described in the method `voronoi_neighbors_from`.
         """
+        import scipy.spatial
 
         delaunay = scipy.spatial.Delaunay(self.mesh_grid_xy)
 

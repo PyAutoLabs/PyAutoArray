@@ -27,7 +27,6 @@ Conventions (matching the rest of autoarray):
 """
 
 import numpy as np
-from scipy.sparse import csr_matrix
 
 from autoarray import exc
 from autoarray import numba_util
@@ -297,9 +296,11 @@ def derivative_1st_operators_from(mask, pixel_scale: float = 1.0):
     -------
     The (Hy, Hx) operators as ``scipy.sparse.csr_matrix``.
     """
+    from scipy.sparse import csr_matrix
+
     mask, diff_types = _diff_types_of_cleaned_mask_from(mask)
-    rows_hx, cols_hx, data_hx, rows_hy, cols_hy, data_hy = (
-        derivative_1st_triplets_from(mask, diff_types, dpix=pixel_scale)
+    rows_hx, cols_hx, data_hx, rows_hy, cols_hy, data_hy = derivative_1st_triplets_from(
+        mask, diff_types, dpix=pixel_scale
     )
 
     n_unmasked = np.count_nonzero(~mask)
@@ -443,6 +444,8 @@ def derivative_2nd_operators_from(mask, pixel_scale: float = 1.0):
     -------
     The (Hyy, Hxx) operators as ``scipy.sparse.csr_matrix``.
     """
+    from scipy.sparse import csr_matrix
+
     mask, diff_types = _diff_types_of_cleaned_mask_from(mask)
     rows_hxx, cols_hxx, data_hxx, rows_hyy, cols_hyy, data_hyy = (
         derivative_2nd_triplets_from(mask, diff_types, dpix=pixel_scale)
@@ -574,6 +577,8 @@ def forward_difference_operators_from(
     -------
     The (Hy, Hx) operators as ``scipy.sparse.csr_matrix``.
     """
+    from scipy.sparse import csr_matrix
+
     if max_order not in (1, 2, 3, 4):
         raise ValueError(f"max_order must be in 1..4, got {max_order}")
 
