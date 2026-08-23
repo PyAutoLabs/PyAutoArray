@@ -7,11 +7,19 @@ SMALL_DATASETS_SHAPE_NATIVE = (16, 16)
 SMALL_DATASETS_PIXEL_SCALES = 0.6
 
 # The FITS header card ``autonerves.fitsable.stamp_small_datasets_regime`` writes
-# on every array the stack outputs. Deliberately duplicated here rather than
-# imported: ``pyproject.toml`` floors autonerves at a release that predates the
-# stamp, so an import would hard-fail against a legitimately-resolved older
-# autonerves. Reading the card by name degrades to "absent" instead, which is
-# exactly the fallback path below. Keep in sync with PyAutoNerves#153.
+# on every array the stack outputs. Still deliberately duplicated here rather
+# than imported, though the original reason has expired: the floor in
+# ``pyproject.toml`` now names a stamped release, so importing the constant
+# would resolve. The reason it stays a literal is what the floor does NOT
+# cover. A floor constrains dependency *resolution* only; an editable checkout,
+# a ``pip install --no-deps``, or a hand-built virtualenv can still put a
+# pre-stamp autonerves on the path. Under this literal such an autonerves
+# yields "card absent" and the reader falls through to the shape heuristic
+# below — the safe direction, and the same path every pre-stamp dataset on disk
+# already takes. Under an import it would be an ``ImportError`` at module load.
+# Trading a silent-safe degradation for a hard failure to delete one string is
+# the wrong way round, so the duplication is kept on purpose.
+# Keep in sync with PyAutoNerves#153.
 SMALL_DATASETS_HEADER_KEY = "SMALLDAT"
 
 
