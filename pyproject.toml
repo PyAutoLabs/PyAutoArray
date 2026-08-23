@@ -27,7 +27,14 @@ dependencies = [
     # Floor, not a pin (PyAutoLens#687) — bump to the first release with JAX
     # in autonerves' base dependencies once it exists (PyAutoLens#702), so
     # backtracking cannot pair this autoarray with a jax-optional autonerves.
-    "autonerves>=2026.8.22.1",
+    #
+    # It ALSO floors the SMALLDAT regime stamp (PyAutoNerves#153/#154), first
+    # released in 2026.8.23.1. Below that release autonerves' FITS writer emits
+    # no card at all, so should_simulate reads the regime as "unknown" and falls
+    # back to the shape heuristic -- which cannot see capped interferometer
+    # datasets, the case the stamp exists for. Both reasons are load-bearing:
+    # neither replaces the other, so do not drop either when next bumping.
+    "autonerves>=2026.8.23.1",
     "astropy>=5.0",
     "decorator>=4.0.0",
     "dill>=0.3.1.1",
