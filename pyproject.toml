@@ -24,10 +24,22 @@ classifiers = [
 ]
 keywords = ["cli"]
 dependencies = [
-    # Floor, not a pin (PyAutoLens#687) — bump to the first release with JAX
-    # in autonerves' base dependencies once it exists (PyAutoLens#702), so
-    # backtracking cannot pair this autoarray with a jax-optional autonerves.
-    "autonerves>=2026.8.22.1",
+    # Floor, not a pin (PyAutoLens#687). Two independent reasons hold it up;
+    # neither may be dropped without checking the other.
+    #
+    # 1. JAX in base dependencies (PyAutoLens#702) — the floor must name a
+    #    release carrying `jax`/`jaxlib` in autonerves' *base* Requires-Dist, so
+    #    backtracking cannot pair this autoarray with a jax-optional autonerves.
+    #    Satisfied since 2026.8.22.1; every later release keeps them there.
+    # 2. The SMALLDAT regime stamp (PyAutoNerves#153/#154) — `should_simulate`
+    #    prefers the header card that autonerves' writer stamps, and 2026.8.23.1
+    #    is the FIRST release whose `fitsable.stamp_small_datasets_regime` emits
+    #    it. Against anything older the card is simply absent, the read side
+    #    degrades to its shape heuristic, and capped *interferometer* datasets —
+    #    shape-identical to full-resolution ones — go undetected. That is the
+    #    case the stamp exists for, so the floor is what makes it reachable for
+    #    an installed autoarray rather than a checkout.
+    "autonerves>=2026.8.23.1",
     "astropy>=5.0",
     "decorator>=4.0.0",
     "dill>=0.3.1.1",
