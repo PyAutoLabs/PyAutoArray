@@ -70,6 +70,29 @@ def is_concrete_scalar(value: Any) -> bool:
     return isinstance(value, (int, float, np.integer, np.floating))
 
 
+def is_concrete_integer(value: Any) -> bool:
+    """
+    Returns ``True`` if ``value`` is a concrete Python or NumPy **integer** scalar.
+
+    The integer-only counterpart of :func:`is_concrete_scalar`, for parameters which
+    count pixels rather than measure them — a ``shape_native`` of ``5.0`` is a mistake
+    worth surfacing, not a value to silently widen, so a ``float`` returns ``False``
+    here where ``is_concrete_scalar`` would accept it.
+
+    Tracer-safety and the ``bool`` exclusion carry over from
+    :func:`is_concrete_scalar` unchanged.
+
+    Parameters
+    ----------
+    value
+        The value to test.
+    """
+    if isinstance(value, bool):
+        return False
+
+    return isinstance(value, (int, np.integer))
+
+
 def _raise(
     name: str,
     rule: str,

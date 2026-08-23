@@ -7,16 +7,25 @@ from autoarray import validate
 
 def convert_shape_native_1d(shape_native: Union[int, Tuple[int]]) -> Tuple[int]:
     """
-    Convert an input `shape_native` of type `int` to a tuple `(int,)`. If the input is already a
-    `(int,)` tuple it is returned unchanged.
+    Convert an input `shape_native` given as a single integer scalar to a tuple `(int,)`. If
+    the input is already a `(int,)` tuple it is returned unchanged.
 
     This enables users to input `shape_native` as a single integer value and have the type
     automatically normalised to `(int,)` which is used internally by 1D data structures.
 
+    Any concrete integer scalar is widened — `int` and `np.integer` — not just an exact `int`.
+    An `np.integer` is what indexing a shape tuple or reading a FITS header returns, so it
+    reaches this function on paths a user would consider ordinary. The widened value is cast
+    to a Python `int`, so the tuple this returns is always `(int,)` regardless of what went in.
+
+    A `float` is deliberately *not* widened: `shape_native` counts pixels, so a non-integer is
+    a mistake worth surfacing rather than one to normalise away. Neither is a `bool`, nor a JAX
+    tracer — see :func:`autoarray.validate.is_concrete_integer`.
+
     Parameters
     ----------
     shape_native
-        The 1D shape to convert, either as a plain `int` or a 1-element tuple `(int,)`.
+        The 1D shape to convert, either as a plain integer scalar or a 1-element tuple `(int,)`.
 
     Returns
     -------
@@ -24,8 +33,8 @@ def convert_shape_native_1d(shape_native: Union[int, Tuple[int]]) -> Tuple[int]:
         The shape as a 1-element tuple `(int,)`.
     """
 
-    if type(shape_native) is int:
-        shape_native = (shape_native,)
+    if validate.is_concrete_integer(shape_native):
+        shape_native = (int(shape_native),)
 
     return shape_native
 
