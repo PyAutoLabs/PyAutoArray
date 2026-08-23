@@ -10,6 +10,7 @@ from autoarray.mask.abstract_mask import Mask
 
 from autoarray.mask.derive.grid_1d import DeriveGrid1D
 from autoarray.mask.derive.mask_1d import DeriveMask1D
+from autoarray.geometry import geometry_util
 from autoarray.geometry.geometry_1d import Geometry1D
 from autoarray.structures.abstract_structure import Structure
 from autoarray.structures.arrays import array_1d_util
@@ -68,8 +69,7 @@ class Mask1D(Mask):
         if invert:
             mask = ~mask
 
-        if type(pixel_scales) is float:
-            pixel_scales = (pixel_scales,)
+        pixel_scales = geometry_util.convert_pixel_scales_1d(pixel_scales=pixel_scales)
 
         if len(mask.shape) != 1:
             raise exc.MaskException("The input mask is not a one dimensional array")

@@ -21,18 +21,25 @@ def test__convert_pixel_scales_1d__widens_any_real_scalar(pixel_scales):
     """
     Any concrete real scalar widens, not just an exact `float`. `int` is what a user types by
     hand; `np.floating` is what indexing an array or reading a FITS header returns.
+
+    The tuple-ness is asserted before the value: `np.float64(1.0) == (1.0,)` NumPy-broadcasts
+    to `array([True])`, which is truthy, so a value-only assertion passes on the unwidened
+    scalar and tests nothing.
     """
-    assert aa.util.geometry.convert_pixel_scales_1d(pixel_scales=pixel_scales) == (1.0,)
+    pixel_scales = aa.util.geometry.convert_pixel_scales_1d(pixel_scales=pixel_scales)
+
+    assert type(pixel_scales) is tuple
+    assert pixel_scales == (1.0,)
 
 
 @pytest.mark.parametrize(
     "pixel_scales", [1, 1.0, np.float64(1.0), np.int32(1), np.float32(1.0)]
 )
 def test__convert_pixel_scales_2d__widens_any_real_scalar(pixel_scales):
-    assert aa.util.geometry.convert_pixel_scales_2d(pixel_scales=pixel_scales) == (
-        1.0,
-        1.0,
-    )
+    pixel_scales = aa.util.geometry.convert_pixel_scales_2d(pixel_scales=pixel_scales)
+
+    assert type(pixel_scales) is tuple
+    assert pixel_scales == (1.0, 1.0)
 
 
 @pytest.mark.parametrize("pixel_scales", [1, np.float64(1.0), np.int32(1)])
@@ -84,6 +91,64 @@ def test__convert_pixel_scales__a_bool_is_not_treated_as_a_scalar():
     """
     assert aa.util.geometry.convert_pixel_scales_1d(pixel_scales=True) is True
     assert aa.util.geometry.convert_pixel_scales_2d(pixel_scales=True) is True
+
+
+@pytest.mark.parametrize("shape_native", [5, np.int32(5), np.int64(5)])
+def test__convert_shape_native_1d__widens_any_integer_scalar(shape_native):
+    """
+    Any concrete integer scalar widens, not just an exact `int`. An `np.integer` is what
+    indexing a shape tuple or reading a FITS header returns, and `Array1D.full` then does
+    `shape_native[0]` on whatever comes back — a bare scalar raised `IndexError` there.
+
+    The tuple-ness is asserted before the value: `np.int32(5) == (5,)` NumPy-broadcasts to
+    `array([True])`, which is truthy, so a value-only assertion passes on the unwidened
+    scalar and tests nothing.
+    """
+    shape_native = aa.util.geometry.convert_shape_native_1d(shape_native=shape_native)
+
+    assert type(shape_native) is tuple
+    assert shape_native == (5,)
+
+
+@pytest.mark.parametrize("shape_native", [5, np.int32(5), np.int64(5)])
+def test__convert_shape_native_1d__widened_entry_is_a_python_int(shape_native):
+    """
+    The widened value is cast, so a NumPy scalar never reaches the shape stored on a
+    structure. `5 == np.int32(5)` in Python, so the cast has to be asserted on the type.
+    """
+    (entry,) = aa.util.geometry.convert_shape_native_1d(shape_native=shape_native)
+    assert type(entry) is int
+
+
+def test__convert_shape_native_1d__a_float_is_not_widened():
+    """
+    Unlike `pixel_scales`, `shape_native` counts pixels rather than measuring them, so a
+    `float` is a mistake worth surfacing rather than one to normalise away — the predicate
+    here is `is_concrete_integer`, not `is_concrete_scalar`.
+    """
+    assert aa.util.geometry.convert_shape_native_1d(shape_native=5.0) == 5.0
+
+
+def test__convert_shape_native_1d__a_bool_is_not_treated_as_a_scalar():
+    """`bool` is a subclass of `int`, but `True` reaching a pixel count is a different mistake."""
+    assert aa.util.geometry.convert_shape_native_1d(shape_native=True) is True
+
+
+def test__convert_shape_native_1d__tuple_input_is_returned_unchanged():
+    shape_native = (5,)
+    assert (
+        aa.util.geometry.convert_shape_native_1d(shape_native=shape_native)
+        is shape_native
+    )
+
+
+def test__convert_shape_native_1d__a_tracer_passes_through_untouched():
+    """Inside a `jax.jit` the value is traced; widening it would resolve it to a bool."""
+    tracer_like = _NotAConcreteScalar()
+
+    assert (
+        aa.util.geometry.convert_shape_native_1d(shape_native=tracer_like) is tracer_like
+    )
 
 
 def test__central_pixel_coordinates_1d_from():
