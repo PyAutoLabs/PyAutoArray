@@ -17,6 +17,7 @@ from autoarray.plot.utils import (
     numpy_grid,
     numpy_lines,
     numpy_positions,
+    norm_from,
     _apply_contours,
     _conf_imshow_origin,
 )
@@ -161,31 +162,7 @@ def plot_array(
         fig = ax.get_figure()
 
     # --- colour normalisation --------------------------------------------------
-    if use_log10:
-        try:
-            from autonerves import conf as _conf
-
-            log10_min = _conf.instance["visualize"]["general"]["general"][
-                "log10_min_value"
-            ]
-        except Exception:
-            log10_min = 1.0e-4
-        clipped = np.clip(array, log10_min, None)
-        vmin_log = vmin if (vmin is not None and np.isfinite(vmin)) else log10_min
-        if vmax is not None and np.isfinite(vmax):
-            vmax_log = vmax
-        else:
-            with np.errstate(all="ignore"):
-                vmax_log = np.nanmax(clipped)
-        if not np.isfinite(vmax_log) or vmax_log <= vmin_log:
-            vmax_log = vmin_log * 10.0
-        from matplotlib.colors import LogNorm
-        norm = LogNorm(vmin=vmin_log, vmax=vmax_log)
-    elif vmin is not None or vmax is not None:
-        from matplotlib.colors import Normalize
-        norm = Normalize(vmin=vmin, vmax=vmax)
-    else:
-        norm = None
+    norm = norm_from(array=array, use_log10=use_log10, vmin=vmin, vmax=vmax)
 
     # Compute the axes-box aspect ratio from the data extent so that the
     # physical cell is correctly shaped and tight_layout has no whitespace

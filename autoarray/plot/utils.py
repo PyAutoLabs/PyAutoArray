@@ -267,6 +267,82 @@ def symmetric_cmap_from(array, symmetric_value=None):
     return colors.Normalize(vmin=-abs_max, vmax=abs_max)
 
 
+def norm_from(array=None, use_log10=False, vmin=None, vmax=None):
+    """Build the matplotlib colour norm for *array* from flat arguments.
+
+    The single implementation behind every colour scale the plot functions
+    apply: ``plot_array``, ``plot_inversion_reconstruction`` and (by
+    delegation) ``autogalaxy.util.plot_utils.norm_from``, which is what the
+    ``Clicker`` / ``Scribbler`` GUIs draw with. It used to be written out once
+    per call site, and the copies had diverged; the decisions taken when they
+    were merged are recorded below so a future reader knows which behaviour was
+    chosen deliberately.
+
+    **1. The log floor is always the configured one.** ``visualize``'s
+    ``general.general.log10_min_value`` is read (falling back to ``1.0e-4``
+    when config is unavailable) and the values are clipped to it before
+    ``vmax`` is derived. ``plot_inversion_reconstruction`` previously hardcoded
+    ``1.0e-4`` and never clipped, so a user who changed the configured floor
+    had it honoured on array plots and silently ignored on inversion plots.
+    That was a behaviour bug, and honouring config here is the fix.
+
+    **2. What *array* means is the caller's choice.** It is "the values being
+    coloured" — the image for ``plot_array``, the reconstruction's
+    ``pixel_values`` for ``plot_inversion_reconstruction``. The two call sites
+    genuinely colour different data, so this is not a divergence to reconcile.
+    ``array=None`` (an inversion with no pixel values) falls through to the
+    same widened-``vmin`` fallback as an all-``NaN`` array.
+
+    **3. A degenerate range is widened however it arose.** ``vmax <= vmin``
+    makes a ``LogNorm`` unusable whether the pair was derived or passed in
+    explicitly, so the widening is applied unconditionally.
+    ``plot_inversion_reconstruction`` previously guarded only its derived
+    branch, leaving an explicitly-passed degenerate pair to reach matplotlib.
+
+    Parameters
+    ----------
+    array
+        The values being coloured. Only read when *use_log10* is ``True`` and
+        no finite *vmax* is given; ``None`` is accepted and takes the fallback.
+    use_log10
+        When ``True`` a ``LogNorm`` is returned, floored at the configured
+        ``log10_min_value``.
+    vmin, vmax
+        Explicit colour-scale limits. When both are ``None`` and *use_log10* is
+        ``False``, ``None`` is returned and matplotlib applies its own default.
+
+    Returns
+    -------
+    matplotlib.colors.Normalize or None
+    """
+    if use_log10:
+        log10_min = _conf_log10_min_value()
+
+        vmin_log = vmin if (vmin is not None and np.isfinite(vmin)) else log10_min
+
+        if vmax is not None and np.isfinite(vmax):
+            vmax_log = vmax
+        elif array is None:
+            vmax_log = np.nan
+        else:
+            with np.errstate(all="ignore"):
+                vmax_log = np.nanmax(np.clip(array, log10_min, None))
+
+        if not np.isfinite(vmax_log) or vmax_log <= vmin_log:
+            vmax_log = vmin_log * 10.0
+
+        from matplotlib.colors import LogNorm
+
+        return LogNorm(vmin=vmin_log, vmax=vmax_log)
+
+    if vmin is not None or vmax is not None:
+        from matplotlib.colors import Normalize
+
+        return Normalize(vmin=vmin, vmax=vmax)
+
+    return None
+
+
 def set_with_color_values(ax, cmap, color_values, norm=None):
     """Attach a colorbar to *ax* driven by *color_values* rather than a plotted artist.
 
@@ -854,6 +930,16 @@ def _conf_output_format() -> str:
         return conf.instance["visualize"]["general"]["general"]["output_format"]
     except Exception:
         return "show"
+
+
+def _conf_log10_min_value() -> float:
+    """Return the log10 colour-scale floor from config (``log10_min_value``)."""
+    try:
+        from autonerves import conf
+        general = conf.instance["visualize"]["general"]["general"]
+        return float(general["log10_min_value"])
+    except Exception:
+        return 1.0e-4
 
 
 def _conf_ticks(key: str, default: float) -> float:
