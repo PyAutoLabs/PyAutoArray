@@ -36,33 +36,50 @@ def test__psf_weighted_noise_imaging_from():
     )
 
 
-def test__psf_weighted_data_from__unmasked_pixels_on_array_edge():
+# Odd in each axis, as the kernel validation requires, but deliberately not
+# all square: `kernel_shape // 2` is only orientation-safe when the y half-width
+# is taken from axis 0 and the x half-width from axis 1. Values are asymmetric
+# so a transposed gather cannot hide behind a symmetric kernel.
+KERNELS_ODD = [
+    np.array([[0.0, 1.0, 2.0], [3.0, 4.0, 1.0], [2.0, 0.0, 1.0]]),  # 3x3 square
+    np.arange(1.0, 16.0).reshape(3, 5),  # 3x5 wide
+    np.arange(1.0, 16.0).reshape(5, 3),  # 5x3 tall
+    np.arange(1.0, 36.0).reshape(5, 7),  # 5x7 wide
+]
+
+KERNEL_IDS = ["3x3", "3x5", "5x3", "5x7"]
+
+
+@pytest.mark.parametrize("kernel", KERNELS_ODD, ids=KERNEL_IDS)
+def test__psf_weighted_data_from__unmasked_pixels_on_array_edge(kernel):
     """
-    Regression test: an unmasked pixel within `kernel_shape // 2` of the array
-    edge drives the kernel off the weight map.
+    Regression test for two distinct defects in the numba gather, both of which
+    the zero-padded numpy implementation is the reference for.
 
-    numba `@jit()` does not bounds-check array reads, so those positions
-    silently returned uninitialized memory (values of order 1e299) rather than
-    raising, poisoning `psf_weighted_data` and the data vector built from it.
-    Because the values read depend on whatever the allocator left next to the
-    weight map, the corruption was heap-state dependent: deterministic on the
-    first call after a cold-cache compile, and intermittent in forked
-    multiprocessing workers.
+    1. An unmasked pixel within `kernel_shape // 2` of the array edge drives the
+       kernel off the weight map. numba `@jit()` does not bounds-check array
+       reads, so those positions silently returned uninitialized memory (values
+       of order 1e299) rather than raising, poisoning `psf_weighted_data` and
+       the data vector built from it. Because the values read depend on whatever
+       the allocator left next to the weight map, the corruption was heap-state
+       dependent: deterministic on the first call after a cold-cache compile,
+       and intermittent in forked multiprocessing workers.
 
-    The zero-padded numpy implementation is the reference — kernel positions
-    off the array contribute zero. Every other test in this module masks a
-    one-pixel border, so none of them exercise this path.
+    2. The y and x kernel half-widths were derived from the *transposed* kernel
+       axes. That is invisible for a square kernel -- the only shape the tests
+       used to cover -- but mis-centres the gather along both axes for a
+       non-square one. Kernels are validated as odd per axis, never as square,
+       so a 3x5 PSF reaches this path and silently returns wrong values.
+
+    Every other test in this module masks a one-pixel border and uses a square
+    kernel, so none of them exercise either path.
     """
 
     image = np.arange(1.0, 26.0).reshape(5, 5)
     noise_map = np.ones((5, 5))
 
-    kernel = np.array([[0.0, 1.0, 2.0], [3.0, 4.0, 1.0], [2.0, 0.0, 1.0]])
-
     # Every pixel unmasked, so the border pixels push the kernel off the array.
-    native_index_for_slim_index = np.array(
-        [[y, x] for y in range(5) for x in range(5)]
-    )
+    native_index_for_slim_index = np.array([[y, x] for y in range(5) for x in range(5)])
 
     psf_weighted_data = aa.util.inversion_imaging_numba.psf_weighted_data_from(
         image_native=image,
@@ -79,6 +96,52 @@ def test__psf_weighted_data_from__unmasked_pixels_on_array_edge():
 
     assert np.all(np.isfinite(psf_weighted_data))
     assert psf_weighted_data == pytest.approx(psf_weighted_data_numpy, 1.0e-8)
+
+
+def test__psf_weighted_data_from__kernel_axes_are_not_transposed():
+    """
+    A direct probe of which weight-map pixel the gather actually reads, that does
+    not re-derive the implementation to do it.
+
+    The kernel is zero everywhere except its top-left corner, so a single kernel
+    tap fires per image pixel, and the weight map encodes its own coordinates as
+    `10 * (y + 1) + (x + 1)`. The returned value therefore *names* the pixel that
+    was gathered.
+
+    For a (ky, kx) kernel the corner tap sits at offset `(-(ky // 2), -(kx // 2))`
+    from the probe pixel. Transposing the half-widths swaps those offsets, so a
+    wide kernel and its tall transpose must return different, individually
+    predictable values -- which is exactly what a square kernel cannot show.
+    """
+
+    y_indexes, x_indexes = np.indices((7, 7))
+
+    # weight[y, x] == 10 * (y + 1) + (x + 1); noise of 1 leaves image == weight.
+    image = 10.0 * (y_indexes + 1.0) + (x_indexes + 1.0)
+    noise_map = np.ones((7, 7))
+
+    probe_y, probe_x = 3, 3
+    native_index_for_slim_index = np.array([[probe_y, probe_x]])
+
+    def gathered_value(kernel_shape):
+        kernel = np.zeros(kernel_shape)
+        kernel[0, 0] = 1.0
+
+        return aa.util.inversion_imaging_numba.psf_weighted_data_from(
+            image_native=image,
+            noise_map_native=noise_map,
+            kernel_native=kernel,
+            native_index_for_slim_index=native_index_for_slim_index,
+        )[0]
+
+    # 3x5: y half-width 1, x half-width 2 -> reads (3 - 1, 3 - 2) == (2, 1) == 32.
+    assert gathered_value((3, 5)) == pytest.approx(32.0, 1.0e-8)
+
+    # 5x3: y half-width 2, x half-width 1 -> reads (3 - 2, 3 - 1) == (1, 2) == 23.
+    assert gathered_value((5, 3)) == pytest.approx(23.0, 1.0e-8)
+
+    # Square: both half-widths 1 -> reads (2, 2) == 33, and is blind to the swap.
+    assert gathered_value((3, 3)) == pytest.approx(33.0, 1.0e-8)
 
 
 def test__psf_weighted_data_from():
@@ -166,12 +229,23 @@ def test__psf_precision_operator_sparse_from():
     assert psf_weighted_noise_lengths == pytest.approx(np.array([4, 3, 2, 1]), 1.0e-4)
 
 
-def test__psf_precision_operator_sparse_from__edge_pixels():
-    # Regression test: every slim pixel sits at a corner of the 4x4 noise map,
-    # so the kernel walk in psf_precision_value_from indexes off the array.
-    # numba.jit() does not bounds-check, so without the explicit guard added
-    # in the function those reads return uninitialized memory and produce
-    # astronomically large or non-finite operator entries.
+@pytest.mark.parametrize("kernel", KERNELS_ODD, ids=KERNEL_IDS)
+def test__psf_precision_operator_sparse_from__edge_pixels(kernel):
+    """
+    Regression test for the same two defects as the `psf_weighted_data_from`
+    pair above, on the precision-operator path.
+
+    Every slim pixel sits at a corner of the 4x4 noise map, so the kernel walk
+    in `psf_precision_value_from` indexes off the array; numba.jit() does not
+    bounds-check, so without the explicit guard in the function those reads
+    return uninitialized memory. And the kernel half-widths were derived from
+    the transposed axes, which the non-square parametrisations below exercise
+    and a square kernel cannot.
+
+    The two functions are fixed together deliberately: they must agree on kernel
+    orientation, or the `psf_weighted_data` and `psf_precision_operator` paths
+    would disagree with each other.
+    """
     noise_map = np.array(
         [
             [1.0, 1.0, 1.0, 1.0],
@@ -180,7 +254,6 @@ def test__psf_precision_operator_sparse_from__edge_pixels():
             [1.0, 1.0, 1.0, 1.0],
         ]
     )
-    kernel = np.array([[1.0, 1.0, 0.0], [1.0, 2.0, 1.0], [0.0, 1.0, 1.0]])
     native_index_for_slim_index = np.array([[0, 0], [0, 3], [3, 0], [3, 3]])
 
     (
@@ -200,11 +273,16 @@ def test__psf_precision_operator_sparse_from__edge_pixels():
     # Independent reference: a pure-numpy bounds-checked re-implementation of
     # psf_precision_value_from. The numba version with the fix applied must
     # match this byte-for-byte.
+    #
+    # `kernel` is indexed [y, x], so the y half-width comes from its first axis
+    # and the x half-width from its second. This reference used to derive them
+    # the other way round -- mirroring the very bug it is meant to catch, which
+    # a square kernel made invisible.
     def _reference_value(ip0_y, ip0_x, ip1_y, ip1_x):
         h, w = noise_map.shape
         kh, kw = kernel.shape
-        kernel_shift_y = -(kw // 2)
-        kernel_shift_x = -(kh // 2)
+        kernel_shift_y = -(kh // 2)
+        kernel_shift_x = -(kw // 2)
         ip_y_offset = ip0_y - ip1_y
         ip_x_offset = ip0_x - ip1_x
         if (
@@ -226,7 +304,7 @@ def test__psf_precision_operator_sparse_from__edge_pixels():
                     k1_y = k0_y + ip_y_offset
                     k1_x = k0_x + ip_x_offset
                     if 0 <= k1_y < kh and 0 <= k1_x < kw:
-                        total += kernel[k0_y, k0_x] * kernel[k1_y, k1_x] / v ** 2
+                        total += kernel[k0_y, k0_x] * kernel[k1_y, k1_x] / v**2
         return total
 
     n_pix = native_index_for_slim_index.shape[0]
@@ -250,6 +328,50 @@ def test__psf_precision_operator_sparse_from__edge_pixels():
     assert op == pytest.approx(np.array(expected), 1.0e-4)
     assert indexes == pytest.approx(np.array(expected_indexes), 1.0e-4)
     assert lengths == pytest.approx(np.array(expected_lengths), 1.0e-4)
+
+
+def test__psf_precision_value_from__kernel_axes_are_not_transposed():
+    """
+    The `psf_weighted_data_from` orientation probe's twin, on the precision path,
+    so both gathers are pinned to the same kernel orientation independently.
+
+    A single-tap kernel (non-zero only at its top-left corner) with `ip0 == ip1`
+    reduces `psf_precision_value_from` to `1.0 / value_native[gathered]**2`, and
+    the value map encodes its own coordinates as `10 * (y + 1) + (x + 1)`. The
+    returned value therefore names the pixel that was gathered, without the test
+    re-deriving the kernel walk.
+    """
+
+    y_indexes, x_indexes = np.indices((7, 7))
+
+    value_native = 10.0 * (y_indexes + 1.0) + (x_indexes + 1.0)
+
+    probe_y, probe_x = 3, 3
+
+    def gathered_value(kernel_shape):
+        kernel = np.zeros(kernel_shape)
+        kernel[0, 0] = 1.0
+
+        curvature_value = aa.util.inversion_imaging_numba.psf_precision_value_from(
+            value_native=value_native,
+            kernel_native=kernel,
+            ip0_y=probe_y,
+            ip0_x=probe_x,
+            ip1_y=probe_y,
+            ip1_x=probe_x,
+        )
+
+        # curvature_value == 1.0 / value_native[gathered] ** 2.0
+        return 1.0 / np.sqrt(curvature_value)
+
+    # 3x5: y half-width 1, x half-width 2 -> reads (3 - 1, 3 - 2) == (2, 1) == 32.
+    assert gathered_value((3, 5)) == pytest.approx(32.0, 1.0e-8)
+
+    # 5x3: y half-width 2, x half-width 1 -> reads (3 - 2, 3 - 1) == (1, 2) == 23.
+    assert gathered_value((5, 3)) == pytest.approx(23.0, 1.0e-8)
+
+    # Square: both half-widths 1 -> reads (2, 2) == 33, and is blind to the swap.
+    assert gathered_value((3, 3)) == pytest.approx(33.0, 1.0e-8)
 
 
 def test__data_vector_via_blurred_mapping_matrix_from():
