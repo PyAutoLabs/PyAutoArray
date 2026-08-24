@@ -7,9 +7,8 @@ Replaces the inversion-specific paths in ``MatPlot2D.plot_mapper``.
 from typing import List, Optional, Tuple
 
 import numpy as np
-from matplotlib.colors import LogNorm, Normalize
 
-from autoarray.plot.utils import subplots, apply_extent, apply_labels, conf_figsize, save_figure, _conf_imshow_origin
+from autoarray.plot.utils import subplots, apply_extent, apply_labels, conf_figsize, save_figure, norm_from, _conf_imshow_origin
 
 
 def plot_inversion_reconstruction(
@@ -89,22 +88,7 @@ def plot_inversion_reconstruction(
         fig = ax.get_figure()
 
     # --- colour normalisation --------------------------------------------------
-    if use_log10:
-        vmin_log = vmin if (vmin is not None and np.isfinite(vmin)) else 1e-4
-        if vmax is not None and np.isfinite(vmax):
-            vmax_log = vmax
-        elif pixel_values is not None:
-            with np.errstate(all="ignore"):
-                vmax_log = float(np.nanmax(np.asarray(pixel_values)))
-            if not np.isfinite(vmax_log) or vmax_log <= vmin_log:
-                vmax_log = vmin_log * 10.0
-        else:
-            vmax_log = vmin_log * 10.0
-        norm = LogNorm(vmin=vmin_log, vmax=vmax_log)
-    elif vmin is not None or vmax is not None:
-        norm = Normalize(vmin=vmin, vmax=vmax)
-    else:
-        norm = None
+    norm = norm_from(array=pixel_values, use_log10=use_log10, vmin=vmin, vmax=vmax)
 
     extent = mapper.extent_from(
         values=pixel_values,
