@@ -45,8 +45,13 @@ def psf_weighted_data_from(
         efficient calculation of the data vector.
     """
 
-    kernel_shift_y = -(kernel_native.shape[1] // 2)
-    kernel_shift_x = -(kernel_native.shape[0] // 2)
+    # `kernel_native` is indexed [y, x], so the y half-width comes from
+    # shape[0] and the x half-width from shape[1]. Deriving them from the
+    # opposite axes is invisible for a square kernel but mis-centres the
+    # gather along both axes for a non-square one -- and kernels are only
+    # validated as odd per axis, never as square.
+    kernel_shift_y = -(kernel_native.shape[0] // 2)
+    kernel_shift_x = -(kernel_native.shape[1] // 2)
 
     image_pixels = len(native_index_for_slim_index)
 
@@ -310,8 +315,13 @@ def psf_precision_value_from(
 
     curvature_value = 0.0
 
-    kernel_shift_y = -(kernel_native.shape[1] // 2)
-    kernel_shift_x = -(kernel_native.shape[0] // 2)
+    # `kernel_native` is indexed [y, x], so the y half-width comes from
+    # shape[0] and the x half-width from shape[1]. Deriving them from the
+    # opposite axes is invisible for a square kernel but mis-centres the
+    # gather along both axes for a non-square one -- and kernels are only
+    # validated as odd per axis, never as square.
+    kernel_shift_y = -(kernel_native.shape[0] // 2)
+    kernel_shift_x = -(kernel_native.shape[1] // 2)
 
     ip_y_offset = ip0_y - ip1_y
     ip_x_offset = ip0_x - ip1_x
