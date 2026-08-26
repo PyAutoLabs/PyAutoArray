@@ -228,3 +228,42 @@ must include **both** a `jax.jit(analysis.fit_from)(instance)` round-trip
 `autoarray_workspace_test`; array-level JAX changes are exercised downstream in
 `autogalaxy_workspace_test/scripts/jax_likelihood_functions/` and the
 `autolens_workspace_test` equivalents.
+
+---
+
+## 6. Registering a new type — classification heuristic
+
+When a jit trace fails on an unregistered type (a `jax.tree_util`
+`TypeError: unhashable type`, a `NotImplementedError`, or a tracer error whose
+frame above names the class), read the offending class's `__init__` /
+`__dict__` and classify its attributes before registering:
+
+- **All attrs are `jax.Array` / `np.ndarray` / `AbstractNDArray` / primitives**
+  → register with `no_flatten=()` (everything dynamic).
+- **Known-aux patterns** — `cosmology`, `settings`, `config`, `dataset`, `psf`,
+  `mask`, `_cache`, `_compiled`, any `scipy.spatial.*`, `Transformer*`,
+  `PointSolver*` → register with those names in `no_flatten`; they are
+  per-analysis constants, not traced leaves.
+- **A callable attribute** → do not guess. Callable state is the case that
+  silently breaks gradients; decide aux / dynamic / split deliberately.
+
+Register at the type's wiring site (e.g. `_register_fit_imaging_pytrees` in
+PyAutoLens) with a one-line comment naming the variant that needed it, then
+re-trace. Registration is iterative — each pass usually surfaces the next
+unregistered type one frame further in — but if a handful of passes produce no
+progress, the type is telling you it holds state that cannot be flattened;
+stop and treat it as a design question rather than adding more registrations.
+
+The parity scripts under
+`autolens_workspace_test/scripts/jax_likelihood_functions/` are where this is
+exercised; `<variant>_pytree.py` asserts the round trip against the NumPy
+reference:
+
+```python
+ref = analysis.fit_from(instance).log_likelihood                              # NumPy reference
+jit_ll = jax.jit(lambda i: analysis.fit_from(i).log_likelihood)(instance)     # jit round-trip
+assert jnp.allclose(ref, jit_ll, rtol=1e-4), f"divergence: {ref} vs {jit_ll}"
+```
+
+That round trip proves the types flatten; it does **not** prove `xp` is threaded
+— pair it with the `fitness._vmap(parameters)` check in §5.
