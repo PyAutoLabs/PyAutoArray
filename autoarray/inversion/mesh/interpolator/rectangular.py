@@ -544,11 +544,23 @@ def adaptive_rectangular_mappings_weights_via_interpolation_from(
     grid_over_sampled_transformed = transform_func(grid_over_sampled_scaled)
     grid_over_index = (source_grid_size - 3) * grid_over_sampled_transformed + 1
 
-    # --- Step 4. Floor/ceil indices ---
-    ix_down = xp.floor(grid_over_index[:, 0])
-    ix_up = xp.ceil(grid_over_index[:, 0])
-    iy_down = xp.floor(grid_over_index[:, 1])
-    iy_up = xp.ceil(grid_over_index[:, 1])
+    # --- Step 4. Bracketing indices ---
+    #
+    # `ix_up` is ALWAYS `ix_down + 1`, never `ceil(grid_over_index)`.
+    # `transform()` ends in `xp.clip(F_q, 0.0, 1.0)`, so saturated points land
+    # on EXACTLY integer `grid_over_index` values. Under `ceil` the bracketing
+    # cell collapses there (`ix_up == ix_down`) and the interpolation weight is
+    # forced onto a single row; a 1-ULP change in the traced grid then moves
+    # such a point off the plateau and jumps its weight a whole mesh row. That
+    # is a discontinuity in the discretisation, and it is what made the eager
+    # and jitted likelihoods disagree by ~1.6e-3 on an otherwise smooth
+    # surface (autolens_workspace_test#279). Bracketing with `ix_down + 1` is
+    # continuous at integer coordinates, so the cell assignment no longer
+    # depends on round-off. Clamp so the `+ 1` cannot leave the mesh.
+    ix_down = xp.clip(xp.floor(grid_over_index[:, 0]), 0, source_grid_size - 2)
+    iy_down = xp.clip(xp.floor(grid_over_index[:, 1]), 0, source_grid_size - 2)
+    ix_up = ix_down + 1
+    iy_up = iy_down + 1
 
     # --- Step 5. Four corners ---
     idx_tl = xp.stack([ix_up, iy_down], axis=1)
@@ -570,13 +582,20 @@ def adaptive_rectangular_mappings_weights_via_interpolation_from(
     )
 
     # --- Step 7. Bilinear interpolation weights ---
-    t_row = (grid_over_index[:, 0] - ix_down) / (ix_up - ix_down + 1e-12)
-    t_col = (grid_over_index[:, 1] - iy_down) / (iy_up - iy_down + 1e-12)
+    #
+    # `t_row` / `t_col` are fractional distances measured FROM the `down` node,
+    # so the `up` node carries `t` and the `down` node carries `1 - t`. The row
+    # weights were previously the other way round (`ix_up` carried `1 - t_row`,
+    # `ix_down` carried `t_row`), mirroring the interpolation in the row
+    # direction; the column weights were, and remain, correctly paired. No
+    # `+ 1e-12` guard is needed now the bracket is always exactly one cell wide.
+    t_row = grid_over_index[:, 0] - ix_down
+    t_col = grid_over_index[:, 1] - iy_down
 
-    w_tl = (1 - t_row) * (1 - t_col)
-    w_tr = (1 - t_row) * t_col
-    w_bl = t_row * (1 - t_col)
-    w_br = t_row * t_col
+    w_tl = t_row * (1 - t_col)
+    w_tr = t_row * t_col
+    w_bl = (1 - t_row) * (1 - t_col)
+    w_br = (1 - t_row) * t_col
     weights = xp.stack([w_tl, w_tr, w_bl, w_br], axis=1)
 
     return flat_indices, weights
