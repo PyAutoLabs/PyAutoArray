@@ -8,10 +8,10 @@ SMALL_DATASETS_PIXEL_SCALES = 0.6
 
 # The FITS header card ``autonerves.fitsable.stamp_small_datasets_regime`` writes
 # on every array the stack outputs. Deliberately duplicated here rather than
-# imported: ``pyproject.toml`` floors autonerves at a release that predates the
-# stamp, so an import would hard-fail against a legitimately-resolved older
-# autonerves. Reading the card by name degrades to "absent" instead, which is
-# exactly the fallback path below. Keep in sync with PyAutoNerves#153.
+# imported even though ``pyproject.toml`` now floors autonerves at the first
+# stamped release: the card name is an on-disk format detail, and keeping the
+# reader independent of the writer's Python API preserves the safe "absent"
+# fallback if that API moves. Keep in sync with PyAutoNerves#153.
 SMALL_DATASETS_HEADER_KEY = "SMALLDAT"
 
 
