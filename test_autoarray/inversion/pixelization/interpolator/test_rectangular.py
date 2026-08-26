@@ -293,6 +293,111 @@ def test__mappings_sizes_weights__shapes_and_weight_normalization():
     assert np.allclose(w.sum(axis=1), 1.0, atol=1e-10)
 
 
+def _index_space_nodes(idx, n):
+    """
+    Recover each mapped pixel's (row, col) position in index space.
+
+    Inverse of the module's ``flatten(ix, iy) = (n - ix) * n + iy``.
+    """
+    return n - idx // n, idx % n
+
+
+def test__mappings_sizes_weights__reproduces_the_query_position():
+    """
+    Bilinear interpolation must be exact for linear functions, which means the
+    four weights have to reconstruct the query itself:
+
+        sum_i w_i * node_i == grid_over_index
+
+    Partition of unity alone does NOT imply this — it is satisfied by any
+    consistent mis-pairing of corners to weights, which is exactly how the row
+    weights came to be mirrored (`ix_up` carrying `1 - t_row` instead of
+    `t_row`) and stayed that way from 2025-09-23 to 2026-08-26. The mirroring
+    was smooth, so gradient checks passed; only this property catches it.
+    See autolens_workspace_test#279.
+    """
+    n = 16
+    data_grid, over, weights = _seeded_inputs(seed=11)
+
+    idx, w = adaptive_rectangular_mappings_weights_via_interpolation_from(
+        source_grid_size=n,
+        data_grid=data_grid,
+        data_grid_over_sampled=over,
+        mesh_weight_map=weights,
+        xp=np,
+    )
+
+    # Rebuild the index-space query the function discretises internally.
+    mu, scale = data_grid.mean(axis=0), data_grid.std(axis=0)
+    transform_func, _ = create_transforms(
+        (data_grid - mu) / scale, mesh_pixels=n, mesh_weight_map=weights, xp=np
+    )
+    grid_over_index = (n - 3) * transform_func((over - mu) / scale) + 1
+
+    node_row, node_col = _index_space_nodes(idx, n)
+
+    assert np.allclose(w.sum(axis=1), 1.0, atol=1e-10)
+    assert np.allclose((w * node_row).sum(axis=1), grid_over_index[:, 0], atol=1e-10)
+    assert np.allclose((w * node_col).sum(axis=1), grid_over_index[:, 1], atol=1e-10)
+
+
+def test__mappings_sizes_weights__cell_assignment_is_continuous_at_integers():
+    """
+    ``transform()`` ends in ``clip(F_q, 0.0, 1.0)``, so saturated queries land on
+    EXACTLY integer ``grid_over_index`` values — systematically, not by chance.
+    Bracketing those with ``ceil`` collapsed the cell (``ix_up == ix_down``), so
+    a 1-ULP move off the plateau jumped a point's weight a whole mesh row. That
+    made the likelihood depend on floating-point association, which is how the
+    eager and jitted evaluations came to disagree by ~1.6e-3.
+
+    Here the property is asserted directly on the interpolated value of a linear
+    ramp: approaching an integer row coordinate from either side must converge
+    to the value AT that coordinate.
+    """
+    n = 16
+    data_grid, _, weights = _seeded_inputs(seed=12)
+    mu, scale = data_grid.mean(axis=0), data_grid.std(axis=0)
+
+    transform_func, inv = create_transforms(
+        (data_grid - mu) / scale, mesh_pixels=n, mesh_weight_map=weights, xp=np
+    )
+
+    def interpolated_ramp(over):
+        idx, w = adaptive_rectangular_mappings_weights_via_interpolation_from(
+            source_grid_size=n,
+            data_grid=data_grid,
+            data_grid_over_sampled=over,
+            mesh_weight_map=weights,
+            xp=np,
+        )
+        node_row, node_col = _index_space_nodes(idx, n)
+        # A linear function of position; bilinear interpolation reproduces it
+        # exactly, so any discontinuity here is a cell-assignment jump.
+        return (w * (3.0 * node_row - 2.0 * node_col)).sum(axis=1)
+
+    # Sweep the row coordinate densely across the whole data range. In index
+    # space that spans [1, n - 2], so the sweep crosses every interior integer
+    # boundary; a jump at any crossing is a cell-assignment discontinuity.
+    # This is deliberately placement-free — the inverse transform is a knot
+    # lookup and cannot land a query on an integer precisely enough to probe
+    # one boundary directly.
+    lo, hi = data_grid[:, 0].min(), data_grid[:, 0].max()
+    sweep = np.stack(
+        [np.linspace(lo, hi, 20001), np.full(20001, np.median(data_grid[:, 1]))],
+        axis=1,
+    )
+
+    values = interpolated_ramp(sweep)
+    steps = np.abs(np.diff(values))
+
+    # The ramp must actually vary, or continuity is vacuous.
+    assert values.max() - values.min() > 1.0
+
+    # A whole-row flip moves the ramp by ~3.0 (its row coefficient); a
+    # continuous scheme moves by ~the sweep resolution.
+    assert steps.max() < 0.05
+
+
 # ---------------------------------------------------------------------------
 # Areas
 # ---------------------------------------------------------------------------
