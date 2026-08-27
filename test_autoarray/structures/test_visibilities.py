@@ -1,8 +1,6 @@
-import os
 from pathlib import Path
 import numpy as np
 import pytest
-import shutil
 
 import autoarray as aa
 from autoarray.structures import visibilities as vis
@@ -86,25 +84,18 @@ def test__from_fits__makes_visibilities_without_other_inputs():
     assert (visibilities.slim == np.array([2.0 + 2.0j, 2.0 + 2.0j, 2.0 + 2.0j])).all()
 
 
-def test__output_to_fits():
+def test__output_to_fits(tmp_path):
     files_path = Path(__file__).resolve().parent / "files"
 
     visibilities = aa.Visibilities.from_fits(
         file_path=files_path / "3x2_ones.fits", hdu=0
     )
 
-    output_test_path = files_path / "output_test"
-
-    if output_test_path.exists():
-        shutil.rmtree(output_test_path)
-
-    os.makedirs(output_test_path)
-
     from autonerves.fitsable import output_to_fits
-    output_to_fits(values=visibilities.in_array, file_path=output_test_path / "data.fits")
+    output_to_fits(values=visibilities.in_array, file_path=tmp_path / "data.fits")
 
     visibilities_from_out = aa.Visibilities.from_fits(
-        file_path=output_test_path / "data.fits", hdu=0
+        file_path=tmp_path / "data.fits", hdu=0
     )
     assert (
         visibilities_from_out.slim == np.array([1.0 + 1.0j, 1.0 + 1.0j, 1.0 + 1.0j])

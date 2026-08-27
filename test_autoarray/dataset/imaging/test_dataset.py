@@ -1,9 +1,7 @@
 import copy
-import os
 
 import numpy as np
 import pytest
-import shutil
 
 import autoarray as aa
 
@@ -11,18 +9,6 @@ from autoarray import exc
 from pathlib import Path
 
 test_data_path = Path(Path(__file__).resolve().parent) / "files"
-
-
-@pytest.fixture(name="test_data_path")
-def make_test_data_path():
-    test_data_path = Path(__file__).resolve().parent / "files" / "array" / "output_test"
-
-    if test_data_path.exists():
-        shutil.rmtree(test_data_path)
-
-    os.makedirs(test_data_path)
-
-    return test_data_path
 
 
 def test__grid__uses_mask_and_settings__lp_grid_matches_grid_2d_7x7(
@@ -162,9 +148,7 @@ def test__from_fits__all_data_in_one_fits_file_multiple_hdus__loads_data_psf_noi
     assert dataset.noise_map.mask.pixel_scales == (0.1, 0.1)
 
 
-def test__from_fits__small_datasets_env_caps_data_and_noise_map(
-    test_data_path, monkeypatch
-):
+def test__from_fits__small_datasets_env_caps_data_and_noise_map(tmp_path, monkeypatch):
     """When PYAUTO_SMALL_DATASETS=1, Imaging.from_fits center-crops data and
     noise_map to (15, 15) at pixel_scales=0.6 so they stay shape-consistent
     with masks built via Mask2D.circular under the same env var. PSF is left
@@ -172,17 +156,17 @@ def test__from_fits__small_datasets_env_caps_data_and_noise_map(
     from astropy.io import fits
 
     fits.writeto(
-        Path(test_data_path) / "data_30x30.fits",
+        tmp_path / "data_30x30.fits",
         data=np.ones((30, 30), dtype=np.float64),
         overwrite=True,
     )
     fits.writeto(
-        Path(test_data_path) / "noise_map_30x30.fits",
+        tmp_path / "noise_map_30x30.fits",
         data=2.0 * np.ones((30, 30), dtype=np.float64),
         overwrite=True,
     )
     fits.writeto(
-        Path(test_data_path) / "psf_5x5.fits",
+        tmp_path / "psf_5x5.fits",
         data=(1.0 / 25.0) * np.ones((5, 5), dtype=np.float64),
         overwrite=True,
     )
@@ -191,9 +175,9 @@ def test__from_fits__small_datasets_env_caps_data_and_noise_map(
 
     dataset = aa.Imaging.from_fits(
         pixel_scales=0.08,
-        data_path=Path(test_data_path) / "data_30x30.fits",
-        psf_path=Path(test_data_path) / "psf_5x5.fits",
-        noise_map_path=Path(test_data_path) / "noise_map_30x30.fits",
+        data_path=tmp_path / "data_30x30.fits",
+        psf_path=tmp_path / "psf_5x5.fits",
+        noise_map_path=tmp_path / "noise_map_30x30.fits",
     )
 
     assert dataset.data.shape_native == (16, 16)
@@ -202,20 +186,18 @@ def test__from_fits__small_datasets_env_caps_data_and_noise_map(
     assert dataset.psf.kernel.shape_native == (5, 5)
 
 
-def test__from_fits__small_datasets_env_unset__shape_unchanged(
-    test_data_path, monkeypatch
-):
+def test__from_fits__small_datasets_env_unset__shape_unchanged(tmp_path, monkeypatch):
     """Sanity: with the env var unset, from_fits returns the on-disk shape
     unchanged, even for files larger than the cap."""
     from astropy.io import fits
 
     fits.writeto(
-        Path(test_data_path) / "data_30x30.fits",
+        tmp_path / "data_30x30.fits",
         data=np.ones((30, 30), dtype=np.float64),
         overwrite=True,
     )
     fits.writeto(
-        Path(test_data_path) / "noise_map_30x30.fits",
+        tmp_path / "noise_map_30x30.fits",
         data=2.0 * np.ones((30, 30), dtype=np.float64),
         overwrite=True,
     )
@@ -224,8 +206,8 @@ def test__from_fits__small_datasets_env_unset__shape_unchanged(
 
     dataset = aa.Imaging.from_fits(
         pixel_scales=0.08,
-        data_path=Path(test_data_path) / "data_30x30.fits",
-        noise_map_path=Path(test_data_path) / "noise_map_30x30.fits",
+        data_path=tmp_path / "data_30x30.fits",
+        noise_map_path=tmp_path / "noise_map_30x30.fits",
     )
 
     assert dataset.data.shape_native == (30, 30)
@@ -233,25 +215,23 @@ def test__from_fits__small_datasets_env_unset__shape_unchanged(
     assert dataset.pixel_scales == (0.08, 0.08)
 
 
-def test__output_to_fits__round_trips_data_psf_noise_map_correctly(
-    imaging_7x7, test_data_path
-):
+def test__output_to_fits__round_trips_data_psf_noise_map_correctly(imaging_7x7, tmp_path):
 
     from autoarray.dataset.plot.imaging_plots import fits_imaging
 
     fits_imaging(
         dataset=imaging_7x7,
-        data_path=Path(test_data_path) / "data.fits",
-        psf_path=Path(test_data_path) / "psf.fits",
-        noise_map_path=Path(test_data_path) / "noise_map.fits",
+        data_path=tmp_path / "data.fits",
+        psf_path=tmp_path / "psf.fits",
+        noise_map_path=tmp_path / "noise_map.fits",
         overwrite=True,
     )
 
     dataset = aa.Imaging.from_fits(
         pixel_scales=0.1,
-        data_path=Path(test_data_path) / "data.fits",
-        psf_path=Path(test_data_path) / "psf.fits",
-        noise_map_path=Path(test_data_path) / "noise_map.fits",
+        data_path=tmp_path / "data.fits",
+        psf_path=tmp_path / "psf.fits",
+        noise_map_path=tmp_path / "noise_map.fits",
     )
 
     assert (dataset.data.native == np.ones((7, 7))).all()

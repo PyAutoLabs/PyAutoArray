@@ -9,8 +9,6 @@ import autoarray as aa
 
 fits_path = Path(__file__).resolve().parent / "files" / "array_1d"
 
-test_data_path = Path(__file__).resolve().parent / "files" / "array" / "output_test"
-
 
 def create_fits(
     fits_path,
@@ -154,25 +152,20 @@ def test__from_fits__4_element_fits__header_bitpix_is_minus_64():
     clean_fits(fits_path=fits_path)
 
 
-def test__output_to_fits__ones_array__fits_file_has_correct_values_and_header():
+def test__output_to_fits__ones_array__fits_file_has_correct_values_and_header(tmp_path):
     arr = aa.Array1D.ones(shape_native=(3,), pixel_scales=1.0)
 
-    if test_data_path.exists():
-        shutil.rmtree(test_data_path)
-
-    os.makedirs(test_data_path)
-
     from autonerves.fitsable import output_to_fits
-    output_to_fits(values=arr.native.array.astype("float"), file_path=test_data_path / "array.fits", header_dict=arr.mask.header_dict)
+    output_to_fits(values=arr.native.array.astype("float"), file_path=tmp_path / "array.fits", header_dict=arr.mask.header_dict)
 
     array_from_out = aa.Array1D.from_fits(
-        file_path=test_data_path / "array.fits", hdu=0, pixel_scales=1.0
+        file_path=tmp_path / "array.fits", hdu=0, pixel_scales=1.0
     )
 
     assert (array_from_out.native == np.ones((3,))).all()
 
     header_load = aa.header_obj_from(
-        file_path=test_data_path / "array.fits", hdu=0
+        file_path=tmp_path / "array.fits", hdu=0
     )
 
     assert header_load["PIXSCA"] == 1.0

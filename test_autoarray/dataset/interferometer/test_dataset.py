@@ -1,6 +1,4 @@
 import numpy as np
-import os
-import shutil
 
 import autoarray as aa
 import pytest
@@ -127,7 +125,7 @@ def test__from_fits__all_files_in_one_fits__load_using_different_hdus(mask_2d_7x
     assert (dataset.uv_wavelengths[:, 1] == 3.0 * np.ones(3)).all()
 
 
-def test__output_all_arrays(mask_2d_7x7):
+def test__output_all_arrays(mask_2d_7x7, tmp_path):
     test_data_path = Path(Path(__file__).resolve().parent) / "files"
 
     dataset = aa.Interferometer.from_fits(
@@ -137,28 +135,21 @@ def test__output_all_arrays(mask_2d_7x7):
         uv_wavelengths_path=Path(test_data_path) / "3x2_fives_sixes.fits",
     )
 
-    test_data_path = Path(Path(__file__).resolve().parent) / "files" / "array" / "output_test"
-
-    if Path(test_data_path).exists():
-        shutil.rmtree(test_data_path)
-
-    os.makedirs(test_data_path)
-
     from autoarray.dataset.plot.interferometer_plots import fits_interferometer
 
     fits_interferometer(
         dataset=dataset,
-        data_path=Path(test_data_path) / "data.fits",
-        noise_map_path=Path(test_data_path) / "noise_map.fits",
-        uv_wavelengths_path=Path(test_data_path) / "uv_wavelengths.fits",
+        data_path=tmp_path / "data.fits",
+        noise_map_path=tmp_path / "noise_map.fits",
+        uv_wavelengths_path=tmp_path / "uv_wavelengths.fits",
         overwrite=True,
     )
 
     dataset = aa.Interferometer.from_fits(
         real_space_mask=mask_2d_7x7,
-        data_path=Path(test_data_path) / "data.fits",
-        noise_map_path=Path(test_data_path) / "noise_map.fits",
-        uv_wavelengths_path=Path(test_data_path) / "uv_wavelengths.fits",
+        data_path=tmp_path / "data.fits",
+        noise_map_path=tmp_path / "noise_map.fits",
+        uv_wavelengths_path=tmp_path / "uv_wavelengths.fits",
     )
 
     assert (dataset.data == np.array([1.0 + 2.0j, 1.0 + 2.0j, 1.0 + 2.0j])).all()
