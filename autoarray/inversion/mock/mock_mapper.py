@@ -58,6 +58,12 @@ class MockMapper(Mapper):
         return self._adapt_data
 
     @property
+    def mesh(self):
+        if self._mesh is None:
+            return super().mesh
+        return self._mesh
+
+    @property
     def mesh_geometry(self):
         if self._mesh_geometry is None:
             return super().mesh_geometry

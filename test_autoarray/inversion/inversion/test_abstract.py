@@ -683,7 +683,9 @@ def test__reconstruction_noise_map__correct_diagonal_noise_values():
 
     inversion = aa.m.MockInversion(curvature_reg_matrix=curvature_reg_matrix)
 
-    assert inversion.reconstruction_covariance_matrix[0, 0] == pytest.approx(2.5, 1.0e-2)
+    assert inversion.reconstruction_covariance_matrix[0, 0] == pytest.approx(
+        2.5, 1.0e-2
+    )
     assert inversion.reconstruction_noise_map == pytest.approx(
         np.sqrt(np.array([2.5, 1.0, 0.5])), 1.0e-3
     )
@@ -812,7 +814,9 @@ def test__reconstruction_noise_map_with_covariance__is_deprecated_alias():
     with pytest.warns(DeprecationWarning, match="reconstruction_covariance_matrix"):
         covariance = inversion.reconstruction_noise_map_with_covariance
 
-    assert covariance == pytest.approx(inversion.reconstruction_covariance_matrix, 1.0e-12)
+    assert covariance == pytest.approx(
+        inversion.reconstruction_covariance_matrix, 1.0e-12
+    )
 
 
 def test__max_pixel_list_from_and_centre__returns_top_pixels_and_brightest_centre():
@@ -883,3 +887,203 @@ def test__max_pixel_list_from__filter_neighbors__excludes_adjacent_pixels_from_t
         0,
         8,
     ]
+
+
+def _zeroed_pixel_inversion(
+    curvature_reg_matrix,
+    use_positive_only_solver=True,
+    use_edge_zeroed_pixels=True,
+    with_mapper=True,
+):
+    """
+    A `MockInversion` over a 4x4 `RectangularUniform` mesh, whose `zeroed_pixels` is the edge ring.
+
+    16 parameters, of which the 12 edge pixels are zeroed and the 4 interior pixels [5, 6, 9, 10] are solved
+    for. A 4x4 kept block is the smallest one on which "the kept block equals the inverse of the submatrix" is
+    a real assertion rather than a scalar identity.
+    """
+    if with_mapper:
+        linear_obj = aa.m.MockMapper(
+            mesh=aa.mesh.RectangularUniform(shape=(4, 4)),
+            parameters=16,
+            regularization=aa.reg.Constant(),
+        )
+    else:
+        linear_obj = aa.m.MockLinearObj(parameters=16, regularization=aa.reg.Constant())
+
+    return aa.m.MockInversion(
+        linear_obj_list=[linear_obj],
+        curvature_reg_matrix=curvature_reg_matrix,
+        settings=aa.Settings(
+            use_positive_only_solver=use_positive_only_solver,
+            use_edge_zeroed_pixels=use_edge_zeroed_pixels,
+        ),
+    )
+
+
+def _spd_matrix(n=16, seed=0):
+    rng = np.random.default_rng(seed)
+    a = rng.normal(size=(n, n))
+    return a @ a.T + n * np.eye(n)
+
+
+def test__solve_ids_to_keep__none_unless_both_settings_and_a_mapper():
+    """
+    The single predicate for "did the solve subset the system?".
+
+    It must reproduce the nesting in `reconstruction` exactly: `use_edge_zeroed_pixels` is consulted ONLY
+    when `use_positive_only_solver` is on, and only when a `Mapper` is present. That scoping is deliberate
+    (see the comment in `reconstruction`), so a change that made this property answer on
+    `use_edge_zeroed_pixels` alone would silently start subsetting the positive-negative solve.
+    """
+    matrix = _spd_matrix()
+
+    assert _zeroed_pixel_inversion(matrix).solve_ids_to_keep == pytest.approx(
+        np.array([5, 6, 9, 10])
+    )
+
+    assert (
+        _zeroed_pixel_inversion(matrix, use_edge_zeroed_pixels=False).solve_ids_to_keep
+        is None
+    )
+    assert (
+        _zeroed_pixel_inversion(
+            matrix, use_positive_only_solver=False
+        ).solve_ids_to_keep
+        is None
+    )
+    assert _zeroed_pixel_inversion(matrix, with_mapper=False).solve_ids_to_keep is None
+
+
+def test__reconstruction_covariance_matrix__formed_on_the_solved_indices():
+    """
+    The covariance must describe the estimator that was actually computed.
+
+    `reconstruction` subsets `curvature_reg_matrix` to `zeroed_ids_to_keep` and scatters back exact zeros.
+    Previously this property inverted the FULL matrix regardless, re-admitting the poorly-constrained boundary
+    vertices the solve dropped to stay stable. Asserted structurally -- shape, which entries are NaN, and the
+    kept block against an independently computed inverse of the submatrix -- rather than against baked-in
+    numbers.
+    """
+    matrix = _spd_matrix()
+
+    covariance = _zeroed_pixel_inversion(matrix).reconstruction_covariance_matrix
+
+    keep = np.array([5, 6, 9, 10])
+    excluded = np.setdiff1d(np.arange(16), keep)
+
+    # shape does not depend on the settings -- callers never branch on it
+    assert covariance.shape == (16, 16)
+
+    assert np.isnan(covariance[excluded]).all()
+    assert np.isnan(covariance[:, excluded]).all()
+
+    assert covariance[np.ix_(keep, keep)] == pytest.approx(
+        np.linalg.inv(matrix[np.ix_(keep, keep)]), 1.0e-8
+    )
+
+
+def test__reconstruction_covariance_matrix__excluded_entries_are_nan_not_zero():
+    """
+    NaN means "never estimated"; zero would mean "known exactly", which is the opposite claim.
+
+    Zero is a legitimate covariance value, so a consumer cannot tell it apart from a real result. These
+    parameters were held at zero by construction and never entered the solve, so the honest report is that
+    there is no number.
+    """
+    covariance = _zeroed_pixel_inversion(_spd_matrix()).reconstruction_covariance_matrix
+
+    assert not (covariance[0] == 0.0).any()
+    assert np.isnan(covariance[0]).all()
+
+
+def test__reconstruction_noise_map__nan_at_the_pixels_the_solve_zeroed():
+    """
+    The invariant this task exists for: the reconstruction and its noise map agree on which pixels were solved.
+
+    Also asserts no `RuntimeWarning` escapes. `np.sqrt` of NaN propagates silently (unlike `np.sqrt` of a
+    negative), so the NaN convention must not reintroduce the warning storm the elementwise-sqrt bug caused.
+    """
+    matrix = _spd_matrix()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        noise_map = _zeroed_pixel_inversion(matrix).reconstruction_noise_map
+
+    keep = np.array([5, 6, 9, 10])
+    excluded = np.setdiff1d(np.arange(16), keep)
+
+    assert np.isnan(noise_map[excluded]).all()
+    assert np.isfinite(noise_map[keep]).all()
+
+    assert noise_map[keep] == pytest.approx(
+        np.sqrt(np.diag(np.linalg.inv(matrix[np.ix_(keep, keep)]))), 1.0e-8
+    )
+
+
+def test__reconstruction_noise_map__kept_pixels_are_never_noisier_than_the_full_matrix():
+    """
+    Restricting the inverse is not a re-scaling of the excluded rows -- it changes the SOLVED pixels too.
+
+    For a symmetric positive-definite `A`, `[A^-1]_keep >= (A_keep)^-1` in the positive-semidefinite ordering,
+    so every kept pixel's variance is lower here than it was. The direction is guaranteed by that inequality,
+    so it is asserted as a one-directional bound rather than as a magnitude: this is the value change that
+    needs a release note, and a regression would show up as a kept pixel getting NOISIER.
+    """
+    matrix = _spd_matrix()
+
+    restricted = _zeroed_pixel_inversion(matrix).reconstruction_noise_map
+    full = _zeroed_pixel_inversion(
+        matrix, use_edge_zeroed_pixels=False
+    ).reconstruction_noise_map
+
+    keep = np.array([5, 6, 9, 10])
+
+    assert (restricted[keep] <= full[keep]).all()
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"use_edge_zeroed_pixels": False},
+        {"use_positive_only_solver": False},
+        {"with_mapper": False},
+    ],
+)
+def test__reconstruction_covariance_matrix__full_system_path_is_unchanged(kwargs):
+    """
+    Every route that does NOT subset the solve must return the full inverse exactly as before, with no NaN.
+
+    `solve_ids_to_keep` returns None rather than "every index" precisely so this path never goes through the
+    indexing and scatter-back code at all.
+    """
+    matrix = _spd_matrix()
+
+    covariance = _zeroed_pixel_inversion(
+        matrix, **kwargs
+    ).reconstruction_covariance_matrix
+
+    assert np.isfinite(covariance).all()
+    assert covariance == pytest.approx(np.linalg.inv(matrix), 1.0e-8)
+
+
+def test__reconstruction_covariance_matrix__non_finite_entry_only_raises_when_the_solve_used_it():
+    """
+    The `LinAlgError` contract holds on the submatrix, which is what `inversion_plots.py` guards on.
+
+    A NaN in a row the solve excluded cannot reach the factorization and does not stop the reconstruction
+    either, so failing on it would make the covariance stricter than the estimator it describes. A NaN in a
+    KEPT row still raises -- scipy would otherwise raise `ValueError`, which the plotting and CSV callers do
+    not catch, and the CSV writer promises not to abort the enclosing model-fit.
+    """
+    excluded_nan = _spd_matrix()
+    excluded_nan[0, 0] = np.nan  # index 0 is an edge pixel, so it is zeroed
+
+    covariance = _zeroed_pixel_inversion(excluded_nan).reconstruction_covariance_matrix
+    assert np.isfinite(covariance[np.ix_([5, 6, 9, 10], [5, 6, 9, 10])]).all()
+
+    kept_nan = _spd_matrix()
+    kept_nan[5, 5] = np.nan  # index 5 is an interior pixel, so it is solved for
+
+    with pytest.raises(np.linalg.LinAlgError, match="non-finite"):
+        _zeroed_pixel_inversion(kept_nan).reconstruction_covariance_matrix

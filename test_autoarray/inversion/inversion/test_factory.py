@@ -184,6 +184,47 @@ def test__inversion_imaging__zeroed_pixels(
     assert inversion.reconstruction[4] > 0.0
 
 
+def test__inversion_imaging__zeroed_pixels__noise_map_agrees_with_the_reconstruction(
+    masked_imaging_7x7_no_blur,
+    rectangular_mapper_7x7_3x3,
+):
+    """
+    End-to-end: the reconstruction and its noise map agree on which pixels were solved.
+
+    The unit tests in `test_abstract.py` drive this through `MockInversion` with a hand-built matrix; this
+    asserts the same invariant through the real solver, mesh and index bookkeeping, which is where the two
+    previously disagreed. The 3x3 mesh zeroes its 8 edge pixels, leaving only the centre solved for.
+    """
+    inversion = aa.Inversion(
+        dataset=masked_imaging_7x7_no_blur,
+        linear_obj_list=[rectangular_mapper_7x7_3x3],
+        settings=aa.Settings(
+            use_positive_only_solver=True, use_edge_zeroed_pixels=True
+        ),
+    )
+
+    reconstruction = np.asarray(inversion.reconstruction)
+    noise_map = np.asarray(inversion.reconstruction_noise_map)
+
+    keep = np.asarray(inversion.solve_ids_to_keep)
+    excluded = np.setdiff1d(np.arange(reconstruction.shape[0]), keep)
+
+    assert keep == pytest.approx(np.array([4]))
+
+    # the NaN set is EXACTLY the set the solve excluded -- no more, no less
+    assert np.array_equal(np.flatnonzero(np.isnan(noise_map)), np.sort(excluded))
+
+    # NaN implies an exact structural zero. The converse is deliberately NOT asserted: the
+    # non-negative solver also pins pixels it DID solve for at exactly 0.0, and those keep a
+    # finite noise value. Asserting the biconditional would pass here only because this 3x3
+    # fixture happens to solve a single pixel -- on a real fit 603 of 784 pixels read 0.0 while
+    # only the 108 excluded ones are NaN.
+    assert (reconstruction[excluded] == 0.0).all()
+
+    assert np.isfinite(noise_map[keep]).all()
+    assert inversion.reconstruction_covariance_matrix.shape == (9, 9)
+
+
 def test__inversion_imaging__via_linear_obj_func_and_mapper(
     masked_imaging_7x7_no_blur,
     rectangular_mapper_7x7_3x3,
