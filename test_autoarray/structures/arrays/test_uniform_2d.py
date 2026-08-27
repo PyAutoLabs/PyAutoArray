@@ -1,10 +1,8 @@
 from astropy.io import fits
-import os
 from pathlib import Path
 
 import numpy as np
 import pytest
-import shutil
 
 import autoarray as aa
 
@@ -191,24 +189,20 @@ def test__from_yx_and_values__3x2_grid__native_matches_expected_pixel_layout():
     assert (array_2d.native == np.array([[3.0, 2.0], [6.0, 4.0], [5.0, 1.0]])).all()
 
 
-def test__output_to_fits__3x3_ones__fits_file_has_ones_and_correct_pixel_scale_header():
+def test__output_to_fits__3x3_ones__fits_file_has_ones_and_correct_pixel_scale_header(
+    tmp_path,
+):
     files_path = Path(__file__).resolve().parent / "files"
 
     array_2d = aa.Array2D.from_fits(
         file_path=files_path / "3x3_ones.fits", hdu=0, pixel_scales=1.0
     )
 
-    output_test_path = files_path / "array" / "output_test"
-    if output_test_path.exists():
-        shutil.rmtree(output_test_path)
-
-    os.makedirs(output_test_path)
-
     from autonerves.fitsable import output_to_fits
-    output_to_fits(values=array_2d.native.array.astype("float"), file_path=output_test_path / "array.fits", header_dict=array_2d.mask.header_dict)
+    output_to_fits(values=array_2d.native.array.astype("float"), file_path=tmp_path / "array.fits", header_dict=array_2d.mask.header_dict)
 
     array_from_fits = aa.Array2D.from_fits(
-        file_path=output_test_path / "array.fits", hdu=0, pixel_scales=1.0
+        file_path=tmp_path / "array.fits", hdu=0, pixel_scales=1.0
     )
 
     assert (array_from_fits.native == np.ones((3, 3))).all()

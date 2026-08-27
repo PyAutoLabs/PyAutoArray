@@ -6,8 +6,10 @@ test_autoarray/mask/files/mask/mask_out.fits
 test_autoarray/plot/wrap/base/files/
 test_autoarray/structures/grids/files/grid_2d.fits
 
-test_autoarray/dataset/files/array/output_test/uv_wavelengths.fits
-test_autoarray/dataset/files/array/output_test/visibilities.fits
+# Test output: tests write results into output_test/ dirs and read them back.
+# Never track them -- a change to the autonerves FITS writer would otherwise
+# rewrite a committed binary and dirty every contributor's tree (PyAutoArray#483).
+test_autoarray/**/output_test/
 test_autoarray/dataset/plot/files/
 test_autoarray/fit/plot/files/
 test_autoarray/structures/arrays/one_d/files/array/
