@@ -184,6 +184,37 @@ def test__inversion_imaging__zeroed_pixels(
     assert inversion.reconstruction[4] > 0.0
 
 
+def test__inversion_imaging__zeroed_pixels__noise_map_agrees_with_the_reconstruction(
+    masked_imaging_7x7_no_blur,
+    rectangular_mapper_7x7_3x3,
+):
+    """
+    End-to-end: the reconstruction and its noise map agree on which pixels were solved.
+
+    The unit tests in `test_abstract.py` drive this through `MockInversion` with a hand-built matrix; this
+    asserts the same invariant through the real solver, mesh and index bookkeeping, which is where the two
+    previously disagreed. The 3x3 mesh zeroes its 8 edge pixels, leaving only the centre solved for.
+    """
+    inversion = aa.Inversion(
+        dataset=masked_imaging_7x7_no_blur,
+        linear_obj_list=[rectangular_mapper_7x7_3x3],
+        settings=aa.Settings(
+            use_positive_only_solver=True, use_edge_zeroed_pixels=True
+        ),
+    )
+
+    reconstruction = np.asarray(inversion.reconstruction)
+    noise_map = np.asarray(inversion.reconstruction_noise_map)
+
+    assert inversion.solve_ids_to_keep == pytest.approx(np.array([4]))
+
+    # a pixel is an exact structural zero in one array exactly when it is NaN in the other
+    assert np.array_equal(reconstruction == 0.0, np.isnan(noise_map))
+
+    assert np.isfinite(noise_map[4])
+    assert inversion.reconstruction_covariance_matrix.shape == (9, 9)
+
+
 def test__inversion_imaging__via_linear_obj_func_and_mapper(
     masked_imaging_7x7_no_blur,
     rectangular_mapper_7x7_3x3,

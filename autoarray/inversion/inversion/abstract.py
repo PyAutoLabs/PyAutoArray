@@ -345,7 +345,10 @@ class AbstractInversion:
         if self.all_linear_obj_have_regularization:
             return self.regularization_matrix
 
-        # ids of values which are on edge so zero-d and not solved for.
+        # Restrict to the mapper parameters. This is NOT edge zeroing -- `mapper_indices` drops the linear
+        # objects that carry no regularization (light profiles and the like), which is a different index set
+        # from `zeroed_ids_to_keep` and applies for a different reason. The two were conflated by an earlier
+        # version of this comment.
         ids_to_keep = self.mapper_indices
 
         # Zero rows and columns in the matrix we want to ignore
@@ -383,7 +386,10 @@ class AbstractInversion:
         if self.all_linear_obj_have_regularization:
             return self.curvature_reg_matrix
 
-        # ids of values which are on edge so zero-d and not solved for.
+        # Restrict to the mapper parameters. This is NOT edge zeroing -- `mapper_indices` drops the linear
+        # objects that carry no regularization (light profiles and the like), which is a different index set
+        # from `zeroed_ids_to_keep` and applies for a different reason. The two were conflated by an earlier
+        # version of this comment.
         ids_to_keep = self.mapper_indices
 
         # Zero rows and columns in the matrix we want to ignore
@@ -490,6 +496,44 @@ class AbstractInversion:
 
         return keep_ids
 
+    @property
+    def solve_ids_to_keep(self) -> Optional[np.ndarray]:
+        """
+        The global parameter indices the reconstruction actually solves for, or `None` when it solves the full
+        system.
+
+        This is the single answer to "which parameters did the solve include?", and it exists so that every
+        quantity derived from the solve agrees with the solve about what it did. `reconstruction` subsets the
+        linear system by these indices and scatters its result back with exact zeros elsewhere;
+        `reconstruction_covariance_matrix` forms the covariance on the same submatrix and scatters back `NaN`.
+
+        Before this property the predicate below lived inline in `reconstruction` and nowhere else, so the
+        covariance had no way to know the solve had been subset -- it inverted the full `curvature_reg_matrix`
+        and reported a noise value for pixels that were never solved for. Keep the two readers pointed here
+        rather than re-deriving the condition, or they can drift apart again.
+
+        `None` rather than "every index" is deliberate: the full-system path must stay byte-identical to what it
+        was, and an `arange` would route it through indexing and scatter-back code it never used before.
+
+        Note that `use_edge_zeroed_pixels` is consulted only when `use_positive_only_solver` is `True`, mirroring
+        the nesting in `reconstruction`. That scoping is deliberate -- see the comment there and
+        `Settings.use_edge_zeroed_pixels`.
+
+        Returns
+        -------
+        The global indices kept by the solve, or `None` if the full system was solved.
+        """
+        if not self.settings.use_positive_only_solver:
+            return None
+
+        if not self.settings.use_edge_zeroed_pixels:
+            return None
+
+        if not self.has(cls=Mapper):
+            return None
+
+        return self.zeroed_ids_to_keep
+
     @cached_property
     def reconstruction(self) -> np.ndarray:
         """
@@ -513,13 +557,17 @@ class AbstractInversion:
             # `use_positive_only_solver`: edge-zeroing is scoped to the positive-only solver, and the
             # positive-negative branch below solves the full system regardless of its value. This is
             # intended, not an oversight -- do not "fix" it by hoisting the check out of this branch.
-            if self.settings.use_edge_zeroed_pixels and self.has(cls=Mapper):
+            # `solve_ids_to_keep` encodes that nesting (it returns None unless BOTH settings are on),
+            # so it is safe to consult here and nowhere higher up.
+            ids_to_keep = self.solve_ids_to_keep
+
+            if ids_to_keep is not None:
 
                 # Use advanced indexing to select rows/columns
-                data_vector = self.data_vector[self.zeroed_ids_to_keep]
-                curvature_reg_matrix = self.curvature_reg_matrix[
-                    self.zeroed_ids_to_keep
-                ][:, self.zeroed_ids_to_keep]
+                data_vector = self.data_vector[ids_to_keep]
+                curvature_reg_matrix = self.curvature_reg_matrix[ids_to_keep][
+                    :, ids_to_keep
+                ]
 
                 # Perform reconstruction via fnnls
                 reconstruction_partial = (
@@ -536,11 +584,11 @@ class AbstractInversion:
 
                 # Scatter the partial solution back to the full shape
                 if self._xp.__name__.startswith("jax"):
-                    reconstruction = reconstruction.at[self.zeroed_ids_to_keep].set(
+                    reconstruction = reconstruction.at[ids_to_keep].set(
                         reconstruction_partial
                     )
                 else:
-                    reconstruction[self.zeroed_ids_to_keep] = reconstruction_partial
+                    reconstruction[ids_to_keep] = reconstruction_partial
 
                 return reconstruction
 
@@ -570,7 +618,10 @@ class AbstractInversion:
         if self.all_linear_obj_have_regularization:
             return self.reconstruction
 
-        # ids of values which are on edge so zero-d and not solved for.
+        # Restrict to the mapper parameters. This is NOT edge zeroing -- `mapper_indices` drops the linear
+        # objects that carry no regularization (light profiles and the like), which is a different index set
+        # from `zeroed_ids_to_keep` and applies for a different reason. The two were conflated by an earlier
+        # version of this comment.
         ids_to_keep = self.mapper_indices
 
         # Zero rows and columns in the matrix we want to ignore
@@ -853,6 +904,30 @@ class AbstractInversion:
         For the RMS standard deviation of each pixel (the quantity used for scientific analysis) use
         `reconstruction_noise_map`, which takes the square root of this matrix's diagonal.
 
+        Formed on the parameters the solve actually solved for
+        -----------------------------------------------------
+        When `use_edge_zeroed_pixels` applies (see `solve_ids_to_keep`), `reconstruction` does not solve the
+        full system: it subsets `curvature_reg_matrix` to `zeroed_ids_to_keep`, solves the reduced problem and
+        scatters the answer back with **exact zeros** at the excluded pixels. Those pixels are the mesh's
+        poorly-constrained boundary vertices, zeroed precisely to keep the inversion stable.
+
+        This matrix is formed on that same index set and scattered back the same way, so it describes the
+        estimator that was actually computed. The excluded rows and columns are `NaN`, not zero: zero is a
+        covariance value ("known exactly"), whereas these parameters were never estimated at all. The returned
+        shape is always `[total_params, total_params]`, so callers do not have to branch on the settings.
+
+        Previously the full matrix was inverted regardless, which re-admitted into an explicit inverse the very
+        rows the solve dropped to stay stable, and reported a noise value for a pixel whose reconstruction reads
+        exactly `0` because it was never solved for.
+
+        Note this also changes the values on the parameters that ARE solved. Inverting the submatrix is not the
+        corresponding block of the full inverse: for a symmetric positive-definite `A`,
+        `[A^-1]_keep >= (A_keep)^-1` in the positive-semidefinite ordering, so every kept pixel's variance is
+        lower here than it was. That is the correct quantity -- the excluded parameters are held at zero by
+        construction, so conditioning on them is exact, not an approximation. It is unrelated to the
+        NNLS active-set caveat documented on `reconstruction_noise_map`, where the pixels held at zero are
+        chosen by the data rather than fixed in advance.
+
         The inverse is formed from a Cholesky factorization rather than `np.linalg.inv`, for two reasons:
 
         - `cho_factor` raises `LinAlgError` when the matrix is not positive-definite. `np.linalg.inv` raises only
@@ -884,8 +959,22 @@ class AbstractInversion:
         """
         from scipy.linalg import cho_factor, cho_solve
 
-        matrix = np.asarray(self.curvature_reg_matrix)
+        full_matrix = np.asarray(self.curvature_reg_matrix)
 
+        # Form the covariance on exactly the parameters the solve solved for. `solve_ids_to_keep` is None when
+        # the solve used the full system, in which case this path is unchanged.
+        ids_to_keep = self.solve_ids_to_keep
+
+        if ids_to_keep is None:
+            matrix = full_matrix
+        else:
+            ids_to_keep = np.asarray(ids_to_keep)
+            matrix = full_matrix[ids_to_keep][:, ids_to_keep]
+
+        # The guard runs on the SUBMATRIX, not the full one. A non-finite entry in a row the solve excluded
+        # cannot reach the factorization, and the reconstruction does not fail on it either -- failing here
+        # would make the covariance stricter than the solve it describes. It must also run before the
+        # scatter-back below, which fills the excluded entries with NaN deliberately.
         if not np.isfinite(matrix).all():
             raise np.linalg.LinAlgError(
                 "The curvature_reg_matrix contains non-finite entries (NaN or inf), so the reconstruction "
@@ -904,7 +993,18 @@ class AbstractInversion:
         )
 
         # cho_solve is accurate but not bitwise symmetric; a covariance matrix is symmetric by definition.
-        return 0.5 * (covariance + covariance.T)
+        covariance = 0.5 * (covariance + covariance.T)
+
+        if ids_to_keep is None:
+            return covariance
+
+        # Scatter back to the full parameter shape, so this property's shape does not depend on the settings.
+        # The excluded entries are NaN ("never estimated"), which is what the solve says about them -- their
+        # reconstruction is an exact structural zero, not a fitted value.
+        full_covariance = np.full(full_matrix.shape, np.nan, dtype=covariance.dtype)
+        full_covariance[np.ix_(ids_to_keep, ids_to_keep)] = covariance
+
+        return full_covariance
 
     @property
     def reconstruction_noise_map_with_covariance(self) -> np.ndarray:
@@ -918,6 +1018,10 @@ class AbstractInversion:
 
         It now returns the covariance matrix itself, so the values differ: the diagonal holds variances rather
         than standard deviations, and the off-diagonals hold covariances rather than `NaN`.
+
+        Note it also inherits `reconstruction_covariance_matrix`'s index set: under `use_edge_zeroed_pixels` the
+        rows and columns of parameters the solve excluded are `NaN` (never estimated), and the entries that
+        remain are the inverse of the submatrix rather than a block of the full inverse. See that property.
 
         Returns
         -------
@@ -949,6 +1053,25 @@ class AbstractInversion:
 
         It is computed as the square root of the diagonal of `reconstruction_covariance_matrix`, which is the
         inverse of the same matrix used to solve for the reconstruction via the linear inversion.
+
+        Pixels the solve never estimated are `NaN`
+        ------------------------------------------
+        Under `use_edge_zeroed_pixels` (the shipped default, and unconditional for the
+        `Rectangular*AdaptDensity` mesh family, whose `zeroed_pixels` is the whole edge ring) the solve excludes
+        the mesh's boundary vertices and writes an exact `0.0` into `reconstruction` for them. This noise map
+        reports **`NaN`** at exactly those pixels, meaning "never estimated" -- they have no uncertainty because
+        they have no fitted value.
+
+        So the two arrays agree on which pixels were solved:
+        `reconstruction[i] == 0.0` exactly at an excluded pixel, and `reconstruction_noise_map[i]` is `NaN`
+        there. Previously those pixels carried a finite noise value computed as though they had been solved.
+
+        `NaN` propagates rather than raising, and the consumers handle it: the colour scales derive their
+        limits with `np.nanmax` (`plot/utils.py:norm_from`), and `save_reconstruction_csv` already writes `nan`
+        into this column when the covariance cannot be computed. A signal-to-noise map formed as
+        `reconstruction / reconstruction_noise_map` gives `0.0 / NaN = NaN` at these pixels, silently, and a
+        `NaN >= threshold` comparison is `False` -- so they fall outside any signal-to-noise cut rather than
+        being counted as significant.
 
         This previously took the diagonal of an elementwise-square-rooted matrix. The two are algebraically
         identical -- `np.sqrt` is elementwise, so it commutes with taking the diagonal -- but only numerically
