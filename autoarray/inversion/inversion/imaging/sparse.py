@@ -450,26 +450,25 @@ class InversionImagingSparse(AbstractInversionImaging):
                         linear_func_param_range[0] : linear_func_param_range[1],
                     ].set(off_diag)
 
-        for index_0, linear_func_0 in enumerate(linear_func_list):
+        # The linear func x linear func block is symmetric, so each weighted matrix is
+        # formed once and only the upper triangle of blocks is computed, with the
+        # mirrored block set from the transpose.
+        weighted_vector_list = [
+            self.linear_func_operated_mapping_matrix_dict[linear_func]
+            / self.noise_map[:, None]
+            for linear_func in linear_func_list
+        ]
+
+        for index_0 in range(len(linear_func_list)):
 
             linear_func_param_range_0 = linear_func_param_range_list[index_0]
 
-            weighted_vector_0 = (
-                self.linear_func_operated_mapping_matrix_dict[linear_func_0]
-                / self.noise_map[:, None]
-            )
-
-            for index_1, linear_func_1 in enumerate(linear_func_list):
+            for index_1 in range(index_0, len(linear_func_list)):
                 linear_func_param_range_1 = linear_func_param_range_list[index_1]
 
-                weighted_vector_1 = (
-                    self.linear_func_operated_mapping_matrix_dict[linear_func_1]
-                    / self.noise_map[:, None]
-                )
-
                 diag = self._xp.dot(
-                    weighted_vector_0.T,
-                    weighted_vector_1,
+                    weighted_vector_list[index_0].T,
+                    weighted_vector_list[index_1],
                 )
 
                 if self._xp is np:
@@ -479,12 +478,24 @@ class InversionImagingSparse(AbstractInversionImaging):
                         linear_func_param_range_1[0] : linear_func_param_range_1[1],
                     ] = diag
 
+                    if index_1 != index_0:
+                        curvature_matrix[
+                            linear_func_param_range_1[0] : linear_func_param_range_1[1],
+                            linear_func_param_range_0[0] : linear_func_param_range_0[1],
+                        ] = diag.T
+
                 else:
 
                     curvature_matrix = curvature_matrix.at[
                         linear_func_param_range_0[0] : linear_func_param_range_0[1],
                         linear_func_param_range_1[0] : linear_func_param_range_1[1],
                     ].set(diag)
+
+                    if index_1 != index_0:
+                        curvature_matrix = curvature_matrix.at[
+                            linear_func_param_range_1[0] : linear_func_param_range_1[1],
+                            linear_func_param_range_0[0] : linear_func_param_range_0[1],
+                        ].set(diag.T)
 
         return curvature_matrix
 

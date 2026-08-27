@@ -119,7 +119,9 @@ class InversionImagingSparseNumba(AbstractInversionImaging):
         Memoized matrices are returned read-only; every consumer in this class
         copies or derives from them (`np.array(...)`, divisions), never mutates.
         """
-        parent_fget = AbstractInversionImaging.linear_func_operated_mapping_matrix_dict.fget
+        parent_fget = (
+            AbstractInversionImaging.linear_func_operated_mapping_matrix_dict.func
+        )
 
         if os.environ.get("AUTOARRAY_NUMBA_OPERATED_MEMO", "1") == "0":
             return parent_fget(self)
@@ -542,32 +544,37 @@ class InversionImagingSparseNumba(AbstractInversionImaging):
                     linear_func_param_range[0] : linear_func_param_range[1],
                 ] = off_diag
 
-        for index_0, linear_func_0 in enumerate(linear_func_list):
+        # The linear func x linear func block is symmetric, so each weighted matrix is
+        # formed once and only the upper triangle of blocks is computed, with the
+        # mirrored block set from the transpose.
+        weighted_vector_list = [
+            self.linear_func_operated_mapping_matrix_dict[linear_func]
+            / self.noise_map[:, None]
+            for linear_func in linear_func_list
+        ]
+
+        for index_0 in range(len(linear_func_list)):
 
             linear_func_param_range_0 = linear_func_param_range_list[index_0]
 
-            weighted_vector_0 = (
-                self.linear_func_operated_mapping_matrix_dict[linear_func_0]
-                / self.noise_map[:, None]
-            )
-
-            for index_1, linear_func_1 in enumerate(linear_func_list):
+            for index_1 in range(index_0, len(linear_func_list)):
                 linear_func_param_range_1 = linear_func_param_range_list[index_1]
 
-                weighted_vector_1 = (
-                    self.linear_func_operated_mapping_matrix_dict[linear_func_1]
-                    / self.noise_map[:, None]
-                )
-
                 diag = np.dot(
-                    weighted_vector_0.T,
-                    weighted_vector_1,
+                    weighted_vector_list[index_0].T,
+                    weighted_vector_list[index_1],
                 )
 
                 curvature_matrix[
                     linear_func_param_range_0[0] : linear_func_param_range_0[1],
                     linear_func_param_range_1[0] : linear_func_param_range_1[1],
                 ] = diag
+
+                if index_1 != index_0:
+                    curvature_matrix[
+                        linear_func_param_range_1[0] : linear_func_param_range_1[1],
+                        linear_func_param_range_0[0] : linear_func_param_range_0[1],
+                    ] = diag.T
 
         return curvature_matrix
 
