@@ -1,6 +1,8 @@
 import numpy as np
 from typing import Dict, List, Union, Type
 
+from autonerves import cached_property
+
 from autoarray.dataset.imaging.dataset import Imaging
 from autoarray.inversion.inversion.dataset_interface import DatasetInterface
 from autoarray.inversion.linear_obj.func_list import AbstractLinearObjFuncList
@@ -180,7 +182,7 @@ class AbstractInversionImaging(AbstractInversion):
 
         return linear_func_mapping_matrix_dict
 
-    @property
+    @cached_property
     def linear_func_operated_mapping_matrix_dict(self) -> Dict:
         """
         The `operated_mapping_matrix` of a linear object describes the mappings between the observed data's values and

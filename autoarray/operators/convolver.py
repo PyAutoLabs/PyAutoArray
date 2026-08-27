@@ -142,6 +142,7 @@ class ConvolverState:
         )
 
         self.fft_shape = fft_shape
+        self.source_mask = mask
         self.mask = mask.resized_from(self.fft_shape, pad_value=1)
 
         if blurring_mask is None:
@@ -149,9 +150,7 @@ class ConvolverState:
                 kernel_shape_native=self.kernel.shape_native
             )
         else:
-            self.blurring_mask = blurring_mask.resized_from(
-                self.fft_shape, pad_value=1
-            )
+            self.blurring_mask = blurring_mask.resized_from(self.fft_shape, pad_value=1)
 
         # Set by Convolver.state_from when convolve_over_sample_size > 1: the
         # permutations from per-pixel sub-block ordering to the fine mask's
@@ -169,6 +168,17 @@ class ConvolverState:
         # saves. convolved_mapping_matrix_from intentionally does NOT use a
         # complex64 kernel — see that method's body for why.
         self.fft_kernel_c64 = self.fft_kernel.astype(np.complex64)
+
+    def is_for_mask(self, mask) -> bool:
+        """
+        Whether this state was built from the input mask, and can therefore be reused
+        instead of rebuilt (its padded FFT geometry is only valid for that mask).
+        """
+        return (
+            self.source_mask.pixel_scales == mask.pixel_scales
+            and self.source_mask.shape_native == mask.shape_native
+            and np.array_equal(np.array(self.source_mask), np.array(mask))
+        )
 
 
 class Convolver:
@@ -303,7 +313,9 @@ class Convolver:
         if s == 1:
             return self.kernel.shape_native
 
-        return tuple(2 * int(np.ceil((k // 2) / s)) + 1 for k in self.kernel.shape_native)
+        return tuple(
+            2 * int(np.ceil((k // 2) / s)) + 1 for k in self.kernel.shape_native
+        )
 
     def state_from(self, mask):
 
@@ -314,16 +326,10 @@ class Convolver:
 
             return self._fine_state_from(mask=mask)
 
-        if (
-            mask.shape_native[0] != self.kernel.shape_native[0]
-            or mask.shape_native[1] != self.kernel.shape_native[1]
-        ):
-            return ConvolverState(kernel=self.kernel, mask=mask)
+        if self._state is not None and self._state.is_for_mask(mask=mask):
+            return self._state
 
-        if self._state is None:
-            return ConvolverState(kernel=self.kernel, mask=mask)
-
-        return self._state
+        return ConvolverState(kernel=self.kernel, mask=mask)
 
     def _fine_state_from(self, mask) -> ConvolverState:
         """

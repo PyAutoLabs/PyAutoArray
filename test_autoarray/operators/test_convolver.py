@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 import autoarray as aa
+from autoarray.operators.convolver import ConvolverState
 from pathlib import Path
 
 test_data_path = Path(Path(__file__).resolve().parent) / "files"
@@ -386,9 +387,7 @@ def _ground_truth_scene(over_sample_size):
         values=_ground_truth_gaussian(kyy, kxx, 0.8), pixel_scales=1.0 / s
     )
 
-    convolver = aa.Convolver(
-        kernel=kernel, normalize=True, convolve_over_sample_size=s
-    )
+    convolver = aa.Convolver(kernel=kernel, normalize=True, convolve_over_sample_size=s)
 
     grid = aa.Grid2D.from_mask(mask=mask, over_sample_size=s)
 
@@ -549,3 +548,135 @@ def test__convolve_over_sample_size__blurring_mask_padding__delta_kernel_identit
     binned = values_sub.reshape(mask.pixels_in_mask, s**2).mean(axis=1)
 
     assert np.array(convolved) == pytest.approx(binned, abs=1.0e-14)
+
+
+def test__state_from__precomputed_state_reused_for_matching_mask():
+    mask = aa.Mask2D.circular(shape_native=(15, 15), pixel_scales=1.0, radius=5.0)
+
+    kernel = aa.Array2D.no_mask(
+        values=np.random.default_rng(3).random((5, 3)), pixel_scales=1.0
+    )
+
+    state = ConvolverState(kernel=kernel, mask=mask)
+
+    convolver = aa.Convolver(kernel=kernel, state=state)
+
+    assert convolver.state_from(mask=mask) is state
+    assert convolver.state_from(mask=mask) is state
+
+    # An identical but distinct mask object also matches the cached state.
+    mask_copy = aa.Mask2D.circular(shape_native=(15, 15), pixel_scales=1.0, radius=5.0)
+
+    assert convolver.state_from(mask=mask_copy) is state
+
+    # A different mask must not reuse the cached state.
+    mask_other = aa.Mask2D.circular(shape_native=(15, 15), pixel_scales=1.0, radius=4.0)
+
+    state_other = convolver.state_from(mask=mask_other)
+
+    assert state_other is not state
+    assert state_other.is_for_mask(mask=mask_other)
+
+    # A mask of the same shape but different pixel scales is also a different mask.
+    mask_scales = aa.Mask2D.circular(
+        shape_native=(15, 15), pixel_scales=2.0, radius=10.0
+    )
+
+    assert convolver.state_from(mask=mask_scales) is not state
+
+
+def test__precomputed_state__convolution_bit_identical_to_no_state():
+    mask = aa.Mask2D.circular(shape_native=(15, 15), pixel_scales=1.0, radius=5.0)
+    blurring_mask = mask.derive_mask.blurring_from(kernel_shape_native=(5, 3))
+
+    rng = np.random.default_rng(4)
+
+    kernel = aa.Array2D.no_mask(values=rng.random((5, 3)), pixel_scales=1.0)
+
+    image = aa.Array2D(values=rng.random(mask.pixels_in_mask), mask=mask)
+    blurring_image = aa.Array2D(
+        values=rng.random(blurring_mask.pixels_in_mask), mask=blurring_mask
+    )
+
+    mapping_matrix = rng.random((mask.pixels_in_mask, 4))
+    blurring_mapping_matrix = rng.random((blurring_mask.pixels_in_mask, 4))
+
+    convolver_no_state = aa.Convolver(kernel=kernel)
+    convolver_state = aa.Convolver(
+        kernel=kernel, state=ConvolverState(kernel=kernel, mask=mask)
+    )
+
+    assert np.array_equal(
+        np.array(
+            convolver_state.convolved_image_via_real_space_np_from(
+                image=image, blurring_image=blurring_image
+            )
+        ),
+        np.array(
+            convolver_no_state.convolved_image_via_real_space_np_from(
+                image=image, blurring_image=blurring_image
+            )
+        ),
+    )
+
+    assert np.array_equal(
+        convolver_state.convolved_mapping_matrix_via_real_space_np_from(
+            mapping_matrix=mapping_matrix,
+            mask=mask,
+            blurring_mapping_matrix=blurring_mapping_matrix,
+        ),
+        convolver_no_state.convolved_mapping_matrix_via_real_space_np_from(
+            mapping_matrix=mapping_matrix,
+            mask=mask,
+            blurring_mapping_matrix=blurring_mapping_matrix,
+        ),
+    )
+
+
+def test__convolved_mapping_matrix_via_real_space_np__matches_image_convolution_per_column():
+    # The blurring mapping matrix is ordered on `mask.derive_mask.blurring_from(...)`,
+    # whereas the convolution scatters it via the FFT-frame `state.blurring_mask`. The
+    # two orderings must agree, so this compares each column against both the image
+    # convolution and a brute force convolution performed on the original mask frame.
+    from scipy.signal import convolve as scipy_convolve
+
+    mask = aa.Mask2D.circular(shape_native=(15, 15), pixel_scales=1.0, radius=5.0)
+    blurring_mask = mask.derive_mask.blurring_from(kernel_shape_native=(5, 3))
+
+    rng = np.random.default_rng(5)
+
+    kernel = aa.Array2D.no_mask(values=rng.random((5, 3)), pixel_scales=1.0)
+    convolver = aa.Convolver(kernel=kernel)
+
+    mapping_matrix = rng.random((mask.pixels_in_mask, 3))
+    blurring_mapping_matrix = rng.random((blurring_mask.pixels_in_mask, 3))
+
+    convolved = convolver.convolved_mapping_matrix_via_real_space_np_from(
+        mapping_matrix=mapping_matrix,
+        mask=mask,
+        blurring_mapping_matrix=blurring_mapping_matrix,
+    )
+
+    native = np.zeros(mask.shape_native + (3,))
+    native[mask.slim_to_native_tuple] = mapping_matrix
+    native[blurring_mask.slim_to_native_tuple] = blurring_mapping_matrix
+
+    brute_force = scipy_convolve(native, kernel.native.array[..., None], mode="same")[
+        mask.slim_to_native_tuple
+    ]
+
+    assert convolved == pytest.approx(brute_force, abs=1.0e-12)
+
+    for index in range(3):
+        image = aa.Array2D(values=mapping_matrix[:, index], mask=mask)
+        blurring_image = aa.Array2D(
+            values=blurring_mapping_matrix[:, index], mask=blurring_mask
+        )
+
+        convolved_image = convolver.convolved_image_via_real_space_np_from(
+            image=image, blurring_image=blurring_image
+        )
+
+        assert convolved[:, index] == pytest.approx(
+            np.array(convolved_image), abs=1.0e-12
+        )
