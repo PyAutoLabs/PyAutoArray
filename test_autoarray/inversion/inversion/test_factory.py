@@ -206,12 +206,22 @@ def test__inversion_imaging__zeroed_pixels__noise_map_agrees_with_the_reconstruc
     reconstruction = np.asarray(inversion.reconstruction)
     noise_map = np.asarray(inversion.reconstruction_noise_map)
 
-    assert inversion.solve_ids_to_keep == pytest.approx(np.array([4]))
+    keep = np.asarray(inversion.solve_ids_to_keep)
+    excluded = np.setdiff1d(np.arange(reconstruction.shape[0]), keep)
 
-    # a pixel is an exact structural zero in one array exactly when it is NaN in the other
-    assert np.array_equal(reconstruction == 0.0, np.isnan(noise_map))
+    assert keep == pytest.approx(np.array([4]))
 
-    assert np.isfinite(noise_map[4])
+    # the NaN set is EXACTLY the set the solve excluded -- no more, no less
+    assert np.array_equal(np.flatnonzero(np.isnan(noise_map)), np.sort(excluded))
+
+    # NaN implies an exact structural zero. The converse is deliberately NOT asserted: the
+    # non-negative solver also pins pixels it DID solve for at exactly 0.0, and those keep a
+    # finite noise value. Asserting the biconditional would pass here only because this 3x3
+    # fixture happens to solve a single pixel -- on a real fit 603 of 784 pixels read 0.0 while
+    # only the 108 excluded ones are NaN.
+    assert (reconstruction[excluded] == 0.0).all()
+
+    assert np.isfinite(noise_map[keep]).all()
     assert inversion.reconstruction_covariance_matrix.shape == (9, 9)
 
 

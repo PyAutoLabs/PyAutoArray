@@ -928,6 +928,21 @@ class AbstractInversion:
         NNLS active-set caveat documented on `reconstruction_noise_map`, where the pixels held at zero are
         chosen by the data rather than fixed in advance.
 
+        Measured on real ray-traced fits (Isothermal `einstein_radius=1.6` + shear, compact Sersic source,
+        `r=3.0"` mask, `over_sample_size_pixelization=4`, PSF and Poisson noise), at the regularization
+        coefficient the Bayesian evidence selects:
+
+        - `RectangularBilinearAdaptDensity(28, 28)`, 108 of 784 parameters zeroed: the old value was
+          overstated by a median factor of 1.0002, but 21% of solved pixels move by more than 1%, 9% by more
+          than 10%, and the worst by 1.8x. The change is concentrated near the mesh edge rather than spread.
+        - `Delaunay` set up as the workspace's own example does (an `Overlay` image mesh plus a ring of edge
+          points, `zeroed_pixels=30`): median 1.0045, 99th percentile 1.90, worst 2.37. Delaunay is affected
+          too whenever `zeroed_pixels > 0`; with the default `zeroed_pixels=0` this property is unchanged to
+          the bit.
+        - Downstream source flux and magnification through the workspace's `S/N >= 5` cut moved by 0.00% in
+          every case: the pixels whose noise changes most are near the edge, where the reconstruction has no
+          flux to move.
+
         The inverse is formed from a Cholesky factorization rather than `np.linalg.inv`, for two reasons:
 
         - `cho_factor` raises `LinAlgError` when the matrix is not positive-definite. `np.linalg.inv` raises only
@@ -1062,9 +1077,16 @@ class AbstractInversion:
         reports **`NaN`** at exactly those pixels, meaning "never estimated" -- they have no uncertainty because
         they have no fitted value.
 
-        So the two arrays agree on which pixels were solved:
-        `reconstruction[i] == 0.0` exactly at an excluded pixel, and `reconstruction_noise_map[i]` is `NaN`
-        there. Previously those pixels carried a finite noise value computed as though they had been solved.
+        So the two arrays agree on which pixels were solved. The implication runs one way, and the direction
+        matters: **`NaN` implies the reconstruction is exactly `0.0` there, but not the converse.** The
+        non-negative solver also pins pixels it DID solve for at exactly `0.0`, and those keep a finite,
+        meaningful noise value. On a representative fit -- `RectangularBilinearAdaptDensity(28, 28)`, 784
+        parameters -- 603 pixels read `0.0` while only the 108 structurally excluded ones are `NaN`; the other
+        495 were solved and pinned by the constraint. `np.isnan(reconstruction_noise_map)` is therefore the way
+        to identify the never-estimated pixels; `reconstruction == 0.0` is not, and conflates the two.
+
+        Previously the excluded pixels carried a finite noise value computed as though they had been solved,
+        so there was no way to tell them apart from the pinned ones at all.
 
         `NaN` propagates rather than raising, and the consumers handle it: the colour scales derive their
         limits with `np.nanmax` (`plot/utils.py:norm_from`), and `save_reconstruction_csv` already writes `nan`
