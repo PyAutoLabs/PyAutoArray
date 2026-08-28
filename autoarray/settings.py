@@ -17,6 +17,7 @@ class Settings:
         no_regularization_add_to_curvature_diag_value: float = None,
         nnls_solver_tol: Optional[float] = None,
         nnls_max_iter: Optional[int] = None,
+        nnls_warm_start_memo: Optional[bool] = None,
         log_det_method: Optional[str] = None,
         regularization_term_method: Optional[str] = None,
     ):
@@ -99,6 +100,16 @@ class Settings:
             jaxnnls's own hard-coded cap of 50 (production HST pixelization+MGE systems converge in ~19-21
             iterations). Under `vmap` the solve runs until the slowest lane in the batch converges, so this
             also caps the worst-case batched cost. Only the JAX (`xp=jnp`) path honors this.
+        nnls_warm_start_memo
+            Whether the NumPy / numba positive-only (NNLS) solve warm-starts its active-set iteration from the
+            passive set of the *previous* likelihood evaluation, held in a small process-local memo
+            (:mod:`autoarray.inversion.inversion.nnls_memo`). Successive sampler evaluations sit close together in
+            parameter space and share most of their passive set, so the seeded start removes active-set iterations
+            from the solve, which is ~70% of a numba CPU likelihood evaluation on production Delaunay meshes. The
+            NNLS optimum is unique, so the reconstruction is unchanged. `None` (default) reads the packaged value
+            (`true`); setting ``AUTOARRAY_NNLS_WARM_START=0`` is the process-wide kill-switch that disables the
+            memo whatever this setting says. Only the NumPy (`xp=np`) fnnls path honors this; the JAX path
+            ignores it.
         log_det_method
             Which computation is used for the two Bayesian-evidence log-determinant terms
             (``log_det_curvature_reg_matrix_term`` and ``log_det_regularization_matrix_term``). `None`
@@ -151,6 +162,7 @@ class Settings:
         self.use_mixed_precision = use_mixed_precision
         self.nnls_solver_tol = nnls_solver_tol
         self.nnls_max_iter = nnls_max_iter
+        self._nnls_warm_start_memo = nnls_warm_start_memo
         self._use_positive_only_solver = use_positive_only_solver
         self._use_edge_zeroed_pixels = use_edge_zeroed_pixels
         self._use_border_relocator = use_border_relocator
@@ -200,6 +212,22 @@ class Settings:
             ]
 
         return self._no_regularization_add_to_curvature_diag_value
+
+    @property
+    def nnls_warm_start_memo(self) -> bool:
+        """
+        Whether the NumPy fnnls solve is warm-started from the previous evaluation's passive set.
+        """
+        if self._nnls_warm_start_memo is None:
+            try:
+                return conf.instance["general"]["inversion"]["nnls_warm_start_memo"]
+            except KeyError:
+                # Workspaces ship their own general.yaml that shadows autoarray's
+                # and will not carry this key, so in practice this fallback *is*
+                # the production default: on, matching the packaged value.
+                return True
+
+        return self._nnls_warm_start_memo
 
     @property
     def log_det_method(self):

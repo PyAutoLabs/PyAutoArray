@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import warnings
 
 import numpy as np
@@ -534,6 +535,37 @@ class AbstractInversion:
 
         return self.zeroed_ids_to_keep
 
+    def _nnls_warm_start_fingerprint(self, ids_to_keep=None) -> Optional[str]:
+        """
+        Identify the index space this inversion's positive-only solve works in, so the
+        cross-evaluation passive-set memo (`autoarray.inversion.inversion.nnls_memo`) only
+        reuses a seed across evaluations whose reconstruction entries mean the same thing.
+
+        Deliberately built from shapes, NOT from the curvature matrix or data vector: the
+        memo exists to carry a passive set between *neighbouring* parameter points, whose
+        matrices differ. What must not change is the mapping from index to source pixel --
+        the mesh sizes and the parameter-vector length. Under edge zeroing the passive set
+        lives in the subset index space, so `ids_to_keep` is part of the identity too.
+
+        Returns `None` on the JAX path, which does not run fnnls at all.
+        """
+        if self._xp.__name__.startswith("jax"):
+            return None
+
+        parts = [str(tuple(np.shape(self.data_vector)))]
+
+        for mapper in self.cls_list_from(cls=Mapper):
+            parts.append(str(tuple(np.shape(mapper.source_plane_mesh_grid))))
+
+        if ids_to_keep is not None:
+            parts.append(
+                hashlib.sha256(
+                    np.ascontiguousarray(ids_to_keep, dtype=np.int64).tobytes()
+                ).hexdigest()
+            )
+
+        return "|".join(parts)
+
     @cached_property
     def reconstruction(self) -> np.ndarray:
         """
@@ -576,6 +608,9 @@ class AbstractInversion:
                         curvature_reg_matrix=curvature_reg_matrix,
                         settings=self.settings,
                         xp=self._xp,
+                        fingerprint=self._nnls_warm_start_fingerprint(
+                            ids_to_keep=ids_to_keep
+                        ),
                     )
                 )
 
@@ -599,6 +634,7 @@ class AbstractInversion:
                     curvature_reg_matrix=self.curvature_reg_matrix,
                     settings=self.settings,
                     xp=self._xp,
+                    fingerprint=self._nnls_warm_start_fingerprint(),
                 )
 
         return inversion_util.reconstruction_positive_negative_from(

@@ -193,3 +193,129 @@ def test__fnnls_cholesky__accepts_jax_arrays(seed):
 
     assert np.all(np.asarray(d_jax) >= 0.0)
     assert np.asarray(d_jax) == pytest.approx(d_np, rel=1e-6, abs=1e-8)
+
+
+def _mixed_sign_normal_equations(seed, n=30, n_data=50):
+    """A system whose unconstrained solution has many negative components, so
+    the non-negativity constraints bind and the passive set is a strict
+    subset."""
+    rng = np.random.default_rng(seed)
+    Z = rng.normal(size=(n_data, n))
+    x = Z @ rng.normal(size=n) + rng.normal(size=n_data)
+    return Z.T @ Z, Z.T @ x
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test__fnnls_cholesky__stats_are_self_consistent(seed):
+    ZTZ, ZTx = _mixed_sign_normal_equations(seed)
+
+    stats = {}
+    d = fnnls_cholesky(ZTZ, ZTx, stats=stats)
+
+    assert set(stats) == {
+        "outer_iterations",
+        "inner_iterations",
+        "passive_set",
+        "n_passive",
+        "warm_start_errors",
+    }
+    assert stats["n_passive"] == len(stats["passive_set"])
+    assert np.array_equal(np.sort(stats["passive_set"]), np.where(d > 0)[0])
+    assert stats["outer_iterations"] > 0
+    # A cold start's "warm start" is the empty passive set, so every finally
+    # passive entry counts as an error.
+    assert stats["warm_start_errors"] == stats["n_passive"]
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test__fnnls_cholesky__warm_start_from_the_true_support__reports_no_errors(seed):
+    ZTZ, ZTx = _mixed_sign_normal_equations(seed)
+
+    d_cold = fnnls_cholesky(ZTZ, ZTx)
+
+    stats = {}
+    d_warm = fnnls_cholesky(ZTZ, ZTx, P_initial=d_cold > 0, stats=stats)
+
+    assert stats["warm_start_errors"] == 0
+    # Seeded at the optimum the solver has nothing to do: no index has a
+    # positive gradient, so the active-set loop never runs.
+    assert stats["outer_iterations"] == 0
+    assert stats["inner_iterations"] == 0
+    assert d_warm == pytest.approx(d_cold, rel=1e-10, abs=1e-12)
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test__fnnls_cholesky__factorisation_seeded_warm_start__matches_cold_start(seed):
+    # The warm start now factorises its passive set once and hands that factor
+    # straight to the active-set loop (instead of a dense solve thrown away and
+    # rebuilt). The solution must be untouched.
+    ZTZ, ZTx = _mixed_sign_normal_equations(seed)
+
+    d_cold = fnnls_cholesky(ZTZ, ZTx)
+
+    P_initial = slg.solve(ZTZ.copy(), ZTx.copy(), assume_a="pos") > 0
+    d_warm = fnnls_cholesky(ZTZ, ZTx, P_initial=P_initial)
+
+    assert d_warm == pytest.approx(d_cold, rel=1e-10, abs=1e-12)
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test__fnnls_cholesky__badly_wrong_warm_start__still_converges(seed):
+    # A memo-seeded passive set is a guess about a *different* matrix, so it can
+    # be arbitrarily wrong. The NNLS optimum is unique, so every seed must land
+    # on the same solution -- only the iteration count may differ.
+    ZTZ, ZTx = _mixed_sign_normal_equations(seed)
+    n = ZTZ.shape[0]
+
+    d_cold = fnnls_cholesky(ZTZ, ZTx)
+
+    rng = np.random.default_rng(100 + seed)
+    flipped = (d_cold > 0).copy()
+    flip = rng.random(n) < 0.3
+    flipped[flip] = ~flipped[flip]
+
+    for P_initial in [flipped, np.ones(n, dtype=bool)]:
+        stats = {}
+        d_warm = fnnls_cholesky(ZTZ, ZTx, P_initial=P_initial, stats=stats)
+
+        assert d_warm == pytest.approx(d_cold, rel=1e-8, abs=1e-10)
+        assert stats["warm_start_errors"] == np.count_nonzero(
+            P_initial != (d_warm > 0)
+        )
+
+
+def test__fnnls_cholesky__all_true_warm_start_with_negative_components():
+    # The trap the pre-loop constraint fix exists to close: with `P` all True
+    # the outer `while (not np.all(P))` never runs, so before the fix a warm
+    # start whose unconstrained solution has negative components returned the
+    # merely-clipped vector -- a wrong answer, silently.
+    ZTZ = np.array([[2.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 1.0]])
+    ZTx = np.array([1.0, 1.0, 2.0])
+
+    # Unconstrained solution is [1, -1, 3]: entry 1 must leave the passive set.
+    assert np.linalg.solve(ZTZ, ZTx)[1] < 0.0
+
+    d = fnnls_cholesky(ZTZ, ZTx, P_initial=np.ones(3, dtype=bool))
+
+    assert d == pytest.approx(np.array([0.5, 0.0, 2.0]), rel=1e-10, abs=1e-12)
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test__fnnls_cholesky__mask_and_index_warm_starts_are_equivalent(seed):
+    ZTZ, ZTx = _mixed_sign_normal_equations(seed)
+
+    mask = slg.solve(ZTZ.copy(), ZTx.copy(), assume_a="pos") > 0
+
+    stats_mask = {}
+    d_mask = fnnls_cholesky(ZTZ, ZTx, P_initial=mask, stats=stats_mask)
+
+    stats_index = {}
+    d_index = fnnls_cholesky(
+        ZTZ, ZTx, P_initial=np.where(mask)[0], stats=stats_index
+    )
+
+    assert d_mask == pytest.approx(d_index, rel=1e-12, abs=1e-14)
+    assert stats_mask["warm_start_errors"] == stats_index["warm_start_errors"]
+    assert np.array_equal(
+        np.sort(stats_mask["passive_set"]), np.sort(stats_index["passive_set"])
+    )

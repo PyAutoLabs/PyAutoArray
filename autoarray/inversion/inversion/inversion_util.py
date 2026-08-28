@@ -258,6 +258,7 @@ def reconstruction_positive_only_from(
     curvature_reg_matrix: np.ndarray,
     settings: Settings = None,
     xp=np,
+    fingerprint=None,
 ):
     """
     Solve the linear system Eq.(2) (in terms of minimizing the quadratic value) of
@@ -296,6 +297,9 @@ def reconstruction_positive_only_from(
     settings
         Controls the settings of the inversion, for this function where the solution is checked to not be all
         the same values.\
+    fingerprint
+        Identifies the index space this solve's passive set lives in, enabling the cross-evaluation warm-start
+        memo (`Settings.nnls_warm_start_memo`) on the NumPy path. `None` disables the memo for this call.
 
     Returns
     -------
@@ -371,12 +375,59 @@ def reconstruction_positive_only_from(
     try:
 
         from autoarray.util.fnnls import fnnls_cholesky
+        from autoarray.inversion.inversion import nnls_memo
 
-        return fnnls_cholesky(
-            curvature_reg_matrix,
-            (data_vector).T,
-            P_initial=np.linalg.solve(curvature_reg_matrix, data_vector) > 0,
+        use_memo = (
+            settings is not None
+            and settings.nnls_warm_start_memo
+            and nnls_memo.memo_enabled()
+            and fingerprint is not None
         )
+
+        stats = {}
+
+        key = (
+            nnls_memo.memo_key(n=data_vector.shape[0], fingerprint=fingerprint)
+            if use_memo
+            else None
+        )
+
+        warm_start = (
+            nnls_memo.passive_set_get(key=key, n=data_vector.shape[0])
+            if use_memo
+            else None
+        )
+
+        if warm_start is not None:
+            try:
+                reconstruction = fnnls_cholesky(
+                    curvature_reg_matrix,
+                    (data_vector).T,
+                    P_initial=warm_start,
+                    stats=stats,
+                )
+            except (RuntimeError, np.linalg.LinAlgError, ValueError):
+                # A seed from a previous evaluation is a guess about a
+                # different matrix, so it can factorise badly where the
+                # dense-sign start would not. That must cost one retry, never a
+                # resample: fall back to exactly the un-memoized computation
+                # before the InversionException path below is reached.
+                reconstruction = None
+        else:
+            reconstruction = None
+
+        if reconstruction is None:
+            reconstruction = fnnls_cholesky(
+                curvature_reg_matrix,
+                (data_vector).T,
+                P_initial=np.linalg.solve(curvature_reg_matrix, data_vector) > 0,
+                stats=stats,
+            )
+
+        if use_memo:
+            nnls_memo.passive_set_put(key=key, passive_set=stats["passive_set"])
+
+        return reconstruction
 
     except (RuntimeError, np.linalg.LinAlgError, ValueError) as e:
         if is_test_mode():

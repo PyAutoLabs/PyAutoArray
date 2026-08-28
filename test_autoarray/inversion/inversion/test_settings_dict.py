@@ -4,7 +4,7 @@ import pytest
 from pathlib import Path
 
 import autoarray as aa
-from autonerves.dictable import from_dict, output_to_json, from_json
+from autonerves.dictable import from_dict, to_dict, output_to_json, from_json
 
 
 @pytest.fixture(name="settings_dict")
@@ -32,3 +32,16 @@ def test_file():
         assert isinstance(from_json(filename), aa.Settings)
     finally:
         os.remove(filename)
+
+
+def test_settings_nnls_warm_start_memo_round_trips():
+    # The field is serialised through the property (not the private attribute),
+    # so a `None` default resolves to the packaged config value on the way out
+    # and must come back as the same explicit boolean.
+    assert aa.Settings().nnls_warm_start_memo is True
+    assert aa.Settings(nnls_warm_start_memo=True).nnls_warm_start_memo is True
+    assert aa.Settings(nnls_warm_start_memo=False).nnls_warm_start_memo is False
+
+    settings = from_dict(to_dict(aa.Settings(nnls_warm_start_memo=True)))
+
+    assert settings.nnls_warm_start_memo is True
