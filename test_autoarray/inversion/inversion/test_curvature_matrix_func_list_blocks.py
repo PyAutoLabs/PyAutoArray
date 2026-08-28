@@ -290,3 +290,125 @@ def test__curvature_matrix_mapper_func_blocks__matches_dense_kernel_and_places_t
     assert curvature_matrix[: mapper.params, : mapper.params] == pytest.approx(
         np.zeros((mapper.params, mapper.params)), abs=1.0e-12
     )
+
+
+# The mapper x mapper block of the numba sparse imaging inversion is computed by
+# `curvature_matrix_via_sparse_operator_from`, which since PyAutoArray#507 step 2
+# dispatches to a two-stage source-space accumulator for every source size a
+# PyAuto pixelization uses. The kernel-level tests live beside the kernel
+# (`imaging/test_inversion_imaging_util.py`); this asserts the same thing one
+# level up -- that what the inversion actually assembles into `F` still matches
+# the retained reference loop, with the mapper's param range placed correctly.
+
+
+class StubSparseOperator:
+    def __init__(self, psf_precision_operator_sparse, indexes, lengths):
+        self.psf_precision_operator_sparse = psf_precision_operator_sparse
+        self.indexes = indexes
+        self.lengths = lengths
+
+
+class StubInversionMapperDiag(InversionImagingSparseNumba):
+    """Bypasses the real constructor: `_curvature_matrix_mapper_diag` needs only the
+    mapper list, its param range, the total params and the sparse operator."""
+
+    def __init__(self, mapper, sparse_operator, total_params, mapper_offset):
+        self._mapper = mapper
+        self._sparse_operator = sparse_operator
+        self._total_params = total_params
+        self._mapper_offset = mapper_offset
+
+    @property
+    def sparse_operator(self):
+        return self._sparse_operator
+
+    @property
+    def total_params(self):
+        return self._total_params
+
+    def has(self, cls):
+        return cls is Mapper
+
+    def total(self, cls):
+        return 1 if cls is Mapper else 0
+
+    def cls_list_from(self, cls):
+        return [self._mapper] if cls is Mapper else []
+
+    def param_range_list_from(self, cls):
+        if cls is not Mapper:
+            return []
+        return [[self._mapper_offset, self._mapper_offset + self._mapper.params]]
+
+
+def test__curvature_matrix_mapper_diag__matches_reference_kernel():
+    pix_pixels = 9
+    mapper_offset = 4
+    total_params = mapper_offset + pix_pixels
+
+    rng = np.random.default_rng(507)
+
+    noise_map = 0.5 + rng.random((6, 6)) * 2.0
+    native_index_for_slim_index = np.array(
+        [[y, x] for y in range(6) for x in range(6)]
+    )
+    data_pixels = native_index_for_slim_index.shape[0]
+
+    (
+        psf_precision_operator,
+        indexes,
+        lengths,
+    ) = inversion_imaging_numba_util.psf_precision_operator_sparse_from(
+        noise_map_native=noise_map,
+        kernel_native=ASYMMETRIC_KERNEL,
+        native_index_for_slim_index=native_index_for_slim_index,
+    )
+
+    max_lengths = 3
+    unique_mappings = UniqueMappings(
+        data_to_pix_unique=rng.integers(
+            0, pix_pixels, size=(data_pixels, max_lengths)
+        ).astype("int"),
+        data_weights=rng.random(size=(data_pixels, max_lengths)),
+        pix_lengths=rng.integers(1, max_lengths + 1, size=data_pixels).astype("int"),
+    )
+
+    mapper = FakeMapper(params=pix_pixels, unique_mappings=unique_mappings)
+
+    inversion = StubInversionMapperDiag(
+        mapper=mapper,
+        sparse_operator=StubSparseOperator(
+            psf_precision_operator_sparse=psf_precision_operator,
+            indexes=indexes.astype("int"),
+            lengths=lengths.astype("int"),
+        ),
+        total_params=total_params,
+        mapper_offset=mapper_offset,
+    )
+
+    curvature_matrix = inversion._curvature_matrix_mapper_diag
+
+    diag_reference = inversion_imaging_numba_util.curvature_matrix_via_sparse_operator_reference_from(
+        psf_precision_operator=psf_precision_operator,
+        psf_precision_indexes=indexes.astype("int"),
+        psf_precision_lengths=lengths.astype("int"),
+        data_to_pix_unique=unique_mappings.data_to_pix_unique,
+        data_weights=unique_mappings.data_weights,
+        pix_lengths=unique_mappings.pix_lengths,
+        pix_pixels=pix_pixels,
+    )
+
+    assert curvature_matrix.shape == (total_params, total_params)
+
+    assert curvature_matrix[
+        mapper_offset:, mapper_offset:
+    ] == pytest.approx(diag_reference, rel=1.0e-6)
+
+    # The mapper block is this property's only output: everything outside the
+    # mapper's param range must be untouched.
+    assert curvature_matrix[:mapper_offset, :] == pytest.approx(
+        np.zeros((mapper_offset, total_params)), abs=1.0e-12
+    )
+    assert curvature_matrix[:, :mapper_offset] == pytest.approx(
+        np.zeros((total_params, mapper_offset)), abs=1.0e-12
+    )

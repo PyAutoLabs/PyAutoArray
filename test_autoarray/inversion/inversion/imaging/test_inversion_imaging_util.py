@@ -756,6 +756,10 @@ def test__curvature_matrix_via_sparse_operator_from__matches_the_reference_kerne
     `curvature_matrix_via_sparse_operator_reference_from` is the unrestructured
     quadruple loop the production kernel is an optimisation of.
 
+    `curvature_matrix_via_sparse_operator_direct_from` is the branch of the public
+    `curvature_matrix_via_sparse_operator_from` taken above
+    `CURVATURE_TWO_STAGE_MAX_PIX_PIXELS`.
+
     The PyAutoArray#507 step-1 restructuring hoists `data_1`'s `(pix, weight)` pairs
     into 1-D row views (they were re-gathered u0 times per stored pair from
     wide-stride 2-D arrays) and takes `curvature_matrix[pix_0]` as a row view. It
@@ -794,10 +798,8 @@ def test__curvature_matrix_via_sparse_operator_from__matches_the_reference_kerne
         pix_pixels=pix_pixels,
     )
 
-    curvature_matrix = (
-        aa.util.inversion_imaging_numba.curvature_matrix_via_sparse_operator_from(
-            **kwargs
-        )
+    curvature_matrix = aa.util.inversion_imaging_numba.curvature_matrix_via_sparse_operator_direct_from(
+        **kwargs
     )
 
     curvature_matrix_reference = aa.util.inversion_imaging_numba.curvature_matrix_via_sparse_operator_reference_from(
@@ -805,3 +807,213 @@ def test__curvature_matrix_via_sparse_operator_from__matches_the_reference_kerne
     )
 
     assert np.array_equal(curvature_matrix, curvature_matrix_reference)
+
+
+# ------------------------------------------------------------------
+# The two-stage mapper x mapper kernel (PyAutoArray#507 step 2).
+#
+# `curvature_matrix_via_sparse_operator_two_stage_from` sums exactly the same
+# products as the direct loop but in a different order (a dense source-space
+# accumulator per data pixel, then one contiguous AXPY per mapping), so it agrees
+# to floating-point reassociation rather than bit-identically. rtol=1e-6 is the
+# tolerance the likelihood itself is pinned at; the observed difference on the
+# production HST geometries is ~4e-13.
+#
+# Control runs recorded against these tests, on the correct kernel, in the
+# commit message.
+# ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("kernel", KERNELS_ODD, ids=KERNEL_IDS)
+@pytest.mark.parametrize("pix_pixels", [1, 7, 64])
+def test__curvature_matrix_via_sparse_operator_two_stage_from__matches_reference_kernel(
+    kernel, pix_pixels
+):
+    """
+    `pix_pixels = 1` is the degenerate source space (every data pixel maps to the
+    same pixel, so the accumulator is a scalar and the fold is the diagonal alone);
+    7 is smaller than the per-data-pixel mapping footprint; 64 is larger than it,
+    so the accumulator is sparse within itself. All three sit below
+    `CURVATURE_TWO_STAGE_MAX_PIX_PIXELS`, which the dispatcher test below covers
+    from both sides.
+    """
+    (
+        noise_map,
+        native_index_for_slim_index,
+        data_to_pix_unique,
+        data_weights,
+        pix_lengths,
+    ) = _sparse_operator_mappings(pix_pixels=pix_pixels)
+
+    (
+        psf_precision_operator,
+        psf_precision_indexes,
+        psf_precision_lengths,
+    ) = aa.util.inversion_imaging_numba.psf_precision_operator_sparse_from(
+        noise_map_native=noise_map,
+        kernel_native=kernel,
+        native_index_for_slim_index=native_index_for_slim_index,
+    )
+
+    kwargs = dict(
+        psf_precision_operator=psf_precision_operator,
+        psf_precision_indexes=psf_precision_indexes.astype("int"),
+        psf_precision_lengths=psf_precision_lengths.astype("int"),
+        data_to_pix_unique=data_to_pix_unique,
+        data_weights=data_weights,
+        pix_lengths=pix_lengths,
+        pix_pixels=pix_pixels,
+    )
+
+    curvature_matrix_two_stage = aa.util.inversion_imaging_numba.curvature_matrix_via_sparse_operator_two_stage_from(
+        **kwargs
+    )
+
+    curvature_matrix_reference = aa.util.inversion_imaging_numba.curvature_matrix_via_sparse_operator_reference_from(
+        **kwargs
+    )
+
+    assert curvature_matrix_two_stage == pytest.approx(
+        curvature_matrix_reference, rel=1.0e-6
+    )
+
+    # The fold contract must survive the reformulation: exactly symmetric, and the
+    # diagonal not double counted (both are what `A + A.T` on the halved-diagonal
+    # accumulation buys).
+    assert np.array_equal(curvature_matrix_two_stage, curvature_matrix_two_stage.T)
+
+
+@pytest.mark.parametrize("kernel", KERNELS_ODD, ids=KERNEL_IDS)
+def test__curvature_matrix_via_sparse_operator_two_stage_from__matches_dense_psf_precision_operator(
+    kernel,
+):
+    """
+    The two-stage kernel against the same dense `M.T @ W @ M` oracle the direct
+    kernel is pinned to, so it is anchored to the definition and not only to the
+    other implementation.
+    """
+    pix_pixels = 7
+
+    (
+        noise_map,
+        native_index_for_slim_index,
+        data_to_pix_unique,
+        data_weights,
+        pix_lengths,
+    ) = _sparse_operator_mappings(pix_pixels=pix_pixels)
+
+    (
+        psf_precision_operator,
+        psf_precision_indexes,
+        psf_precision_lengths,
+    ) = aa.util.inversion_imaging_numba.psf_precision_operator_sparse_from(
+        noise_map_native=noise_map,
+        kernel_native=kernel,
+        native_index_for_slim_index=native_index_for_slim_index,
+    )
+
+    curvature_matrix = aa.util.inversion_imaging_numba.curvature_matrix_via_sparse_operator_two_stage_from(
+        psf_precision_operator=psf_precision_operator,
+        psf_precision_indexes=psf_precision_indexes.astype("int"),
+        psf_precision_lengths=psf_precision_lengths.astype("int"),
+        data_to_pix_unique=data_to_pix_unique,
+        data_weights=data_weights,
+        pix_lengths=pix_lengths,
+        pix_pixels=pix_pixels,
+    )
+
+    psf_precision_operator_dense = (
+        aa.util.inversion_imaging_numba.psf_precision_operator_from(
+            noise_map_native=noise_map,
+            kernel_native=kernel,
+            native_index_for_slim_index=native_index_for_slim_index,
+        )
+    )
+
+    mapping_matrix = _mapping_matrix_from(
+        data_to_pix_unique=data_to_pix_unique,
+        data_weights=data_weights,
+        pix_lengths=pix_lengths,
+        pix_pixels=pix_pixels,
+    )
+
+    curvature_matrix_dense = np.dot(
+        mapping_matrix.T, np.dot(psf_precision_operator_dense, mapping_matrix)
+    )
+
+    assert curvature_matrix == pytest.approx(curvature_matrix_dense, rel=1.0e-6)
+
+
+def test__curvature_matrix_via_sparse_operator_from__dispatches_on_the_two_stage_threshold():
+    """
+    Both branches of the public entry point, exercised from either side of
+    `CURVATURE_TWO_STAGE_MAX_PIX_PIXELS` without building a 4096-pixel source
+    space: the threshold is a per-call argument defaulting to the module constant,
+    precisely so that this test does not have to allocate a 134 MB matrix to reach
+    the other branch.
+
+    Each branch is asserted *bit-identical* to the implementation it is supposed to
+    have called -- so a dispatcher that quietly ran the wrong one, or ran neither
+    faithfully, cannot pass, whereas an rtol comparison between the two branches
+    would (they agree to ~1e-13).
+    """
+    pix_pixels = 7
+
+    (
+        noise_map,
+        native_index_for_slim_index,
+        data_to_pix_unique,
+        data_weights,
+        pix_lengths,
+    ) = _sparse_operator_mappings(pix_pixels=pix_pixels)
+
+    (
+        psf_precision_operator,
+        psf_precision_indexes,
+        psf_precision_lengths,
+    ) = aa.util.inversion_imaging_numba.psf_precision_operator_sparse_from(
+        noise_map_native=np.arange(1.0, 37.0).reshape(6, 6),
+        kernel_native=np.arange(1.0, 16.0).reshape(3, 5),
+        native_index_for_slim_index=native_index_for_slim_index,
+    )
+
+    kwargs = dict(
+        psf_precision_operator=psf_precision_operator,
+        psf_precision_indexes=psf_precision_indexes.astype("int"),
+        psf_precision_lengths=psf_precision_lengths.astype("int"),
+        data_to_pix_unique=data_to_pix_unique,
+        data_weights=data_weights,
+        pix_lengths=pix_lengths,
+        pix_pixels=pix_pixels,
+    )
+
+    # Default threshold (4096) -> pix_pixels of 7 is below it -> two-stage.
+    assert np.array_equal(
+        aa.util.inversion_imaging_numba.curvature_matrix_via_sparse_operator_from(
+            **kwargs
+        ),
+        aa.util.inversion_imaging_numba.curvature_matrix_via_sparse_operator_two_stage_from(
+            **kwargs
+        ),
+    )
+
+    # Threshold pushed below pix_pixels -> the direct loop.
+    assert np.array_equal(
+        aa.util.inversion_imaging_numba.curvature_matrix_via_sparse_operator_from(
+            two_stage_max_pix_pixels=pix_pixels - 1, **kwargs
+        ),
+        aa.util.inversion_imaging_numba.curvature_matrix_via_sparse_operator_direct_from(
+            **kwargs
+        ),
+    )
+
+    # ... and the two branches are not the same array, so the assertions above are
+    # not both trivially satisfied by a single implementation.
+    assert not np.array_equal(
+        aa.util.inversion_imaging_numba.curvature_matrix_via_sparse_operator_two_stage_from(
+            **kwargs
+        ),
+        aa.util.inversion_imaging_numba.curvature_matrix_via_sparse_operator_direct_from(
+            **kwargs
+        ),
+    )
