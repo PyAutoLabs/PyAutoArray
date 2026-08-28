@@ -555,6 +555,87 @@ def curvature_matrix_via_sparse_operator_from(
     curvature_index = 0
 
     for data_0 in range(data_pixels):
+
+        # Hoisted once per data pixel and once per stored pair (PyAutoArray#507
+        # step 1). The unhoisted form re-read `data_weights[data_1, pix_1_index]`
+        # and `data_to_pix_unique[data_1, pix_1_index]` inside the innermost
+        # loop, so every one of `data_1`'s u1 mappings was gathered u0 times from
+        # a wide-stride 2-D array; and `curvature_matrix[pix_0, pix_1]` re-did the
+        # row offset multiply on every accumulation. Taking 1-D row views and the
+        # `curvature_matrix[pix_0]` row view leaves the arithmetic untouched --
+        # the accumulated expression below is operand-for-operand the one it
+        # replaces, so the result is bit-identical, which
+        # `curvature_matrix_via_sparse_operator_reference_from` and its test
+        # assert directly.
+        pix_lengths_0 = pix_lengths[data_0]
+        pix_row_0 = data_to_pix_unique[data_0]
+        weight_row_0 = data_weights[data_0]
+
+        for data_1_index in range(psf_precision_lengths[data_0]):
+            data_1 = psf_precision_indexes[curvature_index]
+            psf_precision_value = psf_precision_operator[curvature_index]
+
+            curvature_index += 1
+
+            pix_lengths_1 = pix_lengths[data_1]
+            pix_row_1 = data_to_pix_unique[data_1]
+            weight_row_1 = data_weights[data_1]
+
+            for pix_0_index in range(pix_lengths_0):
+                data_0_weight = weight_row_0[pix_0_index]
+                curvature_row = curvature_matrix[pix_row_0[pix_0_index]]
+
+                for pix_1_index in range(pix_lengths_1):
+                    curvature_row[pix_row_1[pix_1_index]] += (
+                        data_0_weight
+                        * weight_row_1[pix_1_index]
+                        * psf_precision_value
+                    )
+
+    for i in range(pix_pixels):
+        for j in range(i, pix_pixels):
+            curvature_matrix[i, j] += curvature_matrix[j, i]
+
+    for i in range(pix_pixels):
+        for j in range(i, pix_pixels):
+            curvature_matrix[j, i] = curvature_matrix[i, j]
+
+    return curvature_matrix
+
+
+@numba_util.jit()
+def curvature_matrix_via_sparse_operator_reference_from(
+    psf_precision_operator: np.ndarray,
+    psf_precision_indexes: np.ndarray,
+    psf_precision_lengths: np.ndarray,
+    data_to_pix_unique: np.ndarray,
+    data_weights: np.ndarray,
+    pix_lengths: np.ndarray,
+    pix_pixels: int,
+) -> np.ndarray:
+    """
+    The straightforward quadruple loop that `curvature_matrix_via_sparse_operator_from`
+    is an optimisation of, retained verbatim as the reference the optimised kernel is
+    tested against.
+
+    It is not called by the inversion. It exists so that the restructurings applied to
+    the production kernel -- the hoisted row views of PyAutoArray#507 step 1, and the
+    two-stage source-space accumulator of step 2 -- have a fixed, unrestructured
+    definition to be asserted against, rather than only the dense `M.T W M` oracle
+    (which is a far smaller problem than the kernel is ever run on, since it
+    materializes the [image_pixels, image_pixels] precision operator).
+
+    Parameters and return value are exactly those of
+    `curvature_matrix_via_sparse_operator_from`.
+    """
+
+    data_pixels = psf_precision_lengths.shape[0]
+
+    curvature_matrix = np.zeros((pix_pixels, pix_pixels))
+
+    curvature_index = 0
+
+    for data_0 in range(data_pixels):
         for data_1_index in range(psf_precision_lengths[data_0]):
             data_1 = psf_precision_indexes[curvature_index]
             psf_precision_value = psf_precision_operator[curvature_index]

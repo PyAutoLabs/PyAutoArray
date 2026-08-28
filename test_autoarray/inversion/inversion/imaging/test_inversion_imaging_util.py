@@ -530,3 +530,278 @@ def test__convolver_reversed_kernel__is_the_kernel_reversed_and_convolves_as_a_c
 
     # Cached, so the reversed kernel and its FFT geometry are built once.
     assert convolver.reversed_kernel is convolver.reversed_kernel
+
+
+# ------------------------------------------------------------------
+# The mapper x mapper block of `F` (`curvature_matrix_via_sparse_operator_from`).
+#
+# This is the single most expensive step of the numba CPU imaging likelihood at
+# HST resolution (0.255 s of a 0.63 s evaluation, PyAutoArray#507 step 0), and
+# until these tests it had no direct unit test at all -- only the end-to-end
+# inversion fixtures, which cannot distinguish a restructured kernel from a
+# subtly wrong one.
+#
+# The reference the kernel is pinned against is the definition it is an
+# optimisation of:
+#
+#     F = M.T @ W @ M
+#
+# with `W` the *dense* [image_pixels, image_pixels] precision operator from
+# `psf_precision_operator_from` and `M` the dense [image_pixels, pix_pixels]
+# mapping matrix that `(data_to_pix_unique, data_weights, pix_lengths)` encodes.
+# Nothing in the reference re-derives the kernel: it does not know about the
+# sparse upper-triangle storage, the halved diagonal or the `A + A.T` fold.
+#
+# The kernels are asymmetric and non-square (`KERNELS_ODD`), so a transposed
+# axis in the operator build cannot pass.
+# ------------------------------------------------------------------
+
+
+def _mapping_matrix_from(data_to_pix_unique, data_weights, pix_lengths, pix_pixels):
+    """The dense mapping matrix `M` that the unique-mappings triple encodes."""
+    mapping_matrix = np.zeros((pix_lengths.shape[0], pix_pixels))
+
+    for data_index in range(pix_lengths.shape[0]):
+        for pix_index in range(pix_lengths[data_index]):
+            mapping_matrix[
+                data_index, data_to_pix_unique[data_index, pix_index]
+            ] += data_weights[data_index, pix_index]
+
+    return mapping_matrix
+
+
+def _sparse_operator_mappings(seed=507, shape=(6, 6), pix_pixels=7, max_lengths=3):
+    """A small fully-unmasked dataset plus random non-uniform unique mappings."""
+    rng = np.random.default_rng(seed)
+
+    noise_map = 0.5 + rng.random(shape) * 2.0
+    native_index_for_slim_index = np.array(
+        [[y, x] for y in range(shape[0]) for x in range(shape[1])]
+    )
+
+    data_pixels = native_index_for_slim_index.shape[0]
+
+    pix_lengths = rng.integers(1, max_lengths + 1, size=data_pixels).astype("int")
+    data_to_pix_unique = rng.integers(
+        0, pix_pixels, size=(data_pixels, max_lengths)
+    ).astype("int")
+    data_weights = rng.random(size=(data_pixels, max_lengths))
+
+    return (
+        noise_map,
+        native_index_for_slim_index,
+        data_to_pix_unique,
+        data_weights,
+        pix_lengths,
+    )
+
+
+@pytest.mark.parametrize("kernel", KERNELS_ODD, ids=KERNEL_IDS)
+def test__curvature_matrix_via_sparse_operator_from__matches_dense_psf_precision_operator(
+    kernel,
+):
+    pix_pixels = 7
+
+    (
+        noise_map,
+        native_index_for_slim_index,
+        data_to_pix_unique,
+        data_weights,
+        pix_lengths,
+    ) = _sparse_operator_mappings(pix_pixels=pix_pixels)
+
+    (
+        psf_precision_operator,
+        psf_precision_indexes,
+        psf_precision_lengths,
+    ) = aa.util.inversion_imaging_numba.psf_precision_operator_sparse_from(
+        noise_map_native=noise_map,
+        kernel_native=kernel,
+        native_index_for_slim_index=native_index_for_slim_index,
+    )
+
+    curvature_matrix = (
+        aa.util.inversion_imaging_numba.curvature_matrix_via_sparse_operator_from(
+            psf_precision_operator=psf_precision_operator,
+            psf_precision_indexes=psf_precision_indexes.astype("int"),
+            psf_precision_lengths=psf_precision_lengths.astype("int"),
+            data_to_pix_unique=data_to_pix_unique,
+            data_weights=data_weights,
+            pix_lengths=pix_lengths,
+            pix_pixels=pix_pixels,
+        )
+    )
+
+    psf_precision_operator_dense = (
+        aa.util.inversion_imaging_numba.psf_precision_operator_from(
+            noise_map_native=noise_map,
+            kernel_native=kernel,
+            native_index_for_slim_index=native_index_for_slim_index,
+        )
+    )
+
+    mapping_matrix = _mapping_matrix_from(
+        data_to_pix_unique=data_to_pix_unique,
+        data_weights=data_weights,
+        pix_lengths=pix_lengths,
+        pix_pixels=pix_pixels,
+    )
+
+    curvature_matrix_dense = np.dot(
+        mapping_matrix.T, np.dot(psf_precision_operator_dense, mapping_matrix)
+    )
+
+    assert curvature_matrix == pytest.approx(curvature_matrix_dense, rel=1.0e-10)
+
+
+def test__curvature_matrix_via_sparse_operator_from__is_symmetric_and_the_diagonal_is_not_double_counted():
+    """
+    Two contracts the kernel's `A + A.T` fold depends on, asserted separately from
+    the dense oracle above so a future restructuring cannot satisfy one by breaking
+    the other.
+
+    1. The returned matrix is *exactly* symmetric -- not to a tolerance. The
+       inversion's `curvature_matrix` runs no global symmetrizing pass over the
+       assembled F, so this block must come out symmetric on its own.
+
+    2. `psf_precision_operator_sparse_from` halves the `ip0 == ip1` entries because
+       the fold doubles the diagonal of the accumulated matrix. A single data pixel
+       mapping to a single source pixel isolates exactly that pair: `F[0, 0]` must
+       be `w**2 * W[0, 0]`, and would come out twice that if either half of the
+       contract were dropped.
+    """
+    kernel = np.arange(1.0, 16.0).reshape(3, 5)
+
+    # -- 1. exact symmetry ------------------------------------------------
+    pix_pixels = 7
+
+    (
+        noise_map,
+        native_index_for_slim_index,
+        data_to_pix_unique,
+        data_weights,
+        pix_lengths,
+    ) = _sparse_operator_mappings(pix_pixels=pix_pixels)
+
+    (
+        psf_precision_operator,
+        psf_precision_indexes,
+        psf_precision_lengths,
+    ) = aa.util.inversion_imaging_numba.psf_precision_operator_sparse_from(
+        noise_map_native=noise_map,
+        kernel_native=kernel,
+        native_index_for_slim_index=native_index_for_slim_index,
+    )
+
+    curvature_matrix = (
+        aa.util.inversion_imaging_numba.curvature_matrix_via_sparse_operator_from(
+            psf_precision_operator=psf_precision_operator,
+            psf_precision_indexes=psf_precision_indexes.astype("int"),
+            psf_precision_lengths=psf_precision_lengths.astype("int"),
+            data_to_pix_unique=data_to_pix_unique,
+            data_weights=data_weights,
+            pix_lengths=pix_lengths,
+            pix_pixels=pix_pixels,
+        )
+    )
+
+    assert np.array_equal(curvature_matrix, curvature_matrix.T)
+
+    # -- 2. the halved diagonal --------------------------------------------
+    noise_map_1 = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]])
+    native_index_for_slim_index_1 = np.array([[1, 1]])
+
+    weight = 0.75
+
+    (
+        psf_precision_operator_1,
+        psf_precision_indexes_1,
+        psf_precision_lengths_1,
+    ) = aa.util.inversion_imaging_numba.psf_precision_operator_sparse_from(
+        noise_map_native=noise_map_1,
+        kernel_native=kernel,
+        native_index_for_slim_index=native_index_for_slim_index_1,
+    )
+
+    curvature_matrix_1 = (
+        aa.util.inversion_imaging_numba.curvature_matrix_via_sparse_operator_from(
+            psf_precision_operator=psf_precision_operator_1,
+            psf_precision_indexes=psf_precision_indexes_1.astype("int"),
+            psf_precision_lengths=psf_precision_lengths_1.astype("int"),
+            data_to_pix_unique=np.array([[0]]),
+            data_weights=np.array([[weight]]),
+            pix_lengths=np.array([1]),
+            pix_pixels=1,
+        )
+    )
+
+    psf_precision_operator_dense_1 = (
+        aa.util.inversion_imaging_numba.psf_precision_operator_from(
+            noise_map_native=noise_map_1,
+            kernel_native=kernel,
+            native_index_for_slim_index=native_index_for_slim_index_1,
+        )
+    )
+
+    assert curvature_matrix_1 == pytest.approx(
+        np.array([[weight**2.0 * psf_precision_operator_dense_1[0, 0]]]), rel=1.0e-12
+    )
+
+
+@pytest.mark.parametrize("kernel", KERNELS_ODD, ids=KERNEL_IDS)
+def test__curvature_matrix_via_sparse_operator_from__matches_the_reference_kernel_bit_identically(
+    kernel,
+):
+    """
+    `curvature_matrix_via_sparse_operator_reference_from` is the unrestructured
+    quadruple loop the production kernel is an optimisation of.
+
+    The PyAutoArray#507 step-1 restructuring hoists `data_1`'s `(pix, weight)` pairs
+    into 1-D row views (they were re-gathered u0 times per stored pair from
+    wide-stride 2-D arrays) and takes `curvature_matrix[pix_0]` as a row view. It
+    leaves the accumulated expression operand-for-operand unchanged, so the result
+    must be *bit-identical*, not merely close: floating-point addition is not
+    associative, and `np.array_equal` is what catches a reassociation that a
+    tolerance would wave through.
+    """
+    pix_pixels = 7
+
+    (
+        noise_map,
+        native_index_for_slim_index,
+        data_to_pix_unique,
+        data_weights,
+        pix_lengths,
+    ) = _sparse_operator_mappings(pix_pixels=pix_pixels)
+
+    (
+        psf_precision_operator,
+        psf_precision_indexes,
+        psf_precision_lengths,
+    ) = aa.util.inversion_imaging_numba.psf_precision_operator_sparse_from(
+        noise_map_native=noise_map,
+        kernel_native=kernel,
+        native_index_for_slim_index=native_index_for_slim_index,
+    )
+
+    kwargs = dict(
+        psf_precision_operator=psf_precision_operator,
+        psf_precision_indexes=psf_precision_indexes.astype("int"),
+        psf_precision_lengths=psf_precision_lengths.astype("int"),
+        data_to_pix_unique=data_to_pix_unique,
+        data_weights=data_weights,
+        pix_lengths=pix_lengths,
+        pix_pixels=pix_pixels,
+    )
+
+    curvature_matrix = (
+        aa.util.inversion_imaging_numba.curvature_matrix_via_sparse_operator_from(
+            **kwargs
+        )
+    )
+
+    curvature_matrix_reference = aa.util.inversion_imaging_numba.curvature_matrix_via_sparse_operator_reference_from(
+        **kwargs
+    )
+
+    assert np.array_equal(curvature_matrix, curvature_matrix_reference)
