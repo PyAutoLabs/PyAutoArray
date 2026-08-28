@@ -790,3 +790,251 @@ class InterferometerSparseOperator:
         C_pad = lax.fori_loop(0, n_blocks, body, C0)
         C = C_pad[:, :S]
         return 0.5 * (C + C.T)
+
+    def curvature_matrix_off_diag_from(
+        self, rows0, cols0, vals0, rows1, cols1, vals1, *, S0: int, S1: int
+    ):
+        """
+        Compute the off-diagonal (mapper-mapper) curvature block F01 = A0ᵀ W~ A1.
+
+        This method mirrors `ImagingSparseOperator.curvature_matrix_off_diag_from` and is the
+        structural counterpart for the interferometer W~ operator. The difference between the two
+        is the operator itself: for imaging W = Hᵀ N⁻¹ H is a PSF correlation, whereas here
+        W~ = Re(Fᴴ W F) is the (translationally invariant) real-space operator of the non-uniform
+        Fourier transform `F`, applied via `apply_operator` on the *unmasked-extent* rectangular
+        grid (M = y_shape * x_shape).
+
+        Given two sparse mapping operators:
+
+        - A0 : (M × S0)
+        - A1 : (M × S1)
+
+        this method computes F01 = A0ᵀ W~ A1 in column blocks of width `batch_size`:
+
+        1) Assemble Fbatch = A1[:, start:start+B] on the rectangular grid via scatter-add.
+        2) Apply W~ to the block via FFT: Gbatch = W~(Fbatch).
+        3) Project back with A0ᵀ via segment_sum over `cols0`.
+
+        Parameters
+        ----------
+        rows0, cols0, vals0
+            COO triplets for A0, where `rows0` are extent-grid (flat) indices in [0, M).
+        rows1, cols1, vals1
+            COO triplets for A1, where `rows1` are extent-grid (flat) indices in [0, M).
+        S0
+            Number of source pixels / parameters for mapper 0.
+        S1
+            Number of source pixels / parameters for mapper 1.
+
+        Returns
+        -------
+        ndarray
+            Off-diagonal curvature block of shape (S0, S1).
+
+        Notes
+        -----
+        - The result is *not* symmetrized here because it is not square in general. The symmetric
+          counterpart is F10 = F01ᵀ, because A0 and A1 share the same W~.
+        - Padding to `S1_pad = ceil(S1/B)*B` ensures `dynamic_update_slice` is always legal.
+        """
+        import jax.numpy as jnp
+        from jax import lax
+        from jax.ops import segment_sum
+
+        rows0 = jnp.asarray(rows0, dtype=jnp.int32)
+        cols0 = jnp.asarray(cols0, dtype=jnp.int32)
+        vals0 = jnp.asarray(vals0, dtype=jnp.float64)
+
+        rows1 = jnp.asarray(rows1, dtype=jnp.int32)
+        cols1 = jnp.asarray(cols1, dtype=jnp.int32)
+        vals1 = jnp.asarray(vals1, dtype=jnp.float64)
+
+        M = self.M
+        B = self.batch_size
+
+        n_blocks = (S1 + B - 1) // B
+        S1_pad = n_blocks * B
+
+        F01_0 = jnp.zeros((S0, S1_pad), dtype=jnp.float64)
+
+        def body(block_i, F01):
+            start = block_i * B
+
+            in_block = (cols1 >= start) & (cols1 < (start + B))
+            bc = jnp.where(in_block, cols1 - start, 0).astype(jnp.int32)
+            v = jnp.where(in_block, vals1, 0.0)
+
+            F = jnp.zeros((M, B), dtype=jnp.float64)
+            F = F.at[rows1, bc].add(v)
+
+            G = self.apply_operator(F)  # (M, B)
+
+            contrib = vals0[:, None] * G[rows0, :]
+            block = segment_sum(contrib, cols0, num_segments=S0)
+
+            width = jnp.minimum(B, jnp.maximum(0, S1 - start))
+            block = block * (self.col_offsets < width)[None, :]
+
+            return lax.dynamic_update_slice(F01, block, (0, start))
+
+        F01_pad = lax.fori_loop(0, n_blocks, body, F01_0)
+        return F01_pad[:, :S1]
+
+    def operated_matrix_slim_from(self, matrix_slim, extent_index_for_masked_pixel):
+        """
+        Apply the interferometer W~ operator to columns defined on the *slim masked* grid.
+
+        The input columns are scattered from the slim masked grid onto the unmasked-extent
+        rectangular grid (on which W~ is defined), operated on with `apply_operator`, and gathered
+        back onto the slim masked grid.
+
+        Parameters
+        ----------
+        matrix_slim
+            Array of shape (M_pix, n_cols) on the slim masked grid (e.g. the real-space
+            `mapping_matrix` of an `AbstractLinearObjFuncList`).
+        extent_index_for_masked_pixel
+            Array of shape (M_pix,) mapping slim masked pixel indices to extent-grid flat indices.
+
+        Returns
+        -------
+        ndarray
+            Array of shape (M_pix, n_cols) equal to W~ applied to each column.
+        """
+        import jax.numpy as jnp
+
+        matrix_slim = jnp.asarray(matrix_slim, dtype=jnp.float64)
+        extent_index_for_masked_pixel = jnp.asarray(
+            extent_index_for_masked_pixel, dtype=jnp.int32
+        )
+
+        grid_flat = jnp.zeros((self.M, matrix_slim.shape[1]), dtype=jnp.float64)
+        grid_flat = grid_flat.at[extent_index_for_masked_pixel, :].set(matrix_slim)
+
+        return self.apply_operator(grid_flat)[extent_index_for_masked_pixel, :]
+
+    def curvature_matrix_off_diag_func_list_from(
+        self,
+        curvature_weights,  # (M_pix, n_funcs)
+        extent_index_for_masked_pixel,  # (M_pix,) slim -> extent(flat)
+        rows,
+        cols,
+        vals,  # triplets where rows are EXTENT indices
+        *,
+        S: int,
+    ):
+        """
+        Compute the mapper–linear-function off-diagonal block Aᵀ W~ B.
+
+        This is the interferometer counterpart of
+        `ImagingSparseOperator.curvature_matrix_off_diag_func_list_from`, but with one important
+        difference in what `curvature_weights` must contain.
+
+        For imaging the operator is split as W = Hᵀ N⁻¹ H, so the imaging method is passed
+        `curvature_weights = (H B) / noise²` (the forward blur and the inverse variance are folded
+        into the input) and only applies Hᵀ internally.
+
+        For an interferometer the whole operator W~ = Re(Fᴴ W F) is applied by `apply_operator`,
+        with the inverse-variance weighting *already inside* W~. Therefore `curvature_weights` is
+        the plain real-space `mapping_matrix` of the linear function list on the slim masked grid,
+        with **no** noise weighting and **no** forward operator applied.
+
+        The returned matrix is:
+
+            off_diag = Aᵀ W~ B
+
+        which has shape (S, n_funcs).
+
+        Parameters
+        ----------
+        curvature_weights
+            Array of shape (M_pix, n_funcs) on the *slim masked* grid: the un-operated,
+            un-weighted real-space mapping matrix of the linear function list.
+        extent_index_for_masked_pixel
+            Array of shape (M_pix,) mapping slim masked pixel indices to extent-grid flat indices.
+            Used to scatter values onto the rectangular grid W~ is defined on.
+        rows, cols, vals
+            COO triplets for the mapper A, where:
+            - `rows` are extent-grid indices (flat), shape (nnz,)
+            - `cols` are source pixel indices, shape (nnz,)
+            - `vals` are mapping weights, shape (nnz,)
+        S
+            Number of source pixels / parameters in the mapper.
+
+        Returns
+        -------
+        ndarray
+            Off-diagonal block of shape (S, n_funcs).
+
+        Notes
+        -----
+        - No `batch_size` sweep is required because the operator is applied to `n_funcs` columns
+          (typically a handful) rather than to all S source pixels.
+        """
+        import jax.numpy as jnp
+        from jax.ops import segment_sum
+
+        curvature_weights = jnp.asarray(curvature_weights, dtype=jnp.float64)
+        extent_index_for_masked_pixel = jnp.asarray(
+            extent_index_for_masked_pixel, dtype=jnp.int32
+        )
+
+        rows = jnp.asarray(rows, dtype=jnp.int32)
+        cols = jnp.asarray(cols, dtype=jnp.int32)
+        vals = jnp.asarray(vals, dtype=jnp.float64)
+
+        n_funcs = curvature_weights.shape[1]
+
+        # 1) scatter slim -> extent(flat)
+        grid_flat = jnp.zeros((self.M, n_funcs), dtype=jnp.float64)
+        grid_flat = grid_flat.at[extent_index_for_masked_pixel, :].set(
+            curvature_weights
+        )
+
+        # 2) apply W~ on the extent grid
+        operated = self.apply_operator(grid_flat)  # (M, n_funcs)
+
+        # 3) gather at the mapper's rows (extent coords) and accumulate to source pixels
+        contrib = vals[:, None] * operated[rows, :]
+        return segment_sum(contrib, cols, num_segments=S)  # (S, n_funcs)
+
+    def curvature_matrix_func_list_from(
+        self,
+        curvature_weights_0,  # (M_pix, n_funcs_0)
+        curvature_weights_1,  # (M_pix, n_funcs_1)
+        extent_index_for_masked_pixel,  # (M_pix,) slim -> extent(flat)
+    ):
+        """
+        Compute a linear-function–linear-function curvature block B0ᵀ W~ B1.
+
+        The imaging sparse inversion forms this block as a plain dot product of noise-weighted,
+        PSF-convolved mapping matrices, because for imaging those matrices are already in the
+        data frame. For an interferometer the equivalent dense construction would require the
+        (expensive) visibility-space transformed mapping matrix, which the sparse formalism exists
+        to avoid. Because W~ = Re(Fᴴ W F) is exact and translationally invariant on the extent
+        grid, the block is instead formed directly through the same operator used by every other
+        block, which is both cheaper and keeps every block of `F` self-consistent.
+
+        Parameters
+        ----------
+        curvature_weights_0, curvature_weights_1
+            The un-operated, un-weighted real-space `mapping_matrix` of each linear function list,
+            on the slim masked grid, of shape (M_pix, n_funcs).
+        extent_index_for_masked_pixel
+            Array of shape (M_pix,) mapping slim masked pixel indices to extent-grid flat indices.
+
+        Returns
+        -------
+        ndarray
+            Curvature block of shape (n_funcs_0, n_funcs_1).
+        """
+        import jax.numpy as jnp
+
+        curvature_weights_0 = jnp.asarray(curvature_weights_0, dtype=jnp.float64)
+
+        operated = self.operated_matrix_slim_from(
+            matrix_slim=curvature_weights_1,
+            extent_index_for_masked_pixel=extent_index_for_masked_pixel,
+        )
+
+        return curvature_weights_0.T @ operated
