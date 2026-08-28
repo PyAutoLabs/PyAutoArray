@@ -332,10 +332,14 @@ class InversionImagingSparseNumba(AbstractInversionImaging):
         for simultaneously. In the w-tilde formalism this requires us to consider the mappings between data and every
         linear object, meaning that the linear alegbra has both on and off diagonal terms.
 
-        The `curvature_matrix` computed here is overwritten in memory when the regularization matrix is added to it,
-        because for large matrices this avoids overhead. For this reason, `curvature_matrix` is not a cached property
-        to ensure if we access it after computing the `curvature_reg_matrix` it is correctly recalculated in a new
-        array of memory.
+        Every block of F is written into the matrix already symmetrized: the mapper x mapper blocks are
+        folded and mirrored inside `curvature_matrix_via_sparse_operator_from`, and the off-diagonal
+        blocks (mapper x mapper, mapper x linear-func, linear-func x linear-func) are each placed
+        together with their transpose. A global symmetrizing pass over the assembled matrix would
+        therefore be a no-op, and is not run.
+
+        `curvature_matrix` is a cached property, and `curvature_reg_matrix` adds the regularization
+        matrix to it out-of-place, so the cached F is never overwritten by that addition.
         """
         if self.has(cls=AbstractLinearObjFuncList):
             curvature_matrix = self._curvature_matrix_func_list_and_mapper
@@ -343,10 +347,6 @@ class InversionImagingSparseNumba(AbstractInversionImaging):
             curvature_matrix = self._curvature_matrix_x1_mapper
         else:
             curvature_matrix = self._curvature_matrix_multi_mapper
-
-        curvature_matrix = inversion_imaging_numba_util.curvature_matrix_mirrored_from(
-            curvature_matrix=curvature_matrix,
-        )
 
         if len(self.no_regularization_index_list) > 0:
             curvature_matrix = (
@@ -386,11 +386,9 @@ class InversionImagingSparseNumba(AbstractInversionImaging):
                 psf_precision_operator=self.sparse_operator.psf_precision_operator_sparse,
                 psf_precision_indexes=self.sparse_operator.indexes,
                 psf_precision_lengths=self.sparse_operator.lengths,
-                data_to_pix_unique=np.array(
-                    mapper_i.unique_mappings.data_to_pix_unique
-                ),
-                data_weights=np.array(mapper_i.unique_mappings.data_weights),
-                pix_lengths=np.array(mapper_i.unique_mappings.pix_lengths),
+                data_to_pix_unique=mapper_i.unique_mappings.data_to_pix_unique,
+                data_weights=mapper_i.unique_mappings.data_weights,
+                pix_lengths=mapper_i.unique_mappings.pix_lengths,
                 pix_pixels=mapper_i.params,
             )
 
@@ -493,6 +491,11 @@ class InversionImagingSparseNumba(AbstractInversionImaging):
                     mapper_param_range_j[0] : mapper_param_range_j[1],
                 ] = off_diag
 
+                curvature_matrix[
+                    mapper_param_range_j[0] : mapper_param_range_j[1],
+                    mapper_param_range_i[0] : mapper_param_range_i[1],
+                ] = off_diag.T
+
         return curvature_matrix
 
     @property
@@ -540,8 +543,9 @@ class InversionImagingSparseNumba(AbstractInversionImaging):
         noise-weighted curvature vector of a linear function (the dense sliding-window correlation in
         `curvature_matrix_off_diags_via_mapper_and_linear_func_curvature_vector_from`).
 
-        Only the `[mapper, linear_func]` blocks are written; their transposes are filled in by the
-        global mirror applied in `curvature_matrix`.
+        Each `[mapper, linear_func]` block is written together with its transpose into the
+        `[linear_func, mapper]` block, so F leaves this helper symmetric and no global mirroring
+        pass is required.
 
         Parameters
         ----------
@@ -557,6 +561,16 @@ class InversionImagingSparseNumba(AbstractInversionImaging):
             cls=AbstractLinearObjFuncList
         )
 
+        # The noise-weighted curvature weights of a linear func do not depend on the mapper, so
+        # they are formed once per linear func rather than once per (mapper, linear func) pair.
+        curvature_weights_list = [
+            np.array(
+                self.linear_func_operated_mapping_matrix_dict[linear_func]
+                / self.noise_map[:, None] ** 2
+            )
+            for linear_func in linear_func_list
+        ]
+
         for i in range(len(mapper_list)):
             mapper = mapper_list[i]
             mapper_param_range = mapper_param_range_list[i]
@@ -564,17 +578,12 @@ class InversionImagingSparseNumba(AbstractInversionImaging):
             for func_index, linear_func in enumerate(linear_func_list):
                 linear_func_param_range = linear_func_param_range_list[func_index]
 
-                data_linear_func_matrix = (
-                    self.linear_func_operated_mapping_matrix_dict[linear_func]
-                    / self.noise_map[:, None] ** 2
-                )
-
                 off_diag = inversion_imaging_numba_util.curvature_matrix_off_diags_via_mapper_and_linear_func_curvature_vector_from(
                     data_to_pix_unique=mapper.unique_mappings.data_to_pix_unique,
                     data_weights=mapper.unique_mappings.data_weights,
                     pix_lengths=mapper.unique_mappings.pix_lengths,
                     pix_pixels=mapper.params,
-                    curvature_weights=np.array(data_linear_func_matrix),
+                    curvature_weights=curvature_weights_list[func_index],
                     mask=self.mask.array,
                     psf_kernel=self.psf.kernel.native.array,
                 )
@@ -583,6 +592,11 @@ class InversionImagingSparseNumba(AbstractInversionImaging):
                     mapper_param_range[0] : mapper_param_range[1],
                     linear_func_param_range[0] : linear_func_param_range[1],
                 ] = off_diag
+
+                curvature_matrix[
+                    linear_func_param_range[0] : linear_func_param_range[1],
+                    mapper_param_range[0] : mapper_param_range[1],
+                ] = off_diag.T
 
         return curvature_matrix
 
