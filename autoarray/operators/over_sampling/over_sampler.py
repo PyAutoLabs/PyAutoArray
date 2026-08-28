@@ -167,12 +167,40 @@ class OverSampler:
         ):
             self.segment_ids[start:end] = seg_id
 
-    @property
+    @cached_property
     def sub_is_uniform(self) -> bool:
         """
         Returns True if the sub_size is uniform across all pixels in the mask.
+
+        The `sub_size` is fixed when the `OverSampler` is created, so this is cached: it is evaluated once per
+        instance instead of on every call to `binned_array_2d_from` (which is called once per light profile
+        evaluation, and therefore many hundreds of times per likelihood evaluation).
         """
         return np.all(np.isclose(self.sub_size, self.sub_size[0]))
+
+    @cached_property
+    def binned_counts(self) -> np.ndarray:
+        """
+        The number of sub-pixels which are binned up into every pixel of the mask, used as the divisor when
+        binning an over sampled array via `binned_array_2d_from` for a non-uniform `sub_size`.
+
+        Segments which contain no sub-pixels have their count set to 1, so that the division by this array does
+        not raise a divide-by-zero (the corresponding sum is zero, so the binned value is zero either way).
+
+        This is a function of the `segment_ids` alone, which are fixed when the `OverSampler` is created, so it is
+        computed once per instance instead of on every call to `binned_array_2d_from`.
+
+        The returned array is read-only, because it is shared by every call and must never be mutated in place.
+        """
+        counts = np.bincount(self.segment_ids, minlength=self.mask.pixels_in_mask)
+
+        # Avoid division by zero (on a copy, because `np.bincount` output is not reused elsewhere but the cached
+        # array below is handed out to every caller).
+
+        counts = np.maximum(counts, 1)
+        counts.flags.writeable = False
+
+        return counts
 
     def tree_flatten(self):
         return (self.mask, self.sub_size), ()
@@ -263,13 +291,8 @@ class OverSampler:
                     self.segment_ids, weights=array, minlength=self.mask.pixels_in_mask
                 )
 
-                # Count number of items per segment
-                counts = np.bincount(
-                    self.segment_ids, minlength=self.mask.pixels_in_mask
-                )
-
-                # Avoid division by zero
-                counts[counts == 0] = 1
+                # Count number of items per segment (cached, as it depends only on the segment ids)
+                counts = self.binned_counts
 
             binned_array_2d = sums / counts
 
