@@ -45,3 +45,21 @@ def test_settings_nnls_warm_start_memo_round_trips():
     settings = from_dict(to_dict(aa.Settings(nnls_warm_start_memo=True)))
 
     assert settings.nnls_warm_start_memo is True
+
+
+def test_settings_nnls_warm_start_error_tolerance_round_trips():
+    # The test config does not ship the key, so the default resolves through
+    # the KeyError fallback -- which is also the production path whenever a
+    # workspace shadows autoarray's general.yaml.
+    assert aa.Settings().nnls_warm_start_error_tolerance == 1.5
+    assert (
+        aa.Settings(nnls_warm_start_error_tolerance=2.5).nnls_warm_start_error_tolerance
+        == 2.5
+    )
+    assert aa.Settings(
+        nnls_warm_start_error_tolerance=float("inf")
+    ).nnls_warm_start_error_tolerance == float("inf")
+
+    settings = from_dict(to_dict(aa.Settings(nnls_warm_start_error_tolerance=2.5)))
+
+    assert settings.nnls_warm_start_error_tolerance == 2.5

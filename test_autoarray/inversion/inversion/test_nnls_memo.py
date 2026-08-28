@@ -18,6 +18,7 @@ from autoarray.inversion.inversion import nnls_memo
 from autoarray.inversion.inversion.nnls_memo import (
     _NNLS_PASSIVE_SET_MEMO_MAX_ENTRIES,
     _nnls_passive_set_memo,
+    memo_drop,
     memo_key,
     passive_set_get,
     passive_set_put,
@@ -53,7 +54,9 @@ class SubsetInversion(aa.m.MockInversion):
         return self._ids_to_keep
 
 
-def _inversion_from(curvature_reg_matrix, data_vector, memo, ids_to_keep=None):
+def _inversion_from(
+    curvature_reg_matrix, data_vector, memo, ids_to_keep=None, tolerance=None
+):
     n = data_vector.shape[0]
 
     kwargs = dict(
@@ -66,6 +69,7 @@ def _inversion_from(curvature_reg_matrix, data_vector, memo, ids_to_keep=None):
             use_positive_only_solver=True,
             use_edge_zeroed_pixels=False,
             nnls_warm_start_memo=memo,
+            nnls_warm_start_error_tolerance=tolerance,
         ),
     )
 
@@ -115,7 +119,7 @@ def test__memoized_reconstruction__subset_branch__matches_unmemoized(seed):
     # the subset -- not the full parameter vector.
     (key,) = _nnls_passive_set_memo
     assert key.startswith(f"{len(ids_to_keep)}:")
-    assert np.all(_nnls_passive_set_memo[key] < len(ids_to_keep))
+    assert np.all(_nnls_passive_set_memo[key].passive_set < len(ids_to_keep))
 
 
 def test__fingerprint__changes_with_ids_to_keep():
@@ -141,7 +145,9 @@ def test__fingerprint__changes_with_ids_to_keep():
 
 def test__passive_set_put__evicts_the_oldest_entry_when_full():
     for i in range(_NNLS_PASSIVE_SET_MEMO_MAX_ENTRIES + 2):
-        passive_set_put(key=f"key_{i}", passive_set=np.array([i]))
+        passive_set_put(
+            key=f"key_{i}", passive_set=np.array([i]), dense_error_fraction=0.1
+        )
 
     assert len(_nnls_passive_set_memo) == _NNLS_PASSIVE_SET_MEMO_MAX_ENTRIES
     assert "key_0" not in _nnls_passive_set_memo
@@ -149,26 +155,39 @@ def test__passive_set_put__evicts_the_oldest_entry_when_full():
     assert f"key_{_NNLS_PASSIVE_SET_MEMO_MAX_ENTRIES + 1}" in _nnls_passive_set_memo
 
 
-def test__passive_set_put__stores_a_read_only_copy():
+def test__passive_set_put__stores_a_read_only_copy_and_the_reference_fraction():
     passive_set = np.array([0, 3, 4])
 
-    passive_set_put(key="key", passive_set=passive_set)
+    passive_set_put(key="key", passive_set=passive_set, dense_error_fraction=0.25)
 
     passive_set[0] = 99
 
-    stored = passive_set_get(key="key", n=5)
+    entry = passive_set_get(key="key", n=5)
 
-    assert np.array_equal(stored, np.array([0, 3, 4]))
+    assert np.array_equal(entry.passive_set, np.array([0, 3, 4]))
+    assert entry.dense_error_fraction == 0.25
     with pytest.raises(ValueError):
-        stored[0] = 1
+        entry.passive_set[0] = 1
 
 
 def test__passive_set_get__miss_on_out_of_range_indices_and_unknown_key():
-    passive_set_put(key="key", passive_set=np.array([0, 3, 4]))
+    passive_set_put(
+        key="key", passive_set=np.array([0, 3, 4]), dense_error_fraction=0.0
+    )
 
     assert passive_set_get(key="key", n=5) is not None
     assert passive_set_get(key="key", n=4) is None
     assert passive_set_get(key="other", n=5) is None
+
+
+def test__memo_drop__forgets_the_key_and_is_a_no_op_when_absent():
+    passive_set_put(key="key", passive_set=np.array([0, 2]), dense_error_fraction=0.1)
+
+    memo_drop(key="key")
+
+    assert passive_set_get(key="key", n=5) is None
+
+    memo_drop(key="key")
 
 
 def test__memo_enabled__reads_the_environment(monkeypatch):

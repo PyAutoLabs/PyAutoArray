@@ -301,6 +301,16 @@ def reconstruction_positive_only_from(
         Identifies the index space this solve's passive set lives in, enabling the cross-evaluation warm-start
         memo (`Settings.nnls_warm_start_memo`) on the NumPy path. `None` disables the memo for this call.
 
+    Notes
+    -----
+    On the NumPy path this function writes two keys into the `stats` dict it passes to `fnnls_cholesky`
+    that `fnnls_cholesky` itself knows nothing about: ``seed_source`` (``"memo"`` if the solve that
+    produced the returned reconstruction started from a memo seed, ``"dense"`` if it started from the
+    sign of the unconstrained dense solve) and ``warm_start_fallback`` (`True` if a memo seed breached
+    `Settings.nnls_warm_start_error_tolerance` and its entry was dropped, so the next solve for that key
+    restarts dense). They are set after `fnnls_cholesky` returns, so a diagnostic wrapping the solver
+    must read the dict it handed in *after* the evaluation, not at the point the solver returns.
+
     Returns
     -------
     Non-negative S that minimizes the Eq.(2) of https://arxiv.org/pdf/astro-ph/0302587.pdf.
@@ -392,20 +402,22 @@ def reconstruction_positive_only_from(
             else None
         )
 
-        warm_start = (
-            nnls_memo.passive_set_get(key=key, n=data_vector.shape[0])
-            if use_memo
-            else None
-        )
+        n = data_vector.shape[0]
 
-        if warm_start is not None:
+        entry = nnls_memo.passive_set_get(key=key, n=n) if use_memo else None
+
+        stats["seed_source"] = "dense"
+        stats["warm_start_fallback"] = False
+
+        if entry is not None:
             try:
                 reconstruction = fnnls_cholesky(
                     curvature_reg_matrix,
                     (data_vector).T,
-                    P_initial=warm_start,
+                    P_initial=entry.passive_set,
                     stats=stats,
                 )
+                stats["seed_source"] = "memo"
             except (RuntimeError, np.linalg.LinAlgError, ValueError):
                 # A seed from a previous evaluation is a guess about a
                 # different matrix, so it can factorise badly where the
@@ -423,9 +435,46 @@ def reconstruction_positive_only_from(
                 P_initial=np.linalg.solve(curvature_reg_matrix, data_vector) > 0,
                 stats=stats,
             )
+            stats["seed_source"] = "dense"
 
         if use_memo:
-            nnls_memo.passive_set_put(key=key, passive_set=stats["passive_set"])
+            error_fraction = stats["warm_start_errors"] / max(n, 1)
+
+            if stats["seed_source"] == "memo":
+                # A memo seed is judged against the dense-sign start it
+                # replaced, not against an absolute error count: the absolute
+                # fraction does not separate seeds that save iterations from
+                # seeds that cost them, the ratio to the dense-sign reference
+                # does. A seed that breaches the tolerance is discarded, so the
+                # next solve for this key restarts dense and refreshes the
+                # reference -- no stale seed can be dragged through a run in a
+                # regime the reference was never measured in.
+                tolerance = settings.nnls_warm_start_error_tolerance
+
+                guard_active = (
+                    tolerance is not None and np.isfinite(tolerance) and tolerance > 0.0
+                )
+
+                if (
+                    guard_active
+                    and error_fraction > tolerance * entry.dense_error_fraction
+                ):
+                    nnls_memo.memo_drop(key=key)
+                    stats["warm_start_fallback"] = True
+                else:
+                    # The reference describes the dense-sign start, so it is
+                    # carried forward unchanged; only a dense solve refreshes it.
+                    nnls_memo.passive_set_put(
+                        key=key,
+                        passive_set=stats["passive_set"],
+                        dense_error_fraction=entry.dense_error_fraction,
+                    )
+            else:
+                nnls_memo.passive_set_put(
+                    key=key,
+                    passive_set=stats["passive_set"],
+                    dense_error_fraction=error_fraction,
+                )
 
         return reconstruction
 

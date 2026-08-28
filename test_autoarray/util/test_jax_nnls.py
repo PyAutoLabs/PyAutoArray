@@ -43,9 +43,7 @@ def test__reconstruction_positive_only_from__numpy_path_ignores_knobs():
     # knob-carrying settings.
     data_vector = np.array([1.0, 1.0, 2.0])
 
-    curvature_reg_matrix = np.array(
-        [[2.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 1.0]]
-    )
+    curvature_reg_matrix = np.array([[2.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 1.0]])
 
     for settings in [None, aa.Settings(nnls_solver_tol=1e-6, nnls_max_iter=30)]:
         reconstruction = aa.util.inversion.reconstruction_positive_only_from(
@@ -72,9 +70,7 @@ def _clear_nnls_memo():
 def _small_positive_only_system():
     # Unconstrained solution is [1, -1, 3]; the NNLS solution is [0.5, 0, 2].
     data_vector = np.array([1.0, 1.0, 2.0])
-    curvature_reg_matrix = np.array(
-        [[2.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 1.0]]
-    )
+    curvature_reg_matrix = np.array([[2.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 1.0]])
     return data_vector, curvature_reg_matrix
 
 
@@ -97,7 +93,12 @@ def test__reconstruction_positive_only_from__warm_start_memo_records_the_passive
 
     key = memo_key(n=3, fingerprint="mesh")
 
-    assert np.array_equal(_nnls_passive_set_memo[key], np.array([0, 2]))
+    entry = _nnls_passive_set_memo[key]
+
+    assert np.array_equal(entry.passive_set, np.array([0, 2]))
+    # The dense-sign start of this system is exactly right, so the reference
+    # error fraction it hands the guard is zero.
+    assert entry.dense_error_fraction == 0.0
 
 
 def test__reconstruction_positive_only_from__warm_start_memo_seeds_the_next_solve(
@@ -135,7 +136,7 @@ def test__reconstruction_positive_only_from__warm_start_memo_seeds_the_next_solv
     )
 
     assert len(seeds) == 1
-    assert np.array_equal(seeds[0], np.array([0, 2]))
+    assert np.array_equal(seeds[0].passive_set, np.array([0, 2]))
     assert second == pytest.approx(first, rel=1e-10, abs=1e-12)
 
 
@@ -203,3 +204,165 @@ def test__reconstruction_positive_only_from__warm_start_memo_disabled_by_env(
 
     assert reconstruction == pytest.approx(np.array([0.5, 0.0, 2.0]), 1.0e-4)
     assert _nnls_passive_set_memo == {}
+
+
+# ===================================================================
+# Relative fallback guard on a memo seed (Settings.nnls_warm_start_error_tolerance)
+# ===================================================================
+
+
+def _solve_capturing_stats(monkeypatch, settings, fingerprint="mesh"):
+    """
+    One `reconstruction_positive_only_from` on the small positive-only system,
+    returning (reconstruction, stats).
+
+    `seed_source` / `warm_start_fallback` are written into the stats dict AFTER
+    `fnnls_cholesky` returns, so the dict must be held by reference and read
+    once the call has finished -- reading it inside the wrapper would see the
+    solver's keys only.
+    """
+    import autoarray.util.fnnls as fnnls_mod
+
+    original = fnnls_mod.fnnls_cholesky
+    captured = []
+
+    def _wrapped(ZTZ, ZTx, P_initial=np.zeros(0, dtype=int), stats=None):
+        captured.append(stats)
+        return original(ZTZ, ZTx, P_initial, stats=stats)
+
+    monkeypatch.setattr(fnnls_mod, "fnnls_cholesky", _wrapped)
+
+    data_vector, curvature_reg_matrix = _small_positive_only_system()
+
+    reconstruction = aa.util.inversion.reconstruction_positive_only_from(
+        data_vector=data_vector,
+        curvature_reg_matrix=curvature_reg_matrix,
+        settings=settings,
+        fingerprint=fingerprint,
+    )
+
+    monkeypatch.setattr(fnnls_mod, "fnnls_cholesky", original)
+
+    return reconstruction, captured[-1]
+
+
+def test__warm_start_guard__seed_worse_than_tolerance_is_dropped_and_next_solve_is_dense(
+    monkeypatch,
+):
+    from autoarray.inversion.inversion.nnls_memo import (
+        _nnls_passive_set_memo,
+        memo_key,
+        passive_set_put,
+    )
+
+    key = memo_key(n=3, fingerprint="mesh")
+
+    # A deliberately wrong seed against a deliberately small reference: the
+    # true passive set is [0, 2], so seeding [1] gets all three entries wrong
+    # (fraction 1.0) against a dense-sign reference of 0.1 -- 1.0 > 1.5 * 0.1.
+    passive_set_put(key=key, passive_set=np.array([1]), dense_error_fraction=0.1)
+
+    settings = aa.Settings(nnls_warm_start_memo=True)
+    assert settings.nnls_warm_start_error_tolerance == 1.5
+
+    reconstruction, stats = _solve_capturing_stats(monkeypatch, settings)
+
+    assert reconstruction == pytest.approx(np.array([0.5, 0.0, 2.0]), 1.0e-4)
+    assert stats["seed_source"] == "memo"
+    assert stats["warm_start_fallback"] is True
+    assert _nnls_passive_set_memo == {}
+
+    # With the entry dropped, the next solve for the key restarts from the
+    # dense-sign start and refreshes the reference.
+    _, stats = _solve_capturing_stats(monkeypatch, settings)
+
+    assert stats["seed_source"] == "dense"
+    assert stats["warm_start_fallback"] is False
+
+    entry = _nnls_passive_set_memo[key]
+
+    assert np.array_equal(entry.passive_set, np.array([0, 2]))
+    assert entry.dense_error_fraction == 0.0
+
+
+def test__warm_start_guard__seed_within_tolerance_keeps_the_entry_and_the_reference(
+    monkeypatch,
+):
+    from autoarray.inversion.inversion.nnls_memo import (
+        _nnls_passive_set_memo,
+        memo_key,
+        passive_set_put,
+    )
+
+    key = memo_key(n=3, fingerprint="mesh")
+
+    # Seeding every entry passive gets exactly one of three wrong (fraction
+    # 1/3), which is inside 1.5 * 0.5.
+    passive_set_put(key=key, passive_set=np.array([0, 1, 2]), dense_error_fraction=0.5)
+
+    reconstruction, stats = _solve_capturing_stats(
+        monkeypatch, aa.Settings(nnls_warm_start_memo=True)
+    )
+
+    assert reconstruction == pytest.approx(np.array([0.5, 0.0, 2.0]), 1.0e-4)
+    assert stats["seed_source"] == "memo"
+    assert stats["warm_start_fallback"] is False
+
+    entry = _nnls_passive_set_memo[key]
+
+    assert np.array_equal(entry.passive_set, np.array([0, 2]))
+    # Only a dense-sign solve refreshes the reference, so it is carried through
+    # the seeded solve unchanged.
+    assert entry.dense_error_fraction == 0.5
+
+
+@pytest.mark.parametrize("tolerance", [float("inf"), 0.0, -1.0])
+def test__warm_start_guard__disabled_tolerance_never_drops(monkeypatch, tolerance):
+    from autoarray.inversion.inversion.nnls_memo import (
+        _nnls_passive_set_memo,
+        memo_key,
+        passive_set_put,
+    )
+
+    key = memo_key(n=3, fingerprint="mesh")
+
+    passive_set_put(key=key, passive_set=np.array([1]), dense_error_fraction=0.1)
+
+    _, stats = _solve_capturing_stats(
+        monkeypatch,
+        aa.Settings(
+            nnls_warm_start_memo=True, nnls_warm_start_error_tolerance=tolerance
+        ),
+    )
+
+    assert stats["seed_source"] == "memo"
+    assert stats["warm_start_fallback"] is False
+    assert _nnls_passive_set_memo[key].dense_error_fraction == 0.1
+
+
+def test__warm_start_guard__a_perfect_dense_reference_does_not_breach_on_a_perfect_seed(
+    monkeypatch,
+):
+    from autoarray.inversion.inversion.nnls_memo import (
+        _nnls_passive_set_memo,
+        memo_key,
+    )
+
+    settings = aa.Settings(nnls_warm_start_memo=True)
+
+    # The dense-sign start of this system is exact, so the reference is 0.0 and
+    # the guard degenerates to `frac > 0`. A seed that is also exact must not
+    # breach it -- a perfect dense start is cheap to keep, not a reason to drop.
+    _, stats = _solve_capturing_stats(monkeypatch, settings)
+
+    assert stats["seed_source"] == "dense"
+
+    key = memo_key(n=3, fingerprint="mesh")
+
+    assert _nnls_passive_set_memo[key].dense_error_fraction == 0.0
+
+    _, stats = _solve_capturing_stats(monkeypatch, settings)
+
+    assert stats["seed_source"] == "memo"
+    assert stats["warm_start_fallback"] is False
+    assert key in _nnls_passive_set_memo

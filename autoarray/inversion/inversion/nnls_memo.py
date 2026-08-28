@@ -1,7 +1,7 @@
 import os
 
 import numpy as np
-from typing import Dict, Optional
+from typing import Dict, NamedTuple, Optional
 
 # Cross-evaluation memo for the positive-only (fnnls) solve's passive set.
 #
@@ -22,8 +22,36 @@ from typing import Dict, Optional
 # stale entry costs iterations, not correctness. Forked pool workers inherit a
 # copy at fork and diverge from there, which is fine for the same reason.
 #
+# An entry therefore carries TWO things: the passive set to seed from, and
+# `dense_error_fraction` -- the error fraction of the most recent solve for
+# that key that started from the DENSE-SIGN guess. That number is the
+# reference the fallback guard in `reconstruction_positive_only_from` measures
+# a seed against: the PyAutoArray#498 robustness matrix showed the absolute
+# error fraction of a seed does NOT separate seeds that save iterations from
+# seeds that cost them (helpful and unhelpful cells overlap at 0.048-0.138),
+# but the ratio of the seed's fraction to the dense-sign start's does (helpful
+# cells never exceed 0.89, the worst seed reaches 1.42). The reference is
+# per-key and self-calibrating, so a solve regime far outside anything the
+# matrix probed cannot drag a stale seed through a whole run: once a seed is
+# that much worse than the dense-sign start, the entry is dropped
+# (`memo_drop`) and the next solve for that key restarts dense, refreshing the
+# reference.
+#
 # Disable with AUTOARRAY_NNLS_WARM_START=0.
-_nnls_passive_set_memo: Dict[str, np.ndarray] = {}
+
+
+class MemoEntry(NamedTuple):
+    """
+    One memoized solve: the passive set to seed the next solve for this key
+    from, and the error fraction of the most recent dense-sign-started solve
+    for the same key (the reference the fallback guard compares a seed to).
+    """
+
+    passive_set: np.ndarray
+    dense_error_fraction: float
+
+
+_nnls_passive_set_memo: Dict[str, MemoEntry] = {}
 
 _NNLS_PASSIVE_SET_MEMO_MAX_ENTRIES = 8
 
@@ -43,31 +71,35 @@ def memo_key(n: int, fingerprint) -> str:
     return f"{n}:{fingerprint}"
 
 
-def passive_set_get(key: str, n: int) -> Optional[np.ndarray]:
+def passive_set_get(key: str, n: int) -> Optional[MemoEntry]:
     """
-    The memoized passive set for `key`, or None on a miss.
+    The memoized entry for `key` -- its passive set and dense-sign reference
+    error fraction -- or None on a miss.
 
     An entry whose indices do not all fit a size-`n` solve is a miss, not a
     hit: `n` is already part of the key, so this only fires if a caller
     fingerprints two different index spaces identically, and a miss is always
     a safe outcome.
     """
-    passive_set = _nnls_passive_set_memo.get(key)
+    entry = _nnls_passive_set_memo.get(key)
 
-    if passive_set is None:
+    if entry is None:
         return None
 
-    if passive_set.size and passive_set.max() >= n:
+    if entry.passive_set.size and entry.passive_set.max() >= n:
         return None
 
-    return passive_set
+    return entry
 
 
-def passive_set_put(key: str, passive_set: np.ndarray) -> None:
+def passive_set_put(
+    key: str, passive_set: np.ndarray, dense_error_fraction: float
+) -> None:
     """
-    Store a solve's final passive set, evicting the oldest entry once the memo
-    is full (FIFO; the memo tracks one inversion's recent history, not a
-    working set worth ranking).
+    Store a solve's final passive set alongside the dense-sign reference error
+    fraction to carry forward, evicting the oldest entry once the memo is full
+    (FIFO; the memo tracks one inversion's recent history, not a working set
+    worth ranking).
     """
     stored = np.asarray(passive_set, dtype=int).copy()
     stored.setflags(write=False)
@@ -78,4 +110,14 @@ def passive_set_put(key: str, passive_set: np.ndarray) -> None:
     ):
         _nnls_passive_set_memo.pop(next(iter(_nnls_passive_set_memo)))
 
-    _nnls_passive_set_memo[key] = stored
+    _nnls_passive_set_memo[key] = MemoEntry(
+        passive_set=stored, dense_error_fraction=float(dense_error_fraction)
+    )
+
+
+def memo_drop(key: str) -> None:
+    """
+    Forget `key`, so the next solve for it restarts from the dense-sign guess
+    and refreshes the reference error fraction. A no-op if the key is absent.
+    """
+    _nnls_passive_set_memo.pop(key, None)

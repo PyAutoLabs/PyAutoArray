@@ -18,6 +18,7 @@ class Settings:
         nnls_solver_tol: Optional[float] = None,
         nnls_max_iter: Optional[int] = None,
         nnls_warm_start_memo: Optional[bool] = None,
+        nnls_warm_start_error_tolerance: Optional[float] = None,
         log_det_method: Optional[str] = None,
         regularization_term_method: Optional[str] = None,
     ):
@@ -110,6 +111,21 @@ class Settings:
             (`true`); setting ``AUTOARRAY_NNLS_WARM_START=0`` is the process-wide kill-switch that disables the
             memo whatever this setting says. Only the NumPy (`xp=np`) fnnls path honors this; the JAX path
             ignores it.
+        nnls_warm_start_error_tolerance
+            The relative guard on a memo seed's quality. Each memo entry carries a reference: the error
+            fraction (warm-start errors / solve size) of the most recent solve for that key which started
+            from the dense-sign guess. A memo-seeded solve whose own error fraction exceeds
+            ``tolerance * reference`` is judged worse than simply starting dense, so its entry is discarded
+            and the next solve for that key restarts from the dense-sign start, refreshing the reference.
+            The guard is relative because the absolute error fraction does not separate helpful from
+            unhelpful seeds (the two populations overlap at 0.048-0.138 in the PyAutoArray#498 32-cell
+            robustness matrix) whereas the ratio to the dense-sign start does (helpful cells top out at
+            0.89, the worst seed measured reaches 1.42). `None` (default) reads the packaged value
+            (``1.5``), chosen above that worst observed ratio so the guard is protective against regimes
+            far outside the matrix rather than flapping inside it. The guard is **disabled** by any value
+            that is not finite and positive -- ``float("inf")`` is the idiomatic choice, and ``0`` or a
+            negative value disables it too rather than meaning "drop everything". Only the NumPy
+            (`xp=np`) fnnls path honors this; the JAX path ignores it.
         log_det_method
             Which computation is used for the two Bayesian-evidence log-determinant terms
             (``log_det_curvature_reg_matrix_term`` and ``log_det_regularization_matrix_term``). `None`
@@ -163,6 +179,7 @@ class Settings:
         self.nnls_solver_tol = nnls_solver_tol
         self.nnls_max_iter = nnls_max_iter
         self._nnls_warm_start_memo = nnls_warm_start_memo
+        self._nnls_warm_start_error_tolerance = nnls_warm_start_error_tolerance
         self._use_positive_only_solver = use_positive_only_solver
         self._use_edge_zeroed_pixels = use_edge_zeroed_pixels
         self._use_border_relocator = use_border_relocator
@@ -228,6 +245,28 @@ class Settings:
                 return True
 
         return self._nnls_warm_start_memo
+
+    @property
+    def nnls_warm_start_error_tolerance(self) -> float:
+        """
+        How much worse than the dense-sign start a memo seed may be before its entry is dropped.
+
+        A seeded solve whose error fraction exceeds this multiple of the entry's dense-sign reference
+        fraction is discarded, so the next solve for that key restarts dense. Any value that is not
+        finite and positive disables the guard.
+        """
+        if self._nnls_warm_start_error_tolerance is None:
+            try:
+                return conf.instance["general"]["inversion"][
+                    "nnls_warm_start_error_tolerance"
+                ]
+            except KeyError:
+                # Workspaces ship their own general.yaml that shadows autoarray's
+                # and will not carry this key, so in practice this fallback *is*
+                # the production default, matching the packaged value.
+                return 1.5
+
+        return self._nnls_warm_start_error_tolerance
 
     @property
     def log_det_method(self):
