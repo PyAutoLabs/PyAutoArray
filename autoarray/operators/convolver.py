@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional, Tuple, Union
 import warnings
 
+from autonerves import cached_property
 from autonerves import conf
 from autoarray.structures.arrays.uniform_2d import Array2D
 from autoarray.structures.grids.uniform_2d import Grid2D
@@ -315,6 +316,53 @@ class Convolver:
 
         return tuple(
             2 * int(np.ceil((k // 2) / s)) + 1 for k in self.kernel.shape_native
+        )
+
+    @cached_property
+    def reversed_kernel(self) -> "Convolver":
+        """
+        This convolver with its kernel reversed along both axes.
+
+        Convolving with the reversed kernel is exactly *correlating* with this convolver's
+        kernel, because reversing both axes of one operand converts a convolution into a
+        correlation::
+
+            (x * flip(k))[i] = sum_d k[d] x[i + d - c] = correlate(x, k)[i]
+
+        Callers whose operator is defined as a sliding-window correlation (for example the
+        mapper x linear-func block of the imaging curvature matrix, which sums
+        ``psf[dy, dx] * image[y + dy - cy, x + dx - cx]``) can therefore route through the
+        batched convolution machinery by convolving with this convolver instead of hand
+        rolling the correlation.
+
+        The reversed convolver inherits this one's ``use_fft`` policy and
+        ``convolve_over_sample_size``, and reuses this convolver's ``ConvolverState``
+        geometry (rebuilt for the reversed kernel, whose Fourier transform differs) when one
+        was preloaded, so the FFT geometry is built once rather than once per call.
+
+        Cached, so a `Convolver` that outlives the objects using it (a dataset's PSF outlives
+        the `Inversion` rebuilt for every likelihood evaluation) builds its reversed kernel and
+        that kernel's FFT geometry only once.
+        """
+        kernel = Array2D.no_mask(
+            values=np.asarray(self.kernel.native.array)[::-1, ::-1].copy(),
+            pixel_scales=self.kernel.pixel_scales,
+            origin=self.kernel.origin,
+        )
+
+        # An oversampled state carries sub-pixel permutations that only `state_from` can
+        # attach, so it is left to rebuild that case rather than preloading a partial state.
+        state = (
+            ConvolverState(kernel=kernel, mask=self._state.source_mask)
+            if self._state is not None and self.convolve_over_sample_size == 1
+            else None
+        )
+
+        return Convolver(
+            kernel=kernel,
+            state=state,
+            use_fft=self._use_fft,
+            convolve_over_sample_size=self.convolve_over_sample_size,
         )
 
     def state_from(self, mask):
