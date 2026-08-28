@@ -122,6 +122,8 @@ def _dense_from_triplets(rows, cols, vals, M, S):
 
 
 def test__interferometer_sparse_operator__curvature_matrix_off_diag_from():
+    pytest.importorskip("jax")
+
     operator, mask, rng = _sparse_operator_and_mask()
 
     M = operator.M
@@ -157,6 +159,8 @@ def test__interferometer_sparse_operator__curvature_matrix_off_diag_from():
 
 
 def test__interferometer_sparse_operator__curvature_matrix_off_diag_func_list_from():
+    pytest.importorskip("jax")
+
     operator, mask, rng = _sparse_operator_and_mask()
 
     M = operator.M
@@ -193,6 +197,8 @@ def test__interferometer_sparse_operator__curvature_matrix_off_diag_func_list_fr
 
 
 def test__interferometer_sparse_operator__curvature_matrix_func_list_from():
+    pytest.importorskip("jax")
+
     operator, mask, rng = _sparse_operator_and_mask()
 
     M = operator.M
@@ -222,6 +228,8 @@ def test__interferometer_sparse_operator__curvature_matrix_func_list_from():
 
 
 def test__interferometer_sparse_operator__operated_matrix_slim_from():
+    pytest.importorskip("jax")
+
     operator, mask, rng = _sparse_operator_and_mask()
 
     M = operator.M
