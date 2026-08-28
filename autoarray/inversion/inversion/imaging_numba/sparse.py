@@ -505,9 +505,49 @@ class InversionImagingSparseNumba(AbstractInversionImaging):
         curvature matrix given by equation (4) and the letter F.
 
         This function computes the diagonal terms of F using the sparse_operator formalism.
+
+        The three blocks of F are assembled by separate private helpers, so that each block can be
+        computed (and therefore profiled) on its own:
+
+        - the mapper x mapper block, `_curvature_matrix_mapper_diag` (via `_curvature_matrix_multi_mapper`);
+        - the mapper x linear-func blocks, `_curvature_matrix_mapper_func_blocks_from`;
+        - the linear-func x linear-func blocks, `_curvature_matrix_func_func_blocks_from`.
+
+        The helpers write into the `curvature_matrix` they are passed and return it, so composing them
+        in this order is exactly the single-pass assembly they replaced.
         """
 
         curvature_matrix = self._curvature_matrix_multi_mapper
+
+        curvature_matrix = self._curvature_matrix_mapper_func_blocks_from(
+            curvature_matrix=curvature_matrix
+        )
+
+        curvature_matrix = self._curvature_matrix_func_func_blocks_from(
+            curvature_matrix=curvature_matrix
+        )
+
+        return curvature_matrix
+
+    def _curvature_matrix_mapper_func_blocks_from(
+        self, curvature_matrix: np.ndarray
+    ) -> np.ndarray:
+        """
+        Writes the mapper x linear-func off-diagonal blocks of the `curvature_matrix` into the input
+        matrix, returning it.
+
+        Each block contracts a mapper's unique data-to-source-pixel mappings against the PSF-convolved,
+        noise-weighted curvature vector of a linear function (the dense sliding-window correlation in
+        `curvature_matrix_off_diags_via_mapper_and_linear_func_curvature_vector_from`).
+
+        Only the `[mapper, linear_func]` blocks are written; their transposes are filled in by the
+        global mirror applied in `curvature_matrix`.
+
+        Parameters
+        ----------
+        curvature_matrix
+            The (total_params, total_params) curvature matrix the blocks are written into.
+        """
 
         mapper_list = self.cls_list_from(cls=Mapper)
         mapper_param_range_list = self.param_range_list_from(cls=Mapper)
@@ -543,6 +583,28 @@ class InversionImagingSparseNumba(AbstractInversionImaging):
                     mapper_param_range[0] : mapper_param_range[1],
                     linear_func_param_range[0] : linear_func_param_range[1],
                 ] = off_diag
+
+        return curvature_matrix
+
+    def _curvature_matrix_func_func_blocks_from(
+        self, curvature_matrix: np.ndarray
+    ) -> np.ndarray:
+        """
+        Writes the linear-func x linear-func blocks of the `curvature_matrix` into the input matrix,
+        returning it.
+
+        Each block is a BLAS `dot` of two noise-weighted operated mapping matrices.
+
+        Parameters
+        ----------
+        curvature_matrix
+            The (total_params, total_params) curvature matrix the blocks are written into.
+        """
+
+        linear_func_list = self.cls_list_from(cls=AbstractLinearObjFuncList)
+        linear_func_param_range_list = self.param_range_list_from(
+            cls=AbstractLinearObjFuncList
+        )
 
         # The linear func x linear func block is symmetric, so each weighted matrix is
         # formed once and only the upper triangle of blocks is computed, with the
