@@ -239,9 +239,11 @@ class Settings:
             try:
                 return conf.instance["general"]["inversion"]["nnls_warm_start_memo"]
             except KeyError:
-                # Workspaces ship their own general.yaml that shadows autoarray's
-                # and will not carry this key, so in practice this fallback *is*
-                # the production default: on, matching the packaged value.
+                # A workspace `general.yaml` normally omits this key, so autoconf's
+                # config-path list falls through to autoarray's packaged value (`true`).
+                # This fallback fires only when the workspace config is the sole config
+                # path (isolated test configs push one dir) and returns that same value,
+                # so both routes resolve identically.
                 return True
 
         return self._nnls_warm_start_memo
@@ -261,9 +263,11 @@ class Settings:
                     "nnls_warm_start_error_tolerance"
                 ]
             except KeyError:
-                # Workspaces ship their own general.yaml that shadows autoarray's
-                # and will not carry this key, so in practice this fallback *is*
-                # the production default, matching the packaged value.
+                # A workspace `general.yaml` normally omits this key, so autoconf's
+                # config-path list falls through to autoarray's packaged value (`1.5`).
+                # This fallback fires only when the workspace config is the sole config
+                # path (isolated test configs push one dir) and returns that same value,
+                # so both routes resolve identically.
                 return 1.5
 
         return self._nnls_warm_start_error_tolerance
