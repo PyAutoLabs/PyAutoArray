@@ -675,6 +675,72 @@ def curvature_matrix_off_diags_via_sparse_operator_from(
 
 
 @numba_util.jit()
+def curvature_matrix_off_diags_via_mapper_and_blurred_curvature_weights_from(
+    data_to_pix_unique: np.ndarray,
+    data_weights: np.ndarray,
+    pix_lengths: np.ndarray,
+    pix_pixels: int,
+    blurred_curvature_weights: np.ndarray,  # shape (n_unmasked, n_funcs)
+) -> np.ndarray:
+    """
+    Returns the off-diagonal terms in the curvature matrix `F` (see Warren & Dye 2003)
+    between a mapper object and a linear func object, from curvature weights that have
+    already been correlated with the PSF.
+
+    This is the scatter half of
+    `curvature_matrix_off_diags_via_mapper_and_linear_func_curvature_vector_from`: that
+    function expands the curvature weights onto the native grid, performs a dense
+    sliding-window correlation with the PSF and then runs this loop. Splitting the two lets
+    the correlation be done once per linear func by the batched FFT convolver (which is over
+    an order of magnitude faster at HST resolution) while this loop, which is genuinely
+    sparse and irregular, stays in numba and runs once per (mapper, linear func) pair.
+
+    For each unique mapping between a data pixel and a pixelization pixel, the PSF-correlated
+    curvature weights at that data pixel are multiplied by the mapping weight and accumulated
+    into the off-diagonal block of the curvature matrix. This accounts for sub-pixel mappings
+    between data pixels and pixelization pixels.
+
+    Parameters
+    ----------
+    data_to_pix_unique
+        An array that maps every data pixel index (e.g. the masked image pixel indexes in 1D)
+        to its unique set of pixelization pixel indexes (see `data_slim_to_pixelization_unique_from`).
+    data_weights
+        For every unique mapping between a set of data sub-pixels and a pixelization pixel,
+        the weight of this mapping based on the number of sub-pixels that map to the pixelization pixel.
+    pix_lengths
+        A 1D array describing how many unique pixels each data pixel maps to. Used to iterate over
+        `data_to_pix_unique` and `data_weights`.
+    pix_pixels
+        The total number of pixels in the pixelization that reconstructs the data.
+    blurred_curvature_weights
+        The operated values of the linear function divided by the noise-map squared and
+        correlated with the PSF, with shape [n_unmasked_data_pixels, n_linear_func_pixels].
+
+    Returns
+    -------
+    ndarray
+        The off-diagonal block of the curvature matrix `F` (see Warren & Dye 2003),
+        with shape [pix_pixels, n_linear_func_pixels].
+    """
+    data_pixels = data_weights.shape[0]
+    n_funcs = blurred_curvature_weights.shape[1]
+
+    off_diag = np.zeros((pix_pixels, n_funcs))
+
+    for data_0 in range(data_pixels):
+        for pix_0_index in range(pix_lengths[data_0]):
+            data_0_weight = data_weights[data_0, pix_0_index]
+            pix_0 = data_to_pix_unique[data_0, pix_0_index]
+            for f in range(n_funcs):
+                off_diag[pix_0, f] += (
+                    data_0_weight * blurred_curvature_weights[data_0, f]
+                )
+
+    return off_diag
+
+
+@numba_util.jit()
 def curvature_matrix_off_diags_via_mapper_and_linear_func_curvature_vector_from(
     data_to_pix_unique: np.ndarray,
     data_weights: np.ndarray,
@@ -693,6 +759,13 @@ def curvature_matrix_off_diags_via_mapper_and_linear_func_curvature_vector_from(
     weights of the linear function object (values of the linear function divided by the
     noise-map squared) are expanded into the native 2D image grid, convolved with the PSF
     kernel, and then remapped back to the 1D slim representation.
+
+    The inversion itself no longer calls this function: the correlation is performed by the
+    batched FFT convolver (`Convolver.reversed_kernel`) and only the scatter/accumulate loop
+    below runs in numba, via
+    `curvature_matrix_off_diags_via_mapper_and_blurred_curvature_weights_from`. This dense
+    sliding-window implementation is retained as the reference the FFT path is asserted
+    against in the unit tests.
 
     For each unique mapping between a data pixel and a pixelization pixel, the convolved
     curvature weights at that data pixel are multiplied by the mapping weights and

@@ -434,3 +434,99 @@ def test__data_vector_via_blurred_mapping_matrix_from():
     )
 
     assert (data_vector == np.array([2.0, 3.0, 1.0])).all()
+
+
+@pytest.mark.parametrize("kernel", KERNELS_ODD, ids=KERNEL_IDS)
+def test__curvature_matrix_off_diags_via_mapper_and_blurred_curvature_weights_from__matches_dense_kernel(
+    kernel,
+):
+    """
+    The mapper x linear-func block of `F` used to expand the curvature weights onto the
+    native grid, run a dense sliding-window correlation with the PSF and scatter the result,
+    all inside one numba kernel. The correlation now runs as a batched FFT convolution with
+    the PSF reversed along both axes (`Convolver.reversed_kernel`) and only the scatter stays
+    in numba.
+
+    This asserts the two produce the same block. The kernels are asymmetric and non-square,
+    so a missing reversal (correlation computed as a convolution) or a transposed axis cannot
+    pass.
+    """
+    mask = aa.Mask2D(
+        mask=np.array(
+            [
+                [True, True, True, True, True, True, True],
+                [True, True, False, False, False, True, True],
+                [True, False, False, False, False, False, True],
+                [True, False, False, False, False, False, True],
+                [True, False, False, False, False, False, True],
+                [True, True, False, False, False, True, True],
+                [True, True, True, True, True, True, True],
+            ]
+        ),
+        pixel_scales=1.0,
+    )
+
+    data_pixels = int(mask.pixels_in_mask)
+    n_funcs = 3
+    pix_pixels = 5
+
+    rng = np.random.default_rng(505)
+
+    curvature_weights = rng.normal(size=(data_pixels, n_funcs))
+
+    # Every data pixel maps to one or two source pixels, with non-uniform weights.
+    max_lengths = 2
+    pix_lengths = rng.integers(1, max_lengths + 1, size=data_pixels).astype("int")
+    data_to_pix_unique = rng.integers(
+        0, pix_pixels, size=(data_pixels, max_lengths)
+    ).astype("int")
+    data_weights = rng.random(size=(data_pixels, max_lengths))
+
+    off_diag_dense = aa.util.inversion_imaging_numba.curvature_matrix_off_diags_via_mapper_and_linear_func_curvature_vector_from(
+        data_to_pix_unique=data_to_pix_unique,
+        data_weights=data_weights,
+        pix_lengths=pix_lengths,
+        pix_pixels=pix_pixels,
+        curvature_weights=curvature_weights,
+        mask=np.array(mask),
+        psf_kernel=kernel,
+    )
+
+    convolver = aa.Convolver(
+        kernel=aa.Array2D.no_mask(values=kernel, pixel_scales=1.0),
+    )
+
+    blurred_curvature_weights = convolver.reversed_kernel.convolved_mapping_matrix_from(
+        mapping_matrix=curvature_weights,
+        mask=mask,
+        xp=np,
+    )
+
+    off_diag_fft = aa.util.inversion_imaging_numba.curvature_matrix_off_diags_via_mapper_and_blurred_curvature_weights_from(
+        data_to_pix_unique=data_to_pix_unique,
+        data_weights=data_weights,
+        pix_lengths=pix_lengths,
+        pix_pixels=pix_pixels,
+        blurred_curvature_weights=blurred_curvature_weights,
+    )
+
+    assert off_diag_fft == pytest.approx(off_diag_dense, rel=1.0e-6)
+
+
+def test__convolver_reversed_kernel__is_the_kernel_reversed_and_convolves_as_a_correlation():
+    """
+    `Convolver.reversed_kernel` is the same convolver with its kernel reversed along both
+    axes, so convolving with it correlates with the original kernel.
+    """
+    kernel = np.arange(1.0, 16.0).reshape(3, 5)
+
+    convolver = aa.Convolver(
+        kernel=aa.Array2D.no_mask(values=kernel, pixel_scales=1.0),
+    )
+
+    assert convolver.reversed_kernel.kernel.native.array == pytest.approx(
+        kernel[::-1, ::-1]
+    )
+
+    # Cached, so the reversed kernel and its FFT geometry are built once.
+    assert convolver.reversed_kernel is convolver.reversed_kernel

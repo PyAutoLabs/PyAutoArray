@@ -532,6 +532,37 @@ class InversionImagingSparseNumba(AbstractInversionImaging):
 
         return curvature_matrix
 
+    def _blurred_curvature_weights_from(
+        self, curvature_weights: np.ndarray
+    ) -> np.ndarray:
+        """
+        Returns a linear func's noise-weighted curvature weights correlated with the PSF, in the
+        mask's slim representation with shape [n_unmasked_data_pixels, n_linear_func_pixels].
+
+        The mapper x linear-func block of `F` requires, at every unmasked data pixel, the
+        sliding-window sum ``sum_dy_dx psf[dy, dx] * weights[y + dy - cy, x + dx - cx]`` -- a
+        *correlation* with the PSF, not a convolution. Correlating with the PSF is exactly
+        convolving with the PSF reversed along both axes, so this routes through the dataset
+        PSF's `reversed_kernel` convolver and its batched (multi-column) convolution, which is
+        over an order of magnitude faster at HST resolution than the dense sliding window it
+        replaces.
+
+        As in the sliding-window implementation the weights are zero everywhere outside the
+        mask (no blurring mapping matrix is supplied), and the result is read back only at the
+        unmasked pixels.
+
+        Parameters
+        ----------
+        curvature_weights
+            The operated values of a linear function divided by the noise-map squared, with
+            shape [n_unmasked_data_pixels, n_linear_func_pixels].
+        """
+        return self.psf.reversed_kernel.convolved_mapping_matrix_from(
+            mapping_matrix=curvature_weights,
+            mask=self.mask,
+            xp=np,
+        )
+
     def _curvature_matrix_mapper_func_blocks_from(
         self, curvature_matrix: np.ndarray
     ) -> np.ndarray:
@@ -539,9 +570,13 @@ class InversionImagingSparseNumba(AbstractInversionImaging):
         Writes the mapper x linear-func off-diagonal blocks of the `curvature_matrix` into the input
         matrix, returning it.
 
-        Each block contracts a mapper's unique data-to-source-pixel mappings against the PSF-convolved,
-        noise-weighted curvature vector of a linear function (the dense sliding-window correlation in
-        `curvature_matrix_off_diags_via_mapper_and_linear_func_curvature_vector_from`).
+        Each block contracts a mapper's unique data-to-source-pixel mappings against the PSF-correlated,
+        noise-weighted curvature vector of a linear function.
+
+        The correlation is the dominant cost of F at HST resolution, so it is done once per linear
+        func by `_blurred_curvature_weights_from` (batched FFT convolution) rather than once per
+        (mapper, linear func) pair by a dense sliding window, and only the sparse scatter of the
+        result onto source pixels runs in numba.
 
         Each `[mapper, linear_func]` block is written together with its transpose into the
         `[linear_func, mapper]` block, so F leaves this helper symmetric and no global mirroring
@@ -556,17 +591,23 @@ class InversionImagingSparseNumba(AbstractInversionImaging):
         mapper_list = self.cls_list_from(cls=Mapper)
         mapper_param_range_list = self.param_range_list_from(cls=Mapper)
 
+        if len(mapper_list) == 0:
+            return curvature_matrix
+
         linear_func_list = self.cls_list_from(cls=AbstractLinearObjFuncList)
         linear_func_param_range_list = self.param_range_list_from(
             cls=AbstractLinearObjFuncList
         )
 
-        # The noise-weighted curvature weights of a linear func do not depend on the mapper, so
-        # they are formed once per linear func rather than once per (mapper, linear func) pair.
-        curvature_weights_list = [
-            np.array(
-                self.linear_func_operated_mapping_matrix_dict[linear_func]
-                / self.noise_map[:, None] ** 2
+        # Neither the noise-weighted curvature weights of a linear func nor their PSF
+        # correlation depend on the mapper, so both are formed once per linear func rather
+        # than once per (mapper, linear func) pair.
+        blurred_curvature_weights_list = [
+            self._blurred_curvature_weights_from(
+                curvature_weights=np.array(
+                    self.linear_func_operated_mapping_matrix_dict[linear_func]
+                    / self.noise_map[:, None] ** 2
+                )
             )
             for linear_func in linear_func_list
         ]
@@ -578,14 +619,14 @@ class InversionImagingSparseNumba(AbstractInversionImaging):
             for func_index, linear_func in enumerate(linear_func_list):
                 linear_func_param_range = linear_func_param_range_list[func_index]
 
-                off_diag = inversion_imaging_numba_util.curvature_matrix_off_diags_via_mapper_and_linear_func_curvature_vector_from(
+                off_diag = inversion_imaging_numba_util.curvature_matrix_off_diags_via_mapper_and_blurred_curvature_weights_from(
                     data_to_pix_unique=mapper.unique_mappings.data_to_pix_unique,
                     data_weights=mapper.unique_mappings.data_weights,
                     pix_lengths=mapper.unique_mappings.pix_lengths,
                     pix_pixels=mapper.params,
-                    curvature_weights=curvature_weights_list[func_index],
-                    mask=self.mask.array,
-                    psf_kernel=self.psf.kernel.native.array,
+                    blurred_curvature_weights=blurred_curvature_weights_list[
+                        func_index
+                    ],
                 )
 
                 curvature_matrix[
