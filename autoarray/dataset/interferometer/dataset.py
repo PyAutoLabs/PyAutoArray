@@ -266,12 +266,58 @@ class Interferometer(AbstractDataset):
         use_jax
             If `True`, JAX is used to accelerate the NUFFT precision matrix computation.
 
+        Precondition
+        ------------
+        Every visibility must have equal real and imaginary noise sigma
+        (`noise_map.real == noise_map.imag`). The sparse operator's precision operator
+        `W~ = Re(F^H W F)` is built from the real-part sigma alone (see
+        `psf_precision_operator_from`, which passes `noise_map_real` to
+        `nufft_precision_operator_from`), a reduction that is exact only under that
+        equality. With unequal sigmas the sparse curvature matrix silently disagrees with
+        the dense `InversionInterferometerMapping` path, so this method raises a
+        `DatasetException` rather than returning a wrong operator.
+
         Returns
         -------
         Interferometer
             A new `Interferometer` dataset with the precomputed `InterferometerSparseOperator` attached,
             enabling efficient pixelized source reconstruction via the sparse linear algebra formalism.
+
+        Raises
+        ------
+        exc.DatasetException
+            If any visibility has unequal real and imaginary noise sigma.
         """
+
+        noise_map_real = np.asarray(self.noise_map.real)
+        noise_map_imag = np.asarray(self.noise_map.imag)
+
+        if not np.allclose(noise_map_real, noise_map_imag):
+
+            unequal = ~np.isclose(noise_map_real, noise_map_imag)
+
+            denominator = np.maximum(np.abs(noise_map_real), np.abs(noise_map_imag))
+            relative_difference = np.abs(noise_map_real - noise_map_imag) / np.where(
+                denominator == 0.0, 1.0, denominator
+            )
+
+            raise exc.DatasetException(
+                "The sparse operator cannot be applied to this interferometer dataset because its "
+                "noise-map has unequal real and imaginary sigma.\n\n"
+                "The sparse operator's precision operator `W~ = Re(F^H W F)` is built from the "
+                "real-part noise sigma only (see `psf_precision_operator_from`, which passes "
+                "`noise_map_real` to `nufft_precision_operator_from`). That reduction is exact only "
+                "when every visibility has equal real and imaginary sigma "
+                "(`sigma_real == sigma_imag`).\n\n"
+                f"This dataset has {int(np.count_nonzero(unequal))} of {noise_map_real.size} "
+                "visibilities where the real and imaginary sigma differ (maximum relative difference "
+                f"{np.max(relative_difference):.3e}), so the sparse curvature matrix would silently "
+                "disagree with the dense path.\n\n"
+                "Either equalise the real and imaginary noise sigma of every visibility, or fit "
+                "without calling `apply_sparse_operator()` — the dense "
+                "`InversionInterferometerMapping` path handles unequal real and imaginary sigmas "
+                "correctly."
+            )
 
         if nufft_precision_operator is None:
 

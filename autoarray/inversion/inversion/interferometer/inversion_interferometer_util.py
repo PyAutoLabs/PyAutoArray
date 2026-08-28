@@ -545,6 +545,16 @@ class InterferometerSparseOperator:
       - mask / rectangle definition is fixed
       - dtype is fixed
       - batch_size is fixed
+
+    Precondition
+    ------------
+    The `nufft_precision_operator` this state is built from encodes `W~ = Re(F^H W F)` for a
+    single real-valued noise weighting, computed from the real-part noise sigma alone. It is
+    therefore exact only for datasets where every visibility has equal real and imaginary
+    noise sigma (`sigma_real == sigma_imag`); with unequal sigmas the curvature matrix
+    assembled here silently disagrees with the dense `InversionInterferometerMapping` path.
+    `Interferometer.apply_sparse_operator` enforces this precondition and raises a
+    `DatasetException` when it is violated.
     """
 
     dirty_image: np.ndarray

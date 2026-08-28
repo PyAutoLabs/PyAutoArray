@@ -67,7 +67,8 @@ def test__from_fits__raise_error_dft_visibilities_limit__threads_kwarg(
 ):
     """``from_fits`` must forward ``raise_error_dft_visibilities_limit`` to the
     ``Interferometer`` constructor so callers loading large DFT-based datasets can opt out
-    of the >10,000-visibility safety check (e.g. for profiling the JAX-traceable DFT path)."""
+    of the >10,000-visibility safety check (e.g. for profiling the JAX-traceable DFT path).
+    """
     from astropy.io import fits
 
     n_visibilities = 10_001
@@ -222,6 +223,55 @@ def test__apply_sparse_operator__dft_and_nufft_dirty_image_match(mask_2d_7x7):
     assert dataset_nufft.sparse_operator.dirty_image == pytest.approx(
         dataset_dft.sparse_operator.dirty_image, 1.0e-4
     )
+
+
+def test__apply_sparse_operator__unequal_real_imag_noise__raises_exception(mask_2d_7x7):
+    n_visibilities = 5
+    rng = np.random.default_rng(seed=0)
+    data = aa.Visibilities(
+        visibilities=rng.normal(size=(n_visibilities, 2)).astype(np.float64)
+    )
+
+    noise_map_array = np.ones((n_visibilities, 2), dtype=np.float64)
+    noise_map_array[2, 1] = 2.0
+
+    noise_map = aa.VisibilitiesNoiseMap(visibilities=noise_map_array)
+    uv_wavelengths = rng.normal(size=(n_visibilities, 2)).astype(np.float64)
+
+    dataset = aa.Interferometer(
+        data=data,
+        noise_map=noise_map,
+        uv_wavelengths=uv_wavelengths,
+        real_space_mask=mask_2d_7x7,
+        transformer_class=transformer.TransformerDFT,
+    )
+
+    with pytest.raises(aa.exc.DatasetException):
+        dataset.apply_sparse_operator(use_jax=False)
+
+
+def test__apply_sparse_operator__non_uniform_but_equal_real_imag_noise__is_applied(
+    mask_2d_7x7,
+):
+    n_visibilities = 5
+    rng = np.random.default_rng(seed=0)
+    data = aa.Visibilities(
+        visibilities=rng.normal(size=(n_visibilities, 2)).astype(np.float64)
+    )
+
+    sigma = np.array([1.0, 2.0, 0.5, 3.0, 1.5], dtype=np.float64)
+    noise_map = aa.VisibilitiesNoiseMap(visibilities=np.stack((sigma, sigma), axis=-1))
+    uv_wavelengths = rng.normal(size=(n_visibilities, 2)).astype(np.float64)
+
+    dataset = aa.Interferometer(
+        data=data,
+        noise_map=noise_map,
+        uv_wavelengths=uv_wavelengths,
+        real_space_mask=mask_2d_7x7,
+        transformer_class=transformer.TransformerDFT,
+    ).apply_sparse_operator(use_jax=False)
+
+    assert dataset.sparse_operator is not None
 
 
 def test__different_interferometer_without_mock_objects__customize_constructor_inputs(
