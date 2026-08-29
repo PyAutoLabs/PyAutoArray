@@ -52,7 +52,26 @@ class MaternAdaptKernel(MaternKernel):
         **JAX & gradient support**: as for ``MaternKernel`` (tfp
         ``bessel_kve`` gradients; explicit-inverse conditioning caveat). Note
         the defaults ``inner_coefficient == outer_coefficient == 1.0`` make
-        the weighting uniform — numerically identical to ``MaternKernel``.
+        the weighting uniform — but *not* numerically identical to ``MaternKernel``; see the
+        coefficient-convention note below.
+
+        **Coefficient convention (legacy, ``lambda^4``).** The coefficients are squared twice before they
+        reach the regularization matrix -- once by ``adapt_regularization_weights_from`` and once by the
+        matrix builder -- so the matrix scales as the *fourth* power of the coefficient, while
+        ``Constant`` scales as the second. Both carry the same ``LogUniform(1e-6, 1e6)`` prior, so this
+        scheme explores a far wider effective smoothing range and reaches a numerically non
+        positive-definite matrix from ``c ~ 1e4`` where ``Constant`` survives to ``c ~ 1e6``.
+
+        The adaptive weights enter the kernel covariance as
+        ``C_ij = K(d_ij) * w_i * w_j`` with ``w = 1 / regularization_weights``, so the regularization
+        matrix ``H = C^-1`` scales as the fourth power of the coefficient here too (``MaternKernel``,
+        by contrast, scales linearly in its ``coefficient``).
+
+        This behaviour is preserved deliberately: changing it would alter the coefficient scale of every
+        adaptive fit ever run. **New work should prefer ``MaternAdaptPowerKernel``**, which takes a ``power`` argument
+        (default ``1.0``, giving the ``Constant``-matching ``lambda^2`` convention) and is more robust to
+        gradient / NaN pathologies. The migration is ``c_new = c_old ** 2``, and
+        ``MaternAdaptPowerKernel(power=2.0)`` reproduces this class's coefficient scaling exactly.
 
         Parameters
         ----------
