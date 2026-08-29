@@ -901,34 +901,133 @@ def hide_unused_axes(axes) -> None:
             ax.axis("off")
 
 
+#: Config key holding the default colormap, quoted in error messages.
+_COLORMAP_CONF_KEY = "visualize/general.yaml -> colormap"
+
+
 def _default_colormap() -> str:
-    """Return the colormap name from config, registering the custom one if needed."""
+    """Return the default colormap name for 2D figures.
+
+    The name is read from the ``colormap`` key of ``visualize/general.yaml``.
+    The two failure modes are deliberately kept apart:
+
+    - **No config at all** (``autonerves`` not installed, or no ``colormap``
+      key on the config path — e.g. a bare install with no workspace) falls
+      back quietly to the bundled ``"autoarray"`` colormap.  Nothing is
+      misconfigured, so nothing is said.
+    - **A config value that matplotlib does not recognise** raises
+      ``ValueError``.  A typo'd colormap name used to revert silently to
+      ``"autoarray"``, so the user never learned their setting was ignored.
+
+    Returns
+    -------
+    str
+        A colormap name matplotlib can resolve — either ``"autoarray"`` (the
+        bundled colormap, registered here on first use) or a matplotlib name.
+
+    Raises
+    ------
+    ValueError
+        If the ``colormap`` config key is set to something that is not a
+        registered matplotlib colormap.
+    """
     try:
         from autonerves import conf
-        name = conf.instance["visualize"]["general"]["colormap"]
-    except Exception:
+        from autonerves.exc import ConfigException
+    except ImportError:
         name = "autoarray"
+    else:
+        try:
+            name = conf.instance["visualize"]["general"]["colormap"]
+        except (KeyError, ConfigException):
+            name = "autoarray"
+
     if name == "autoarray":
         from autoarray.plot.segmentdata import register
+
         register()
+        return name
+
+    _validate_colormap(name)
+
     return name
 
 
+def _validate_colormap(name) -> None:
+    """Raise ``ValueError`` unless *name* is a colormap matplotlib knows about.
+
+    Parameters
+    ----------
+    name
+        The colormap name read from config (or passed by the user).
+
+    Raises
+    ------
+    ValueError
+        If *name* is not a string, or is not a registered matplotlib colormap.
+    """
+    import matplotlib
+
+    if isinstance(name, str) and name in matplotlib.colormaps:
+        return
+
+    raise ValueError(
+        f"Unknown colormap {name!r}.\n\n"
+        f"The config key `{_COLORMAP_CONF_KEY}` is set to {name!r}, which is "
+        f"not a colormap matplotlib recognises, so no figure can be drawn "
+        f"with it.\n\n"
+        f"Use either `autoarray` (the colormap bundled with PyAutoArray) or "
+        f"any matplotlib colormap name, for example `magma`, `viridis`, "
+        f"`inferno`, `plasma` or `jet`.\n"
+        f"The full list is `list(matplotlib.colormaps)`."
+    )
+
+
 def _conf_imshow_origin() -> str:
-    """Return the imshow origin from config (``"upper"`` or ``"lower"``)."""
+    """Return the imshow origin from config (``"upper"`` or ``"lower"``).
+
+    An absent config falls back quietly to ``"upper"``; a value matplotlib's
+    ``imshow`` would reject raises ``ValueError`` rather than being silently
+    swapped for the default (same contract as :func:`_default_colormap`).
+    """
     try:
         from autonerves import conf
-        return conf.instance["visualize"]["general"]["general"]["imshow_origin"]
-    except Exception:
+        from autonerves.exc import ConfigException
+    except ImportError:
         return "upper"
+
+    try:
+        origin = conf.instance["visualize"]["general"]["general"]["imshow_origin"]
+    except (KeyError, ConfigException):
+        return "upper"
+
+    if origin not in ("upper", "lower"):
+        raise ValueError(
+            f"Invalid imshow origin {origin!r}.\n\n"
+            f"The config key `visualize/general.yaml -> general -> "
+            f"imshow_origin` must be either `upper` or `lower`."
+        )
+
+    return origin
 
 
 def _conf_output_format() -> str:
-    """Return the default output_format from config (``"show"``, ``"png"``, etc.)."""
+    """Return the default output_format from config (``"show"``, ``"png"``, etc.).
+
+    An absent config falls back quietly to ``"show"``.  The value itself is not
+    validated here — an unsupported format surfaces as matplotlib's own
+    ``savefig`` error, which already names the offending format and lists the
+    supported ones.
+    """
     try:
         from autonerves import conf
+        from autonerves.exc import ConfigException
+    except ImportError:
+        return "show"
+
+    try:
         return conf.instance["visualize"]["general"]["general"]["output_format"]
-    except Exception:
+    except (KeyError, ConfigException):
         return "show"
 
 

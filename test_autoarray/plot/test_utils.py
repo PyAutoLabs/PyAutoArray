@@ -255,3 +255,219 @@ class TestBothCallSitesHonourTheConfiguredFloor:
 
         assert len(recorded) == 1
         assert recorded[0].vmin == pytest.approx(self.FLOOR)
+
+
+class TestDefaultColormap:
+    """The `visualize/general.yaml -> colormap` lever and its failure modes."""
+
+    @staticmethod
+    def _general():
+        return conf.instance["visualize"]["general"]
+
+    def test__config_value_is_returned(self):
+        general = self._general()
+        original = general["colormap"]
+        try:
+            general["colormap"] = "magma"
+
+            assert plot_utils._default_colormap() == "magma"
+        finally:
+            general["colormap"] = original
+
+    def test__absent_key_falls_back_quietly_to_autoarray(self):
+        import matplotlib
+
+        general = self._general()
+        original = general["colormap"]
+        try:
+            del general["colormap"]
+
+            assert plot_utils._default_colormap() == "autoarray"
+        finally:
+            general["colormap"] = original
+
+        # The fallback also registers the bundled colormap, so it is usable.
+        assert "autoarray" in matplotlib.colormaps
+
+    def test__autoarray_value_registers_the_bundled_colormap(self):
+        import matplotlib
+
+        general = self._general()
+        original = general["colormap"]
+        try:
+            general["colormap"] = "autoarray"
+
+            assert plot_utils._default_colormap() == "autoarray"
+        finally:
+            general["colormap"] = original
+
+        assert "autoarray" in matplotlib.colormaps
+
+    def test__unknown_value_raises_instead_of_reverting_silently(self):
+        general = self._general()
+        original = general["colormap"]
+        try:
+            general["colormap"] = "magmaa"
+
+            with pytest.raises(ValueError) as exc_info:
+                plot_utils._default_colormap()
+        finally:
+            general["colormap"] = original
+
+        message = str(exc_info.value)
+        assert "magmaa" in message
+        assert "colormap" in message
+
+    def test__non_string_value_raises(self):
+        general = self._general()
+        original = general["colormap"]
+        try:
+            general["colormap"] = 3
+
+            with pytest.raises(ValueError):
+                plot_utils._default_colormap()
+        finally:
+            general["colormap"] = original
+
+    def test__plot_array_uses_the_config_colormap(self, plot_path, monkeypatch):
+        """One config edit moves the imaging figure's colormap."""
+        from autoarray.structures.arrays.uniform_2d import Array2D
+
+        recorded = {}
+
+        import matplotlib.pyplot as plt
+
+        original_imshow = plt.Axes.imshow
+
+        def spy(self, *args, **kwargs):
+            recorded.setdefault("cmap", kwargs.get("cmap"))
+            return original_imshow(self, *args, **kwargs)
+
+        monkeypatch.setattr(plt.Axes, "imshow", spy)
+
+        general = self._general()
+        original = general["colormap"]
+        try:
+            general["colormap"] = "magma"
+
+            aplt.plot_array(
+                array=Array2D.no_mask(
+                    values=np.ones((7, 7)),
+                    pixel_scales=1.0,
+                ),
+                output_path=plot_path,
+                output_filename="config_colormap",
+                output_format="png",
+            )
+        finally:
+            general["colormap"] = original
+
+        assert recorded["cmap"] == "magma"
+
+    def test__per_figure_colormap_overrides_the_config(self, plot_path, monkeypatch):
+        """`colormap=` on a plot function beats the config for that figure only."""
+        from autoarray.structures.arrays.uniform_2d import Array2D
+
+        recorded = {}
+
+        import matplotlib.pyplot as plt
+
+        original_imshow = plt.Axes.imshow
+
+        def spy(self, *args, **kwargs):
+            recorded.setdefault("cmap", kwargs.get("cmap"))
+            return original_imshow(self, *args, **kwargs)
+
+        monkeypatch.setattr(plt.Axes, "imshow", spy)
+
+        general = self._general()
+        original = general["colormap"]
+        try:
+            general["colormap"] = "magma"
+
+            aplt.plot_array(
+                array=Array2D.no_mask(
+                    values=np.ones((7, 7)),
+                    pixel_scales=1.0,
+                ),
+                colormap="viridis",
+                output_path=plot_path,
+                output_filename="override_colormap",
+                output_format="png",
+            )
+        finally:
+            general["colormap"] = original
+
+        assert recorded["cmap"] == "viridis"
+
+    def test__inversion_reconstruction_uses_the_config_colormap(
+        self, rectangular_mapper_7x7_3x3, plot_path, monkeypatch
+    ):
+        """The same config edit moves the inversion reconstruction figure."""
+        recorded = {}
+
+        import matplotlib.pyplot as plt
+
+        original_imshow = plt.Axes.imshow
+
+        def spy(self, *args, **kwargs):
+            recorded.setdefault("cmap", kwargs.get("cmap"))
+            return original_imshow(self, *args, **kwargs)
+
+        monkeypatch.setattr(plt.Axes, "imshow", spy)
+
+        general = self._general()
+        original = general["colormap"]
+        try:
+            general["colormap"] = "magma"
+
+            aplt.plot_inversion_reconstruction(
+                pixel_values=np.ones(9),
+                mapper=rectangular_mapper_7x7_3x3,
+                output_path=plot_path,
+                output_filename="inversion_config_colormap",
+                output_format="png",
+            )
+        finally:
+            general["colormap"] = original
+
+        assert recorded["cmap"] == "magma"
+
+
+class TestConfImshowOrigin:
+    @staticmethod
+    def _general():
+        return conf.instance["visualize"]["general"]["general"]
+
+    def test__config_value_is_returned(self):
+        general = self._general()
+        original = general["imshow_origin"]
+        try:
+            general["imshow_origin"] = "lower"
+
+            assert plot_utils._conf_imshow_origin() == "lower"
+        finally:
+            general["imshow_origin"] = original
+
+    def test__absent_key_falls_back_quietly(self):
+        general = self._general()
+        original = general["imshow_origin"]
+        try:
+            del general["imshow_origin"]
+
+            assert plot_utils._conf_imshow_origin() == "upper"
+        finally:
+            general["imshow_origin"] = original
+
+    def test__invalid_value_raises(self):
+        general = self._general()
+        original = general["imshow_origin"]
+        try:
+            general["imshow_origin"] = "sideways"
+
+            with pytest.raises(ValueError) as exc_info:
+                plot_utils._conf_imshow_origin()
+        finally:
+            general["imshow_origin"] = original
+
+        assert "sideways" in str(exc_info.value)
