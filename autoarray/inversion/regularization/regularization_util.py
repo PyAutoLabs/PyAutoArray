@@ -9,6 +9,9 @@ from autoarray.inversion.regularization.adapt import (
 from autoarray.inversion.regularization.adapt import (
     weighted_regularization_matrix_from,
 )
+from autoarray.inversion.regularization.adapt import (
+    weighted_regularization_matrix_single_scatter_from,
+)
 from autoarray.inversion.regularization.brightness_zeroth import (
     brightness_zeroth_regularization_matrix_from,
 )

@@ -69,6 +69,24 @@ class AdaptSplitZeroth(Adapt):
         blocker. Still structurally incompatible with the rectangular meshes
         (the split leg's shape mismatch, as ``ConstantSplit``).
 
+        **Coefficient convention (legacy, ``lambda^4``).** The coefficients are squared twice before they
+        reach the regularization matrix -- once by ``adapt_regularization_weights_from`` and once by the
+        matrix builder -- so the matrix scales as the *fourth* power of the coefficient, while
+        ``Constant`` scales as the second. Both carry the same ``LogUniform(1e-6, 1e6)`` prior, so this
+        scheme explores a far wider effective smoothing range and reaches a numerically non
+        positive-definite matrix from ``c ~ 1e4`` where ``Constant`` survives to ``c ~ 1e6``.
+
+        The split family does **not** carry the factor-2 scatter asymmetry of ``Adapt``:
+        it shares ``pixel_splitted_regularization_matrix_from`` with ``ConstantSplit``, so the
+        coefficient exponent is the only difference between the two. The zeroth leg (``BrightnessZeroth``) is
+        already squared once and is unaffected.
+
+        This behaviour is preserved deliberately: changing it would alter the coefficient scale of every
+        adaptive fit ever run. **New work should prefer ``AdaptSplitZerothPower``**, which takes a ``power`` argument
+        (default ``1.0``, giving the ``Constant``-matching ``lambda^2`` convention) and is more robust to
+        gradient / NaN pathologies. The migration is ``c_new = c_old ** 2``, and
+        ``AdaptSplitZerothPower(power=2.0)`` reproduces this class's coefficient scaling exactly.
+
         Parameters
         ----------
         coefficients

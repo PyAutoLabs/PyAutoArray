@@ -10,7 +10,10 @@ from autoarray.inversion.regularization.abstract import validate_coefficient
 
 
 def adapt_regularization_weights_from(
-    inner_coefficient: float, outer_coefficient: float, pixel_signals: np.ndarray
+    inner_coefficient: float,
+    outer_coefficient: float,
+    pixel_signals: np.ndarray,
+    power: float = 2.0,
 ) -> np.ndarray:
     """
     Returns the regularization weights for the adaptive regularization scheme (e.g. ``Adapt``).
@@ -36,6 +39,14 @@ def adapt_regularization_weights_from(
     pixel_signals
         The estimated signal in every pixelization pixel, used to change the regularization weighting of high signal
         and low signal pixelizations.
+    power
+        The exponent the interpolated coefficient is raised to. The matrix builders square the returned weights
+        again, so the coefficient enters the regularization matrix at the power ``2 * power``.
+
+        The default ``2.0`` is the historical ``Adapt`` convention (a fourth-power coefficient dependence) and is
+        what the legacy ``Adapt``, ``AdaptSplit``, ``AdaptSplitZeroth`` and ``MaternAdaptKernel`` classes pass.
+        ``power=1.0`` gives the squared-once convention shared with ``Constant`` and is what the ``*Power``
+        classes (e.g. ``AdaptPower``) pass by default.
 
     Returns
     -------
@@ -45,7 +56,7 @@ def adapt_regularization_weights_from(
     """
     return (
         inner_coefficient * pixel_signals + outer_coefficient * (1.0 - pixel_signals)
-    ) ** 2.0
+    ) ** power
 
 
 def weighted_regularization_matrix_from(
@@ -129,6 +140,91 @@ def weighted_regularization_matrix_from(
     return mat[:S, :S]
 
 
+def weighted_regularization_matrix_single_scatter_from(
+    regularization_weights: np.ndarray,
+    neighbors: np.ndarray,
+    xp=np,
+) -> np.ndarray:
+    """
+    Returns the regularization matrix of the adaptive regularization scheme, scattering every mesh edge
+    **once** so that uniform weights reproduce ``Constant`` regularization exactly.
+
+    This is the corrected sibling of ``weighted_regularization_matrix_from``, used by the ``*Power``
+    classes (e.g. ``AdaptPower``). The two differ only in how often each mesh edge is scattered:
+
+    - ``weighted_regularization_matrix_from`` adds every ordered neighbor pair to **both** the
+      ``(i, j)`` and ``(j, i)`` entries. Because the neighbor list already holds each unordered edge
+      twice (once in row ``i``, once in row ``j``), every edge lands four times, which is exactly twice
+      what ``constant_regularization_matrix_from`` does. ``Adapt(inner=outer=c)`` is therefore
+      ``2 x`` ``Constant(c)``, not equal to it.
+    - This function adds every ordered neighbor pair once, to ``(i, i)`` and ``(i, j)`` only -- the same
+      bookkeeping ``Constant`` uses -- so ``AdaptPower(inner=outer=c)`` equals ``Constant(c)`` exactly.
+
+    The edge weight is the mean of the two endpoints' squared regularization weights,
+    ``0.5 * (w_i ** 2 + w_j ** 2)``. This is symmetric in ``(i, j)`` (so the matrix is symmetric even
+    for wildly varying adaptive weights), reduces to ``w ** 2`` when the weights are uniform, and makes
+    the result a weighted graph Laplacian plus a ``1e-8`` diagonal floor -- so its rows sum to the floor
+    and it is positive semi-definite by construction.
+
+    The legacy builder is left untouched: halving it in place would silently change the effective
+    regularization of every ``Adapt`` fit ever run.
+
+    Parameters
+    ----------
+    regularization_weights
+        The regularization weight of each pixel, adaptively governing the degree of gradient regularization
+        applied to each inversion parameter (e.g. mesh pixels of a ``Mapper``).
+    neighbors
+        An array of length (total_pixels) which provides the index of all neighbors of every pixel in
+        the mesh grid (entries of -1 correspond to no neighbor).
+
+    Returns
+    -------
+    np.ndarray
+        The regularization matrix computed using an adaptive regularization scheme where the effective
+        regularization coefficient of every source pixel is different.
+    """
+    S, P = neighbors.shape
+
+    reg_w = regularization_weights**2
+
+    # 1) Flatten the (i->j) neighbor pairs
+    I = xp.repeat(xp.arange(S), P)  # (S*P,)
+    J_raw = neighbors.reshape(-1)  # (S*P,)
+
+    # 2) Remap "no neighbor" entries to an extra slot S, whose weight = 0
+    OUT = S
+    valid = J_raw >= 0
+    J = xp.where(valid, J_raw, OUT)
+
+    # 3) Build an extended weight vector with a zero at index S
+    reg_w_ext = xp.concatenate([reg_w, xp.zeros((1,))], axis=0)
+
+    # 4) Symmetric per-edge weight: the mean of the two endpoints' squared weights. Padded entries are
+    #    masked to zero (their I endpoint is a real pixel, so the mean alone would not vanish).
+    w_ij = 0.5 * (reg_w_ext[I] + reg_w_ext[J]) * valid
+
+    # 5) Start with zeros on an (S+1)x(S+1) canvas so we can scatter into row S safely
+    mat = xp.zeros((S + 1, S + 1), dtype=regularization_weights.dtype)
+
+    diag_updates_i = xp.concatenate(
+        [xp.full((S,), 1e-8), xp.zeros((1,))], axis=0  # out-of-bounds slot stays zero
+    )
+
+    # 6) Scatter each ordered pair exactly once: onto the diagonal of i and the (i, j) off-diagonal
+    if xp.__name__.startswith("jax"):
+        mat = mat.at[xp.diag_indices(S + 1)].add(diag_updates_i)
+        mat = mat.at[I, I].add(w_ij)
+        mat = mat.at[I, J].add(-w_ij)
+    else:
+        np.add.at(mat, np.diag_indices(S + 1), diag_updates_i)
+        np.add.at(mat, (I, I), w_ij)
+        np.add.at(mat, (I, J), -w_ij)
+
+    # 7) Drop the extra row/column S and return the SxS result
+    return mat[:S, :S]
+
+
 class Adapt(AbstractRegularization):
     def __init__(
         self,
@@ -180,7 +276,28 @@ class Adapt(AbstractRegularization):
         neighbors come from a direct scipy call on the traced mesh grid (use
         ``AdaptSplit`` there). Note the defaults
         ``inner_coefficient == outer_coefficient == 1.0`` make the weighting
-        uniform — numerically identical to ``Constant(coefficient=1.0)``.
+        uniform — but *not* numerically identical to ``Constant(coefficient=1.0)``;
+        see the coefficient-convention note below.
+
+        **Coefficient convention (legacy, ``lambda^4``).** The coefficients are squared twice before they
+        reach the regularization matrix -- once by ``adapt_regularization_weights_from`` and once by the
+        matrix builder -- so the matrix scales as the *fourth* power of the coefficient, while
+        ``Constant`` scales as the second. Both carry the same ``LogUniform(1e-6, 1e6)`` prior, so this
+        scheme explores a far wider effective smoothing range and reaches a numerically non
+        positive-definite matrix from ``c ~ 1e4`` where ``Constant`` survives to ``c ~ 1e6``.
+
+        **It is also 2x ``Constant``, not equal to it.** The matrix builder scatters every mesh edge in
+        both directions, and the neighbor list already holds each unordered edge twice, so each edge
+        lands four times where ``Constant`` lands it twice.
+        ``Adapt(inner_coefficient=1.0, outer_coefficient=1.0)`` is therefore exactly ``2 x``
+        ``Constant(coefficient=1.0)``.
+
+        This behaviour is preserved deliberately: changing it would alter the coefficient scale of every
+        adaptive fit ever run. **New work should prefer ``AdaptPower``**, which takes a ``power`` argument
+        (default ``1.0``, giving the ``Constant``-matching ``lambda^2`` convention) and scatters each edge
+        once, so ``AdaptPower(inner=outer=c)`` equals ``Constant(c)`` exactly and is more robust to
+        gradient / NaN pathologies. The migration is ``c_new = c_old ** 2``, and
+        ``AdaptPower(power=2.0)`` reproduces this class's coefficient scaling exactly.
 
         Parameters
         ----------
