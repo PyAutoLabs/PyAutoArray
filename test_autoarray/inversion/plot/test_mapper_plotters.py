@@ -58,3 +58,24 @@ def test__subplot_image_and_mapper(
         output_format="png",
     )
     assert str(Path(plot_path) / "image_and_mapper.png") in plot_patch.paths
+
+
+def test__subplot_image_and_mapper__with_regions(
+    imaging_7x7,
+    rectangular_mapper_7x7_3x3,
+    plot_path,
+    plot_patch,
+):
+    mappings = rectangular_mapper_7x7_3x3.mappings_from(pix_indexes=[[0, 1], [8]])
+
+    aplt.subplot_image_and_mapper(
+        mapper=rectangular_mapper_7x7_3x3,
+        image=imaging_7x7.data,
+        regions=mappings,
+        region_labels=["1", "2"],
+        output_path=plot_path,
+        output_filename="image_and_mapper_regions",
+        output_format="png",
+    )
+
+    assert str(Path(plot_path) / "image_and_mapper_regions.png") in plot_patch.paths

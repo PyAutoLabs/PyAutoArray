@@ -4,7 +4,14 @@ from typing import Optional
 
 from autoarray.plot.array import plot_array
 from autoarray.plot.inversion import plot_inversion_reconstruction
-from autoarray.plot.utils import subplots, numpy_grid, numpy_lines, subplot_save, conf_subplot_figsize, tight_layout
+from autoarray.plot.utils import (
+    subplots,
+    numpy_grid,
+    numpy_lines,
+    subplot_save,
+    conf_subplot_figsize,
+    tight_layout,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +29,10 @@ def plot_mapper(
     mesh_grid=None,
     lines=None,
     line_colors=None,
+    regions=None,
+    region_colors=None,
+    region_alpha: float = 0.25,
+    region_labels=None,
     title: str = "Pixelization Mesh (Source-Plane)",
     zoom_to_brightest: bool = True,
     zoom_extent_scale: float = 1.0,
@@ -50,6 +61,15 @@ def plot_mapper(
         Mesh grid to overlay as scatter points.
     lines
         Lines to overlay.
+    regions
+        Source-plane regions to overlay as filled polygons, each a list of ``(N, 2)`` arrays of
+        ``(y, x)`` coordinates (e.g. the ``source_contours`` of a ``Mapping``).
+    region_colors
+        The colour of each region, cycled if there are more regions than colours.
+    region_alpha
+        The alpha of each region's fill.
+    region_labels
+        A text label drawn at the centre of each region.
     title
         Figure title.
     zoom_to_brightest
@@ -71,6 +91,10 @@ def plot_mapper(
             zoom_extent_scale=zoom_extent_scale,
             lines=numpy_lines(lines),
             line_colors=line_colors,
+            regions=regions,
+            region_colors=region_colors,
+            region_alpha=region_alpha,
+            region_labels=region_labels,
             grid=numpy_grid(mesh_grid),
             output_path=output_path,
             output_filename=output_filename,
@@ -90,6 +114,9 @@ def subplot_image_and_mapper(
     use_log10: bool = False,
     mesh_grid=None,
     lines=None,
+    regions=None,
+    region_colors=None,
+    region_labels=None,
 ):
     """
     1×2 subplot: image-plane image (left) and pixelization mesh (right).
@@ -114,8 +141,23 @@ def subplot_image_and_mapper(
         Mesh grid to overlay on the reconstruction panel.
     lines
         Lines to overlay on both panels.
+    regions
+        A list of ``Mapping`` objects (e.g. from ``mapper.mappings_from(pix_indexes=...)``), drawn
+        as filled polygons in matched colours: each mapping's image-plane regions on the left panel
+        and its source-plane mesh pixels on the right panel.
+    region_colors
+        The colour of each region, cycled if there are more regions than colours.
+    region_labels
+        A text label drawn at the centre of each region, e.g. ``["1", "2"]``.
     """
     fig, axes = subplots(1, 2, figsize=conf_subplot_figsize(1, 2))
+
+    image_regions = (
+        None if regions is None else [mapping.image_contours for mapping in regions]
+    )
+    source_regions = (
+        None if regions is None else [mapping.source_contours for mapping in regions]
+    )
 
     plot_array(
         image,
@@ -124,6 +166,9 @@ def subplot_image_and_mapper(
         colormap=colormap,
         use_log10=use_log10,
         lines=lines,
+        regions=image_regions,
+        region_colors=region_colors,
+        region_labels=region_labels,
     )
     plot_mapper(
         mapper,
@@ -131,6 +176,9 @@ def subplot_image_and_mapper(
         use_log10=use_log10,
         mesh_grid=mesh_grid,
         lines=lines,
+        regions=source_regions,
+        region_colors=region_colors,
+        region_labels=region_labels,
         ax=axes[1],
     )
 

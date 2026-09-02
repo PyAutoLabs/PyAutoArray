@@ -37,6 +37,8 @@ from .inversion.inversion.dataset_interface import DatasetInterface
 from .inversion.mesh.border_relocator import BorderRelocator
 from .inversion.pixelization import Pixelization
 from .inversion.mappers.abstract import Mapper
+from .inversion.mappings.mapping import ImageRegion
+from .inversion.mappings.mapping import Mapping
 from .inversion.mesh.image_mesh.abstract import AbstractImageMesh
 from .inversion.mesh.mesh.abstract import AbstractMesh
 from .inversion.mesh.interpolator.rectangular import InterpolatorRectangular

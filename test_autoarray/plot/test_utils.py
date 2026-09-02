@@ -74,7 +74,7 @@ def test_arcsec_labels_minus_in_math():
 
         # Suffix format: the ASCII hyphen (U+002D) becomes the math minus (U+2212).
         ticks["symbol_over_decimal"] = False
-        assert _arcsec_labels([-2.1, -0.044, 2.0]) == ["−2.1\"", "−0.044\"", "2.0\""]
+        assert _arcsec_labels([-2.1, -0.044, 2.0]) == ['−2.1"', '−0.044"', '2.0"']
 
         # Symbol-over-decimal format also uses the math minus.
         ticks["symbol_over_decimal"] = True
@@ -471,3 +471,37 @@ class TestConfImshowOrigin:
             general["imshow_origin"] = original
 
         assert "sideways" in str(exc_info.value)
+
+
+def test__plot_array__regions_overlay_is_output(array_2d_7x7, plot_path, plot_patch):
+    """A `regions` polygon is arcsec-space, so it survives the `zoom_array` crop `plot_array` applies."""
+    region = np.array([[1.0, -1.0], [1.0, 1.0], [-1.0, 1.0], [-1.0, -1.0], [1.0, -1.0]])
+
+    aplt.plot_array(
+        array=array_2d_7x7,
+        regions=[[region]],
+        region_labels=["1"],
+        output_path=plot_path,
+        output_filename="array_regions",
+        output_format="png",
+    )
+
+    assert str(Path(plot_path) / "array_regions.png") in plot_patch.paths
+
+
+def test__plot_inversion_reconstruction__regions_overlay_is_output(
+    rectangular_mapper_7x7_3x3, plot_path, plot_patch
+):
+    mappings = rectangular_mapper_7x7_3x3.mappings_from(pix_indexes=[[0, 1], [8]])
+
+    aplt.plot_inversion_reconstruction(
+        pixel_values=np.ones(9),
+        mapper=rectangular_mapper_7x7_3x3,
+        regions=[mapping.source_contours for mapping in mappings],
+        region_labels=["1", "2"],
+        output_path=plot_path,
+        output_filename="reconstruction_regions",
+        output_format="png",
+    )
+
+    assert str(Path(plot_path) / "reconstruction_regions.png") in plot_patch.paths

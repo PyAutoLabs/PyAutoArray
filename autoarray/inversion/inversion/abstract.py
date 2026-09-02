@@ -1311,3 +1311,121 @@ class AbstractInversion:
         )
 
         return max_pixel_centre
+
+    def source_clumps_from(
+        self,
+        mapper_index: int = 0,
+        threshold: float = 0.5,
+        min_pixels: int = 3,
+        total_clumps: Optional[int] = None,
+        pix_indexes: Optional[List] = None,
+    ) -> List[np.ndarray]:
+        """
+        Returns the clumps of the reconstruction, each a group of connected mesh pixels which are
+        bright relative to the reconstruction's maximum value.
+
+        Mesh pixels whose reconstructed value exceeds `threshold * max(reconstruction)` are kept,
+        split into connected components over the mesh neighbour graph, filtered by `min_pixels` and
+        ordered brightest first.
+
+        In gravitational lensing a clump is a distinct bright structure of the source galaxy. The
+        `threshold` is therefore the knob which decides what counts as a distinct structure: ~0.5
+        isolates one smooth source, ~0.2 merges two nearby galaxies into one clump and ~0.8 splits
+        a source into its individual star-forming knots.
+
+        Parameters
+        ----------
+        mapper_index
+            The index of the mapper in the inversion whose reconstruction is clumped, where there
+            may be multiple mappers in the inversion.
+        threshold
+            Mesh pixels are in a clump if their reconstructed value exceeds this fraction of the
+            reconstruction's maximum value.
+        min_pixels
+            Connected groups with fewer than this many mesh pixels are discarded.
+        total_clumps
+            The maximum number of clumps returned, keeping the brightest. `None` returns all of them.
+        pix_indexes
+            An explicit list of mesh pixel index groups which bypasses the clump finding entirely,
+            returning them unchanged.
+
+        Returns
+        -------
+        A list of 1D integer arrays, one per clump, ordered by decreasing peak reconstructed value.
+        """
+        from autoarray.inversion.mappings.mapping import connected_components_from
+        from autoarray.inversion.mappings.mapping import pix_index_groups_from
+
+        if pix_indexes is not None:
+            return pix_index_groups_from(pix_indexes=pix_indexes)
+
+        mapper = self.cls_list_from(cls=Mapper)[mapper_index]
+
+        reconstruction = np.asarray(self.reconstruction_dict[mapper])
+
+        if reconstruction.size == 0:
+            return []
+
+        max_value = float(np.max(reconstruction))
+
+        if max_value <= 0.0:
+            return []
+
+        indexes = np.where(reconstruction > threshold * max_value)[0]
+
+        if indexes.size == 0:
+            return []
+
+        clumps = connected_components_from(indexes=indexes, neighbors=mapper.neighbors)
+
+        clumps = [clump for clump in clumps if clump.shape[0] >= min_pixels]
+
+        clumps.sort(key=lambda clump: -float(np.max(reconstruction[clump])))
+
+        if total_clumps is not None:
+            clumps = clumps[:total_clumps]
+
+        return clumps
+
+    def mappings_from(
+        self,
+        mapper_index: int = 0,
+        weight_threshold: float = 0.0,
+        **clump_kwargs,
+    ) -> List["Mapping"]:
+        """
+        Returns the `Mapping` of every clump of the reconstruction, pairing each source-plane clump
+        with the image-plane regions (the multiple images) it maps to.
+
+        Parameters
+        ----------
+        mapper_index
+            The index of the mapper in the inversion whose reconstruction is mapped, where there may
+            be multiple mappers in the inversion.
+        weight_threshold
+            A data pixel is in an image-plane region if its summed mapping weight to the clump
+            exceeds this value.
+        clump_kwargs
+            The `threshold`, `min_pixels`, `total_clumps` and `pix_indexes` inputs
+            of `source_clumps_from`.
+
+        Returns
+        -------
+        One `Mapping` per source-plane clump, ordered by decreasing peak reconstructed value.
+        """
+        from autoarray.inversion.mappings import mapping as mapping_module
+
+        mapper = self.cls_list_from(cls=Mapper)[mapper_index]
+
+        reconstruction = np.asarray(self.reconstruction_dict[mapper])
+
+        clumps = self.source_clumps_from(mapper_index=mapper_index, **clump_kwargs)
+
+        peak_values = [float(np.max(reconstruction[clump])) for clump in clumps]
+
+        return mapping_module.mappings_from(
+            mapper=mapper,
+            pix_indexes=clumps,
+            weight_threshold=weight_threshold,
+            peak_values=peak_values,
+        )

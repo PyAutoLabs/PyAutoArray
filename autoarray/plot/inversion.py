@@ -8,7 +8,16 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
-from autoarray.plot.utils import subplots, apply_extent, apply_labels, conf_figsize, save_figure, norm_from, _conf_imshow_origin
+from autoarray.plot.utils import (
+    subplots,
+    apply_extent,
+    apply_labels,
+    conf_figsize,
+    save_figure,
+    norm_from,
+    _conf_imshow_origin,
+    plot_regions,
+)
 
 
 def plot_inversion_reconstruction(
@@ -29,6 +38,10 @@ def plot_inversion_reconstruction(
     lines: Optional[List[np.ndarray]] = None,
     line_colors: Optional[List] = None,
     grid: Optional[np.ndarray] = None,
+    regions: Optional[List] = None,
+    region_colors: Optional[List] = None,
+    region_alpha: float = 0.25,
+    region_labels: Optional[List[str]] = None,
     # --- figure control (used only when ax is None) -----------------------------
     figsize: Optional[Tuple[int, int]] = None,
     output_path: Optional[str] = None,
@@ -64,6 +77,18 @@ def plot_inversion_reconstruction(
         Line overlays (e.g. critical curves).
     grid
         Scatter overlay (e.g. data-plane grid).
+    regions
+        List of source-plane regions to overlay as filled polygons, each region being a list of
+        ``(N, 2)`` arrays of ``(y, x)`` coordinates (e.g. the ``source_contours`` of a ``Mapping``).
+        Every region is drawn in its own colour, matching the colour its image-plane counterpart is
+        drawn with by :func:`~autoarray.plot.array.plot_array`.
+    region_colors
+        The colour of each region, cycled if there are more regions than colours.  ``None`` uses
+        ``["r", "g", "b", "m", "c", "y"]``.
+    region_alpha
+        The alpha of each region's fill; the outline is always drawn opaque.
+    region_labels
+        A text label drawn at the centre of each region, e.g. ``["1", "2"]``.
     figsize, output_path, output_filename, output_format
         Figure output controls.
     """
@@ -78,6 +103,7 @@ def plot_inversion_reconstruction(
 
     if colormap is None:
         from autoarray.plot.utils import _default_colormap
+
         colormap = _default_colormap()
 
     owns_figure = ax is None
@@ -101,29 +127,51 @@ def plot_inversion_reconstruction(
     if isinstance(
         mapper.interpolator, (InterpolatorRectangular, InterpolatorRectangularUniform)
     ):
-        _plot_rectangular(ax, pixel_values, mapper, norm, colormap, extent, is_subplot=is_subplot)
+        _plot_rectangular(
+            ax, pixel_values, mapper, norm, colormap, extent, is_subplot=is_subplot
+        )
     elif isinstance(
         mapper.interpolator, (InterpolatorDelaunay, InterpolatorKNearestNeighbor)
     ):
-        _plot_delaunay(ax, pixel_values, mapper, norm, colormap, extent, is_subplot=is_subplot)
+        _plot_delaunay(
+            ax, pixel_values, mapper, norm, colormap, extent, is_subplot=is_subplot
+        )
 
     # --- overlays --------------------------------------------------------------
     if lines is not None:
         for i, line in enumerate(lines):
             if line is not None and len(line) > 0:
                 line = np.asarray(line).reshape(-1, 2)
-                color = line_colors[i] if (line_colors is not None and i < len(line_colors)) else None
+                color = (
+                    line_colors[i]
+                    if (line_colors is not None and i < len(line_colors))
+                    else None
+                )
                 kw = {"linewidth": 1}
                 if color is not None:
                     kw["color"] = color
                 ax.plot(line[:, 1], line[:, 0], **kw)
+
+    plot_regions(
+        ax,
+        regions=regions,
+        region_colors=region_colors,
+        region_alpha=region_alpha,
+        region_labels=region_labels,
+    )
 
     if grid is not None:
         ax.scatter(grid[:, 1], grid[:, 0], s=1, c="w", alpha=0.5)
 
     apply_extent(ax, extent)
 
-    apply_labels(ax, title=title, xlabel="" if is_subplot else xlabel, ylabel="" if is_subplot else ylabel, is_subplot=is_subplot)
+    apply_labels(
+        ax,
+        title=title,
+        xlabel="" if is_subplot else xlabel,
+        ylabel="" if is_subplot else ylabel,
+        is_subplot=is_subplot,
+    )
 
     if owns_figure:
         save_figure(
@@ -134,7 +182,9 @@ def plot_inversion_reconstruction(
         )
 
 
-def _plot_rectangular(ax, pixel_values, mapper, norm, colormap, extent, is_subplot=False):
+def _plot_rectangular(
+    ax, pixel_values, mapper, norm, colormap, extent, is_subplot=False
+):
     """Render a rectangular pixelization reconstruction onto *ax*.
 
     Uses ``imshow`` for uniform rectangular grids
@@ -268,4 +318,5 @@ def _plot_delaunay(ax, pixel_values, mapper, norm, colormap, extent, is_subplot=
 
     tc = ax.tripcolor(x, y, vals, cmap=colormap, norm=norm)
     from autoarray.plot.utils import _apply_colorbar
+
     _apply_colorbar(tc, ax, is_subplot=is_subplot)

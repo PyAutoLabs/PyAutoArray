@@ -137,3 +137,37 @@ def test__save_reconstruction_csv__singular_curvature_reg_matrix(
         assert np.isfinite(float(row[0]))
         assert np.isfinite(float(row[1]))
         assert np.isnan(float(row[3]))
+
+
+def test__subplot_mappings__delaunay_inversion(
+    delaunay_inversion_9_3x3,
+    plot_path,
+    plot_patch,
+):
+    aplt.subplot_mappings(
+        inversion=delaunay_inversion_9_3x3,
+        pixelization_index=0,
+        min_pixels=1,
+        output_path=plot_path,
+        output_filename="mappings_delaunay",
+        output_format="png",
+    )
+
+    assert str(Path(plot_path) / "mappings_delaunay_0.png") in plot_patch.paths
+
+
+def test__subplot_mappings__pix_indexes_bypasses_the_clump_finding(
+    rectangular_inversion_7x7_3x3,
+    plot_path,
+    plot_patch,
+):
+    aplt.subplot_mappings(
+        inversion=rectangular_inversion_7x7_3x3,
+        pixelization_index=0,
+        pix_indexes=[[0, 1], [8]],
+        output_path=plot_path,
+        output_filename="mappings_pix_indexes",
+        output_format="png",
+    )
+
+    assert str(Path(plot_path) / "mappings_pix_indexes_0.png") in plot_patch.paths

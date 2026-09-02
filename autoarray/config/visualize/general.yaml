@@ -8,7 +8,9 @@ general:
   output_format: show                   # Default output format: "show" displays the figure interactively via plt.show(), "png"/"pdf"/etc. saves to file.
 inversion:
   reconstruction_vmax_factor: 0.5
-  total_mappings_pixels: 8              # The number of source pixels used when plotting the subplot_mappings of a pixelization.
+  total_mappings: 5                     # The maximum number of source clumps drawn by subplot_mappings.
+  mappings_threshold: 0.5               # A source pixel joins a clump if its reconstructed value exceeds this fraction of the reconstruction's maximum.
+  mappings_min_pixels: 3                # Connected groups of source pixels smaller than this are not drawn as a clump.
 zoom:
   plane_percent: 0.01
   inversion_percent: 0.01               # Plots of an Inversion's reconstruction use the reconstructed data's bright value multiplied by this factor.
