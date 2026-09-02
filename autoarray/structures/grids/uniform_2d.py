@@ -213,6 +213,23 @@ class Grid2D(Structure):
         if self._over_sampled is not None:
             return self._over_sampled
 
+        if np.all(np.asarray(self.over_sample_size.array) == 1):
+            # At a uniform sub size of 1 every sub pixel is the pixel itself, so the
+            # over sampled grid is the slim grid in the same order. Short circuiting
+            # here skips the per-pixel Python loop below, which dominates the runtime
+            # of grid calculations that never touch the over sampled grid. The values
+            # are copied so that in-place edits of `over_sampled` do not write through
+            # to the grid itself, matching the behaviour of the loop below.
+            grid_slim = grid_2d_util.convert_grid_2d_to_slim(
+                grid_2d=self.array, mask_2d=self.mask, xp=self._xp
+            )
+
+            self._over_sampled = Grid2DIrregular(
+                values=self._xp.array(grid_slim), xp=self._xp
+            )
+
+            return self._over_sampled
+
         over_sampled = over_sample_util.grid_2d_slim_over_sampled_via_mask_from(
             mask_2d=np.array(self.mask),
             pixel_scales=self.mask.pixel_scales,
