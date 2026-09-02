@@ -207,7 +207,6 @@ class ArrayTrianglesNp(AbstractTriangles, ABC):
         -------
         The new set of triangles with the new vertices.
         """
-        bbbb
         return ArrayTrianglesNp(
             indices=self.indices,
             vertices=vertices,

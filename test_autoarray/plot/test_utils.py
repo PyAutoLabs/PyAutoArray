@@ -505,3 +505,58 @@ def test__plot_inversion_reconstruction__regions_overlay_is_output(
     )
 
     assert str(Path(plot_path) / "reconstruction_regions.png") in plot_patch.paths
+
+
+def test__plot_regions__multi_polygon_region_is_labelled_once_per_polygon():
+    """
+    A region whose polygons are the multiple images of one lensed source has its polygons
+    on opposite sides of the lens. A single label at their combined mean therefore landed
+    between the images, on empty sky, labelling nothing -- so the label is repeated once
+    per polygon, at that polygon's own centre.
+    """
+    import matplotlib.pyplot as plt
+
+    left = np.array([[1.0, -2.0], [1.0, -1.0], [0.0, -1.0], [1.0, -2.0]])
+    right = np.array([[1.0, 1.0], [1.0, 2.0], [0.0, 2.0], [1.0, 1.0]])
+
+    figure, ax = plt.subplots()
+
+    try:
+        plot_utils.plot_regions(ax=ax, regions=[[left, right]], region_labels=["1"])
+
+        texts = [text for text in ax.texts if text.get_text() == "1"]
+
+        assert len(texts) == 2
+
+        x_positions = sorted(float(text.get_position()[0]) for text in texts)
+
+        # One label over each image, not one between them at x = 0.
+        assert x_positions[0] == pytest.approx(np.mean(left[:, 1]))
+        assert x_positions[1] == pytest.approx(np.mean(right[:, 1]))
+    finally:
+        plt.close(figure)
+
+
+def test__plot_regions__single_polygon_region_is_labelled_once():
+    """
+    The single-polygon case is unchanged: one label, at the polygon's centre.
+    """
+    import matplotlib.pyplot as plt
+
+    polygon = np.array(
+        [[1.0, -1.0], [1.0, 1.0], [-1.0, 1.0], [-1.0, -1.0], [1.0, -1.0]]
+    )
+
+    figure, ax = plt.subplots()
+
+    try:
+        plot_utils.plot_regions(ax=ax, regions=[[polygon]], region_labels=["1"])
+
+        texts = [text for text in ax.texts if text.get_text() == "1"]
+
+        assert len(texts) == 1
+        assert float(texts[0].get_position()[0]) == pytest.approx(
+            np.mean(polygon[:, 1])
+        )
+    finally:
+        plt.close(figure)

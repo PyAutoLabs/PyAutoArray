@@ -325,3 +325,67 @@ def test_area(one_triangle):
     assert neighborhood.area == 4 * ONE_TRIANGLE_AREA
     assert neighborhood.up_sample().area == 4 * ONE_TRIANGLE_AREA
     assert neighborhood.neighborhood().area == 10 * ONE_TRIANGLE_AREA
+
+
+def test_for_limits_and_scale__element_0_spans_the_y_limits():
+    """
+    Regression: `for_limits_and_scale` named its first pair of limits ``x_min``/``x_max``
+    and tiled them along element ``0`` of every vertex, while element ``0`` is the ``y``
+    coordinate everywhere else (``ArrayTrianglesNp``, every PyAuto ``(y, x)`` grid, and
+    the ``element 0 <-> element 0`` convention of ``Shape.contains`` / ``Shape.mask``).
+    A rectangular extent was therefore tiled transposed, so the point solver searched a
+    box the data does not occupy. A square extent hides it, which is why it shipped.
+    """
+    triangles = CoordinateArrayTrianglesNp.for_limits_and_scale(
+        y_min=-2.0,
+        y_max=2.0,
+        x_min=-1.0,
+        x_max=1.0,
+        scale=0.5,
+    )
+
+    vertices = triangles.vertices
+
+    assert min(vertices[:, 0]) <= -2.0
+    assert max(vertices[:, 0]) >= 2.0
+
+    assert min(vertices[:, 1]) <= -1.0
+    assert max(vertices[:, 1]) >= 1.0
+
+    # The transposed tiling would have run element 1 out to +/- 2.0.
+    assert max(vertices[:, 1]) < 2.0
+
+
+def test_for_grid__rectangular_grid_is_tiled_the_same_way_round():
+    """
+    ``AbstractTriangles.for_grid`` passes the limits *positionally* as
+    ``(y_min, y_max, x_min, x_max)``, so the signature order matters as much as the
+    tiling does.
+    """
+    from autoarray.structures.grids.uniform_2d import Grid2D
+
+    grid = Grid2D.uniform(shape_native=(24, 80), pixel_scales=0.05)
+
+    triangles = CoordinateArrayTrianglesNp.for_grid(grid=grid)
+
+    vertices = triangles.vertices
+
+    assert max(vertices[:, 0]) < max(vertices[:, 1])
+
+
+def test_array_triangles_with_vertices_returns_new_triangles():
+    """
+    Regression: ``ArrayTrianglesNp.with_vertices`` carried a stray ``bbbb`` statement (a
+    ``NameError`` on every call) from 2025-11, uncaught because the solver only ever
+    reached the ``CoordinateArrayTrianglesNp`` override of the same name.
+    """
+    from autoarray.structures.triangles.array_np import ArrayTrianglesNp
+
+    triangles = ArrayTrianglesNp(
+        indices=np.array([[0, 1, 2]]),
+        vertices=np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]),
+    )
+
+    new_vertices = np.array([[0.0, 0.0], [2.0, 0.0], [0.0, 2.0]])
+
+    assert (triangles.with_vertices(new_vertices).vertices == new_vertices).all()

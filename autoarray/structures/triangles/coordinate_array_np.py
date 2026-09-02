@@ -92,21 +92,44 @@ class CoordinateArrayTrianglesNp(AbstractTriangles):
     @classmethod
     def for_limits_and_scale(
         cls,
-        x_min: float,
-        x_max: float,
         y_min: float,
         y_max: float,
+        x_min: float,
+        x_max: float,
         scale: float = 1.0,
         **_,
     ):
-        x_shift = int(2 * x_min / scale)
-        y_shift = int(y_min / (HEIGHT_FACTOR * scale))
+        """
+        Tile the rectangle ``[y_min, y_max] x [x_min, x_max]`` with equilateral triangles.
+
+        Element ``0`` of every vertex spans the ``y`` limits and element ``1`` the ``x``
+        limits, matching `ArrayTrianglesNp.for_limits_and_scale`, the ``(y, x)`` order of
+        every PyAuto grid, and the ``element 0 <-> element 0`` convention `Shape.contains`
+        and `Shape.mask` are documented with.
+
+        The two axes were previously the other way round while the signature named its
+        first pair ``x_min``/``x_max``, so both the keyword callers (`AbstractSolver`) and
+        the positional caller (`AbstractTriangles.for_grid`) tiled the *transposed*
+        rectangle. On a square grid that is invisible; on a rectangular one the solver
+        searched a box the data does not occupy and silently missed multiple images which
+        lay inside the grid (a 24x80 grid of 0.05" pixels found one of an Isothermal's two
+        images instead of both).
+
+        Parameters
+        ----------
+        y_min, y_max, x_min, x_max
+            The limits of the rectangle to tile.
+        scale
+            The side length of the triangles.
+        """
+        y_shift = int(2 * y_min / scale)
+        x_shift = int(x_min / (HEIGHT_FACTOR * scale))
 
         coordinates = []
 
-        for x in range(x_shift, int(2 * x_max / scale) + 1):
-            for y in range(y_shift - 1, int(y_max / (HEIGHT_FACTOR * scale)) + 2):
-                coordinates.append([x, y])
+        for y in range(y_shift, int(2 * y_max / scale) + 1):
+            for x in range(x_shift - 1, int(x_max / (HEIGHT_FACTOR * scale)) + 2):
+                coordinates.append([y, x])
 
         return CoordinateArrayTrianglesNp(
             coordinates=np.array(coordinates, dtype=np.int32),
