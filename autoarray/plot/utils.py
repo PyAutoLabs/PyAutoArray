@@ -1205,8 +1205,10 @@ def plot_regions(
     region_alpha
         The alpha of each region's fill; the outline is always drawn opaque.
     region_labels
-        A text label drawn at the centre of each region, e.g. ``["1", "2"]``. ``None`` draws no
-        labels.
+        A text label drawn at the centre of each polygon of each region, e.g. ``["1", "2"]``.
+        A region with several polygons -- the multiple images of one lensed source -- gets its
+        label repeated once per image, so every image is labelled and no label lands on the
+        empty sky between them. ``None`` draws no labels.
     """
     if regions is None:
         return
@@ -1240,15 +1242,23 @@ def plot_regions(
             ax.plot(polygon[:, 1], polygon[:, 0], color=color, linewidth=1, zorder=5)
 
         if region_labels is not None and i < len(region_labels) and len(points) > 0:
-            stacked = np.concatenate(points, axis=0)
-
-            ax.annotate(
-                str(region_labels[i]),
-                xy=(float(np.mean(stacked[:, 1])), float(np.mean(stacked[:, 0]))),
-                color=color,
-                fontsize=12,
-                fontweight="bold",
-                ha="center",
-                va="center",
-                zorder=6,
-            )
+            # One label per polygon, at that polygon's own centre -- not one label at the
+            # centre of all of them. A region whose polygons are the multiple images of a
+            # lensed source has its polygons on opposite sides of the lens, so a single
+            # label at their combined mean lands between them, on empty sky, labelling
+            # nothing. A single-polygon region is unaffected: its polygon's mean is the
+            # region's mean.
+            for polygon in points:
+                ax.annotate(
+                    str(region_labels[i]),
+                    xy=(
+                        float(np.mean(polygon[:, 1])),
+                        float(np.mean(polygon[:, 0])),
+                    ),
+                    color=color,
+                    fontsize=12,
+                    fontweight="bold",
+                    ha="center",
+                    va="center",
+                    zorder=6,
+                )
