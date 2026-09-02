@@ -20,6 +20,7 @@ from autoarray.plot.utils import (
     norm_from,
     _apply_contours,
     _conf_imshow_origin,
+    plot_regions,
 )
 
 _zoom_array_2d = zoom_array
@@ -44,6 +45,10 @@ def plot_array(
     patches: Optional[List] = None,
     fill_region: Optional[List] = None,
     contours: Optional[int] = None,
+    regions: Optional[List] = None,
+    region_colors: Optional[List] = None,
+    region_alpha: float = 0.25,
+    region_labels: Optional[List[str]] = None,
     # --- cosmetics --------------------------------------------------------------
     title: str = "",
     xlabel: str = "",
@@ -96,6 +101,18 @@ def plot_array(
         List of matplotlib ``Patch`` objects to draw over the image.
     fill_region
         List of two arrays ``[y1_arr, y2_arr]`` passed to ``ax.fill_between``.
+    regions
+        List of regions to overlay as filled polygons, each region being a list of ``(N, 2)``
+        arrays of ``(y, x)`` coordinates (e.g. the ``contours`` of an ``ImageRegion``).  Every
+        region is drawn in its own colour, so that the same colour identifies the same source
+        structure across figures.
+    region_colors
+        The colour of each region, cycled if there are more regions than colours.  ``None`` uses
+        ``["r", "g", "b", "m", "c", "y"]``.
+    region_alpha
+        The alpha of each region's fill; the outline is always drawn opaque.
+    region_labels
+        A text label drawn at the centre of each region, e.g. ``["1", "2"]``.
     title
         Figure title string.
     xlabel, ylabel
@@ -139,6 +156,7 @@ def plot_array(
 
     if colormap is None:
         from autoarray.plot.utils import _default_colormap
+
         colormap = _default_colormap()
 
     # convert overlay params (safe for None and already-numpy inputs)
@@ -199,6 +217,7 @@ def plot_array(
 
     if not is_rgb:
         from autoarray.plot.utils import _apply_colorbar
+
         _apply_colorbar(im, ax, cb_unit=cb_unit, is_subplot=not owns_figure)
 
     # --- overlays --------------------------------------------------------------
@@ -238,16 +257,27 @@ def plot_array(
             pos = np.asarray(pos).reshape(-1, 2)
             ax.scatter(pos[:, 1], pos[:, 0], s=20, c=colors[i % len(colors)], zorder=5)
 
-
     if lines is not None:
         for i, line in enumerate(lines):
             if line is not None and len(line) > 0:
                 line = np.asarray(line).reshape(-1, 2)
-                color = line_colors[i] if (line_colors is not None and i < len(line_colors)) else None
+                color = (
+                    line_colors[i]
+                    if (line_colors is not None and i < len(line_colors))
+                    else None
+                )
                 kw = {"linewidth": 1}
                 if color is not None:
                     kw["color"] = color
                 ax.plot(line[:, 1], line[:, 0], **kw)
+
+    plot_regions(
+        ax,
+        regions=regions,
+        region_colors=region_colors,
+        region_alpha=region_alpha,
+        region_labels=region_labels,
+    )
 
     if vector_yx is not None:
         ax.quiver(
@@ -271,13 +301,17 @@ def plot_array(
     # Contours: auto-enabled for log10 plots; explicit int enables linear contours.
     if use_log10 or (contours is not None and contours > 0):
         _apply_contours(
-            ax, array, extent,
+            ax,
+            array,
+            extent,
             use_log10=use_log10,
             n=contours if (contours is not None and contours > 0) else None,
         )
 
     # --- labels / ticks --------------------------------------------------------
-    apply_labels(ax, title=title, xlabel=xlabel, ylabel=ylabel, is_subplot=not owns_figure)
+    apply_labels(
+        ax, title=title, xlabel=xlabel, ylabel=ylabel, is_subplot=not owns_figure
+    )
 
     if extent is not None:
         apply_extent(ax, extent)

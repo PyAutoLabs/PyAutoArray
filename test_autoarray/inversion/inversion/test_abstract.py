@@ -1087,3 +1087,110 @@ def test__reconstruction_covariance_matrix__non_finite_entry_only_raises_when_th
 
     with pytest.raises(np.linalg.LinAlgError, match="non-finite"):
         _zeroed_pixel_inversion(kept_nan).reconstruction_covariance_matrix
+
+
+def _inversion_with_reconstruction(monkeypatch, inversion, reconstruction):
+    """Force an inversion's reconstruction to a chosen vector, so clump finding can be tested."""
+    mapper = inversion.cls_list_from(cls=aa.Mapper)[0]
+
+    monkeypatch.setattr(
+        type(inversion),
+        "reconstruction_dict",
+        property(lambda self: {mapper: np.asarray(reconstruction)}),
+    )
+
+    return inversion
+
+
+def test__source_clumps_from__two_peaks_give_two_clumps(
+    rectangular_inversion_7x7_3x3, monkeypatch
+):
+    # A 3x3 mesh with bright opposite corners, whose bright pixels do not touch.
+    inversion = _inversion_with_reconstruction(
+        monkeypatch,
+        rectangular_inversion_7x7_3x3,
+        [1.0, 0.6, 0.1, 0.6, 0.1, 0.1, 0.1, 0.6, 1.0],
+    )
+
+    clumps = inversion.source_clumps_from(threshold=0.5, min_pixels=1)
+
+    assert len(clumps) == 2
+    assert set(clumps[0].tolist()) == {0, 1, 3}
+    assert set(clumps[1].tolist()) == {7, 8}
+
+
+def test__source_clumps_from__low_threshold_merges_the_peaks_into_one_clump(
+    rectangular_inversion_7x7_3x3, monkeypatch
+):
+    inversion = _inversion_with_reconstruction(
+        monkeypatch,
+        rectangular_inversion_7x7_3x3,
+        [1.0, 0.6, 0.1, 0.6, 0.1, 0.1, 0.1, 0.6, 1.0],
+    )
+
+    clumps = inversion.source_clumps_from(threshold=0.05, min_pixels=1)
+
+    assert len(clumps) == 1
+    assert clumps[0].shape[0] == 9
+
+
+def test__source_clumps_from__min_pixels_and_total_clumps_filter_the_clumps(
+    rectangular_inversion_7x7_3x3, monkeypatch
+):
+    inversion = _inversion_with_reconstruction(
+        monkeypatch,
+        rectangular_inversion_7x7_3x3,
+        [1.0, 0.6, 0.1, 0.6, 0.1, 0.1, 0.1, 0.6, 1.0],
+    )
+
+    assert len(inversion.source_clumps_from(threshold=0.5, min_pixels=3)) == 1
+    assert len(inversion.source_clumps_from(threshold=0.5, min_pixels=4)) == 0
+    assert (
+        len(inversion.source_clumps_from(threshold=0.5, min_pixels=1, total_clumps=1))
+        == 1
+    )
+
+
+def test__source_clumps_from__pix_indexes_bypasses_the_clump_finding(
+    rectangular_inversion_7x7_3x3,
+):
+    clumps = rectangular_inversion_7x7_3x3.source_clumps_from(pix_indexes=[[0, 1], [8]])
+
+    assert len(clumps) == 2
+    assert (clumps[0] == np.array([0, 1])).all()
+    assert (clumps[1] == np.array([8])).all()
+
+
+def test__source_clumps_from__non_positive_reconstruction_gives_no_clumps(
+    rectangular_inversion_7x7_3x3, monkeypatch
+):
+    inversion = _inversion_with_reconstruction(
+        monkeypatch, rectangular_inversion_7x7_3x3, -1.0 * np.ones(9)
+    )
+
+    assert inversion.source_clumps_from(min_pixels=1) == []
+
+
+def test__mappings_from__pairs_each_clump_with_its_image_regions(
+    rectangular_inversion_7x7_3x3, monkeypatch
+):
+    inversion = _inversion_with_reconstruction(
+        monkeypatch,
+        rectangular_inversion_7x7_3x3,
+        [1.5, 0.6, 0.1, 0.6, 0.1, 0.1, 0.1, 1.2, 2.0],
+    )
+
+    mappings = inversion.mappings_from(threshold=0.5, min_pixels=1)
+
+    assert len(mappings) == 2
+
+    # Ordered brightest first, so the clump containing mesh pixel 8 (value 2.0) comes first.
+    assert mappings[0].peak_value == pytest.approx(2.0)
+    assert set(mappings[0].pix_indexes.tolist()) == {7, 8}
+    assert mappings[1].peak_value == pytest.approx(1.5)
+    assert set(mappings[1].pix_indexes.tolist()) == {0}
+
+    for mapping in mappings:
+        assert len(mapping.source_contours) == mapping.pix_indexes.shape[0]
+        assert len(mapping.image_regions) > 0
+        assert len(mapping.source_centre) == 2

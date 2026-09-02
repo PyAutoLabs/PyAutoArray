@@ -106,7 +106,12 @@ def zoom_array(array):
     except Exception:
         zoom_around_mask = False
 
-    if zoom_around_mask and hasattr(array, "mask") and hasattr(array.mask, "is_all_false") and not array.mask.is_all_false:
+    if (
+        zoom_around_mask
+        and hasattr(array, "mask")
+        and hasattr(array.mask, "is_all_false")
+        and not array.mask.is_all_false
+    ):
         from autoarray.mask.derive.zoom_2d import Zoom2D
 
         return Zoom2D(mask=array.mask).array_2d_from(array=array, buffer=1)
@@ -552,8 +557,12 @@ def apply_labels(
     """
     if is_subplot:
         title_fs = conf_mat_plot_fontsize("title_subplot", default=20)
-        xlabel_fs = conf_mat_plot_fontsize("xlabel_subplot", default=conf_mat_plot_fontsize("xlabel", default=14))
-        ylabel_fs = conf_mat_plot_fontsize("ylabel_subplot", default=conf_mat_plot_fontsize("ylabel", default=14))
+        xlabel_fs = conf_mat_plot_fontsize(
+            "xlabel_subplot", default=conf_mat_plot_fontsize("xlabel", default=14)
+        )
+        ylabel_fs = conf_mat_plot_fontsize(
+            "ylabel_subplot", default=conf_mat_plot_fontsize("ylabel", default=14)
+        )
         xticks_fs = conf_mat_plot_fontsize("xticks_subplot", default=18)
         yticks_fs = conf_mat_plot_fontsize("yticks_subplot", default=18)
     else:
@@ -609,6 +618,7 @@ def save_figure(
 
     if dpi is None:
         from autonerves import conf
+
         dpi = int(conf.instance["visualize"]["general"]["general"]["dpi"])
 
     if _output_mode_save(fig, filename):
@@ -635,9 +645,7 @@ def save_figure(
                     pad_inches=0.1,
                 )
             except Exception as exc:
-                logger.warning(
-                    f"save_figure: could not save {filename}.{fmt}: {exc}"
-                )
+                logger.warning(f"save_figure: could not save {filename}.{fmt}: {exc}")
 
     plt.close(fig)
 
@@ -672,6 +680,7 @@ def plot_visibilities_1d(vis, ax, title: str = "") -> None:
 def _conf_colorbar(key: str, default):
     try:
         from autonerves import conf
+
         return conf.instance["visualize"]["general"]["colorbar"][key]
     except Exception:
         return default
@@ -682,6 +691,7 @@ def _colorbar_tick_values(norm) -> Optional[List[float]]:
     if norm is None or norm.vmin is None or norm.vmax is None:
         return None
     import matplotlib.colors as mcolors
+
     lo, hi = float(norm.vmin), float(norm.vmax)
     if isinstance(norm, mcolors.LogNorm):
         mid = 10 ** ((np.log10(lo) + np.log10(hi)) / 2.0)
@@ -725,7 +735,9 @@ def _fmt_tick(v: float) -> str:
     return f"{v:.2f}"
 
 
-def _colorbar_tick_labels(tick_values: List[float], cb_unit: Optional[str] = None) -> List[str]:
+def _colorbar_tick_labels(
+    tick_values: List[float], cb_unit: Optional[str] = None
+) -> List[str]:
     """Format tick values, appending *cb_unit* to the middle label.
 
     All three labels use a consistent notation style: if any tick is rendered
@@ -740,6 +752,7 @@ def _colorbar_tick_labels(tick_values: List[float], cb_unit: Optional[str] = Non
     if cb_unit is None:
         try:
             from autonerves import conf
+
             cb_unit = conf.instance["visualize"]["general"]["units"]["cb_unit"]
         except Exception:
             cb_unit = ""
@@ -840,6 +853,7 @@ def _apply_contours(
     """
     try:
         from autonerves import conf
+
         _c = conf.instance["visualize"]["general"]["contour"]
         total = int(n if n is not None else _c.get("total_contours", 10))
         include_values = bool(_c.get("include_values", True))
@@ -851,7 +865,10 @@ def _apply_contours(
         if use_log10:
             try:
                 from autonerves import conf
-                log10_min = float(conf.instance["visualize"]["general"]["general"]["log10_min_value"])
+
+                log10_min = float(
+                    conf.instance["visualize"]["general"]["general"]["log10_min_value"]
+                )
             except Exception:
                 log10_min = 1.0e-4
 
@@ -867,7 +884,9 @@ def _apply_contours(
                 total,
             )
         else:
-            levels = np.linspace(float(np.nanmin(array)), float(np.nanmax(array)), total)
+            levels = np.linspace(
+                float(np.nanmin(array)), float(np.nanmax(array)), total
+            )
 
         # Build explicit coordinate grids so the contours align with imshow.
         # With origin="upper" row 0 maps to ymax (Y decreases across rows);
@@ -1035,6 +1054,7 @@ def _conf_log10_min_value() -> float:
     """Return the log10 colour-scale floor from config (``log10_min_value``)."""
     try:
         from autonerves import conf
+
         general = conf.instance["visualize"]["general"]["general"]
         return float(general["log10_min_value"])
     except Exception:
@@ -1044,6 +1064,7 @@ def _conf_log10_min_value() -> float:
 def _conf_ticks(key: str, default: float) -> float:
     try:
         from autonerves import conf
+
         return float(conf.instance["visualize"]["general"]["ticks"][key])
     except Exception:
         return default
@@ -1052,6 +1073,7 @@ def _conf_ticks(key: str, default: float) -> float:
 def _conf_ticks_flag(key: str, default: bool) -> bool:
     try:
         from autonerves import conf
+
         return bool(conf.instance["visualize"]["general"]["ticks"][key])
     except Exception:
         return default
@@ -1104,7 +1126,7 @@ def _arcsec_labels(ticks) -> List[str]:
         # render with a proper minus sign rather than a hyphen.
         return label.replace("-", "−") if minus_in_math else label
 
-    labels = [f'{v:g}' for v in ticks]
+    labels = [f"{v:g}" for v in ticks]
     if any("." in label for label in labels):
         labels = [
             label if "." in label else f"{float(v):.1f}"
@@ -1152,3 +1174,81 @@ def apply_extent(
     # drops below the tick line. Centre them on the tick.
     for label in ax.get_yticklabels():
         label.set_verticalalignment("center")
+
+
+REGION_COLORS_DEFAULT = ["r", "g", "b", "m", "c", "y"]
+
+
+def plot_regions(
+    ax,
+    regions,
+    region_colors: Optional[List] = None,
+    region_alpha: float = 0.25,
+    region_labels: Optional[List[str]] = None,
+) -> None:
+    """
+    Draw filled and outlined polygon regions onto *ax*, one colour per region.
+
+    Every region is drawn as one or more closed polygons in the plot's coordinate space (e.g.
+    arc-seconds), so the overlay stays aligned with the image however it is zoomed or cropped.
+
+    Parameters
+    ----------
+    ax
+        The matplotlib ``Axes`` to draw onto.
+    regions
+        A list of regions, where each region is a list of ``(N, 2)`` arrays of ``(y, x)``
+        coordinates (a single ``(N, 2)`` array is also accepted for a one-polygon region).
+    region_colors
+        The colour of each region, cycled if there are more regions than colours. ``None`` uses the
+        default cycle ``["r", "g", "b", "m", "c", "y"]``.
+    region_alpha
+        The alpha of each region's fill; the outline is always drawn opaque.
+    region_labels
+        A text label drawn at the centre of each region, e.g. ``["1", "2"]``. ``None`` draws no
+        labels.
+    """
+    if regions is None:
+        return
+
+    colors = region_colors if region_colors is not None else REGION_COLORS_DEFAULT
+
+    for i, region in enumerate(regions):
+        if region is None:
+            continue
+
+        if isinstance(region, np.ndarray) and region.ndim == 2:
+            polygons = [region]
+        else:
+            polygons = list(region)
+
+        color = colors[i % len(colors)]
+
+        points = []
+
+        for polygon in polygons:
+            polygon = np.asarray(polygon, dtype=float).reshape(-1, 2)
+
+            if polygon.shape[0] < 3:
+                continue
+
+            points.append(polygon)
+
+            ax.fill(
+                polygon[:, 1], polygon[:, 0], color=color, alpha=region_alpha, zorder=4
+            )
+            ax.plot(polygon[:, 1], polygon[:, 0], color=color, linewidth=1, zorder=5)
+
+        if region_labels is not None and i < len(region_labels) and len(points) > 0:
+            stacked = np.concatenate(points, axis=0)
+
+            ax.annotate(
+                str(region_labels[i]),
+                xy=(float(np.mean(stacked[:, 1])), float(np.mean(stacked[:, 0]))),
+                color=color,
+                fontsize=12,
+                fontweight="bold",
+                ha="center",
+                va="center",
+                zorder=6,
+            )

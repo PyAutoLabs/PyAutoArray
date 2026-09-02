@@ -619,7 +619,9 @@ class Mapper(LinearObj):
                 x_min, x_max, y_min, y_max = extent
                 x_centre = 0.5 * (x_min + x_max)
                 y_centre = 0.5 * (y_min + y_max)
-                target_half = 0.5 * max(x_max - x_min, y_max - y_min) * zoom_extent_scale
+                target_half = (
+                    0.5 * max(x_max - x_min, y_max - y_min) * zoom_extent_scale
+                )
 
                 bound = geometry_util.extent_symmetric_from(
                     extent=self.source_plane_mesh_grid.geometry.extent
@@ -630,8 +632,8 @@ class Mapper(LinearObj):
                     y_centre - bound[2],
                     bound[3] - y_centre,
                 )
-                bound_cap_half = 0.7 * 0.5 * min(
-                    bound[1] - bound[0], bound[3] - bound[2]
+                bound_cap_half = (
+                    0.7 * 0.5 * min(bound[1] - bound[0], bound[3] - bound[2])
                 )
                 final_half = min(target_half, max_allowable_half, bound_cap_half)
 
@@ -667,4 +669,42 @@ class Mapper(LinearObj):
         return Array2D(
             values=mesh_pixels_per_image_pixels,
             mask=self.mask,
+        )
+
+    def mappings_from(
+        self,
+        pix_indexes,
+        weight_threshold: float = 0.0,
+        min_pixels: int = 1,
+    ) -> List["Mapping"]:
+        """
+        Returns the `Mapping` of one or more groups of mesh pixels, pairing each source-plane group
+        with the image-plane regions (the multiple images) it maps to.
+
+        This is the bare-`Mapper` route into the mapping objects, used when there is no inversion to
+        find clumps in and the mesh pixels of interest are chosen by hand (e.g. in a tutorial). Each
+        returned `Mapping` therefore has a `peak_value` of `None`.
+
+        Parameters
+        ----------
+        pix_indexes
+            The mesh pixel indexes, either a flat sequence (one group) or a nested sequence (one
+            group per entry).
+        weight_threshold
+            A data pixel is in an image-plane region if its summed mapping weight to the group
+            exceeds this value.
+        min_pixels
+            Connected image-plane regions with fewer than this many pixels are discarded.
+
+        Returns
+        -------
+        One `Mapping` per group of mesh pixels.
+        """
+        from autoarray.inversion.mappings import mapping as mapping_module
+
+        return mapping_module.mappings_from(
+            mapper=self,
+            pix_indexes=pix_indexes,
+            weight_threshold=weight_threshold,
+            min_pixels=min_pixels,
         )

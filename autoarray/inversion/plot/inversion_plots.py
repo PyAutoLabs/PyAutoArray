@@ -2,13 +2,22 @@ import csv
 import logging
 import numpy as np
 from pathlib import Path
-from typing import Optional, Union
+from typing import List, Optional, Union
 
 from autonerves import conf
 
 from autoarray.inversion.mappers.abstract import Mapper
 from autoarray.plot.array import plot_array
-from autoarray.plot.utils import subplots, numpy_grid, numpy_lines, numpy_positions, subplot_save, hide_unused_axes, conf_subplot_figsize, tight_layout
+from autoarray.plot.utils import (
+    subplots,
+    numpy_grid,
+    numpy_lines,
+    numpy_positions,
+    subplot_save,
+    hide_unused_axes,
+    conf_subplot_figsize,
+    tight_layout,
+)
 from autoarray.inversion.plot.mapper_plots import plot_mapper
 from autoarray.structures.arrays.uniform_2d import Array2D
 
@@ -235,6 +244,43 @@ def subplot_of_mapper(
     subplot_save(fig, output_path, f"{output_filename}_{mapper_index}", output_format)
 
 
+def _conf_mappings(key: str, default, old_key: Optional[str] = None):
+    """
+    Read a `subplot_mappings` setting from the ``visualize/general.yaml`` ``inversion`` section.
+
+    A config which predates the mappings rewrite has none of the new keys, so `old_key` names the
+    key it did have (``total_mappings_pixels``) and is read as a fallback for one release. When
+    neither key is present the documented `default` is used.
+
+    Parameters
+    ----------
+    key
+        The config key to read.
+    default
+        The value used when neither `key` nor `old_key` is in the config.
+    old_key
+        The superseded key read when `key` is absent.
+
+    Returns
+    -------
+    The config value.
+    """
+    inversion = conf.instance["visualize"]["general"]["inversion"]
+
+    try:
+        return inversion[key]
+    except KeyError:
+        pass
+
+    if old_key is not None:
+        try:
+            return inversion[old_key]
+        except KeyError:
+            pass
+
+    return default
+
+
 def subplot_mappings(
     inversion,
     pixelization_index: int = 0,
@@ -247,9 +293,21 @@ def subplot_mappings(
     lines=None,
     grid=None,
     positions=None,
+    threshold: Optional[float] = None,
+    min_pixels: Optional[int] = None,
+    total_clumps: Optional[int] = None,
+    pix_indexes: Optional[List] = None,
+    weight_threshold: float = 0.0,
+    region_alpha: float = 0.25,
 ):
     """
-    2×2 subplot showing data, model image, reconstruction and unzoomed reconstruction.
+    2x2 subplot showing how the brightest clumps of the source reconstruction map to the image-plane.
+
+    The panels are the data with all other linear objects subtracted, the reconstructed image, the
+    source reconstruction zoomed to its brightest region, and the source reconstruction unzoomed.
+    Every source clump is drawn as a filled polygon on the two source-plane panels and its
+    image-plane regions (the multiple images it maps to) are drawn in the same colour on the two
+    image-plane panels, each labelled with the same number in both planes.
 
     Parameters
     ----------
@@ -269,22 +327,49 @@ def subplot_mappings(
         Apply log10 normalisation.
     mesh_grid, lines, grid, positions
         Optional overlays.
+    threshold
+        A source pixel joins a clump if its reconstructed value exceeds this fraction of the
+        reconstruction's maximum.  ``None`` reads ``mappings_threshold`` from the visualize config.
+    min_pixels
+        Connected groups of source pixels smaller than this are not drawn.  ``None`` reads
+        ``mappings_min_pixels`` from the visualize config.
+    total_clumps
+        The maximum number of clumps drawn, keeping the brightest.  ``None`` reads
+        ``total_mappings`` from the visualize config.
+    pix_indexes
+        An explicit list of source pixel index groups which bypasses the clump finding, e.g.
+        ``[[0, 1], [10]]``.
+    weight_threshold
+        A data pixel is in an image-plane region if its summed mapping weight to the clump exceeds
+        this value.
+    region_alpha
+        The alpha of each drawn region's fill.
     """
     mapper = inversion.cls_list_from(cls=Mapper)[pixelization_index]
 
-    try:
-        total_pixels = conf.instance["visualize"]["general"]["inversion"][
-            "total_mappings_pixels"
-        ]
-    except Exception:
-        total_pixels = 10
+    if threshold is None:
+        threshold = float(_conf_mappings(key="mappings_threshold", default=0.5))
+    if min_pixels is None:
+        min_pixels = int(_conf_mappings(key="mappings_min_pixels", default=3))
+    if total_clumps is None:
+        total_clumps = int(
+            _conf_mappings(
+                key="total_mappings", default=5, old_key="total_mappings_pixels"
+            )
+        )
 
-    pix_indexes = inversion.max_pixel_list_from(
-        total_pixels=total_pixels,
-        filter_neighbors=True,
+    mappings = inversion.mappings_from(
         mapper_index=pixelization_index,
+        weight_threshold=weight_threshold,
+        threshold=threshold,
+        min_pixels=min_pixels,
+        total_clumps=total_clumps,
+        pix_indexes=pix_indexes,
     )
-    mapper.slim_indexes_for_pix_indexes(pix_indexes=pix_indexes)
+
+    image_regions = [mapping.image_contours for mapping in mappings]
+    source_regions = [mapping.source_contours for mapping in mappings]
+    region_labels = [str(i + 1) for i in range(len(mappings))]
 
     fig, axes = subplots(2, 2, figsize=conf_subplot_figsize(2, 2))
     axes = axes.flatten()
@@ -305,6 +390,9 @@ def subplot_mappings(
             grid=grid,
             positions=positions,
             lines=lines,
+            regions=image_regions,
+            region_alpha=region_alpha,
+            region_labels=region_labels,
         )
     except (AttributeError, KeyError):
         pass
@@ -325,11 +413,15 @@ def subplot_mappings(
             grid=grid,
             positions=positions,
             lines=lines,
+            regions=image_regions,
+            region_alpha=region_alpha,
+            region_labels=region_labels,
         )
     except (AttributeError, KeyError):
         pass
 
     pixel_values = inversion.reconstruction_dict[mapper]
+
     plot_mapper(
         mapper,
         solution_vector=pixel_values,
@@ -340,6 +432,9 @@ def subplot_mappings(
         zoom_to_brightest=True,
         mesh_grid=mesh_grid,
         lines=lines,
+        regions=source_regions,
+        region_alpha=region_alpha,
+        region_labels=region_labels,
     )
     plot_mapper(
         mapper,
@@ -351,6 +446,9 @@ def subplot_mappings(
         zoom_to_brightest=False,
         mesh_grid=mesh_grid,
         lines=lines,
+        regions=source_regions,
+        region_alpha=region_alpha,
+        region_labels=region_labels,
     )
 
     hide_unused_axes(axes)
@@ -402,9 +500,13 @@ def save_reconstruction_csv(
             )
             noise_map = None
 
-        with open(output_path / f"source_plane_reconstruction_{i}.csv", mode="w", newline="") as f:
+        with open(
+            output_path / f"source_plane_reconstruction_{i}.csv", mode="w", newline=""
+        ) as f:
             writer = csv.writer(f)
             writer.writerow(["y", "x", "reconstruction", "noise_map"])
             for j in range(len(x)):
                 noise_value = float("nan") if noise_map is None else float(noise_map[j])
-                writer.writerow([float(y[j]), float(x[j]), float(reconstruction[j]), noise_value])
+                writer.writerow(
+                    [float(y[j]), float(x[j]), float(reconstruction[j]), noise_value]
+                )
