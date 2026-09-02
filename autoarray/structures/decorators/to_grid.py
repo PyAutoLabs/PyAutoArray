@@ -8,14 +8,23 @@ from autoarray.structures.grids.uniform_2d import Grid2D
 
 
 class GridMaker(AbstractMaker):
+    # The private ``_over_sampled`` / ``_over_sampler`` attributes are read here
+    # instead of the public properties on purpose: when ``result`` is already a
+    # ``Grid2D`` (e.g. the chained ``@to_grid`` methods of the spherical mass
+    # profiles) touching the properties *materialises* them, and building the
+    # over sampled grid runs a per-pixel Python loop that dominates the runtime
+    # of an otherwise millisecond deflection calculation. Only a value that was
+    # explicitly passed in by the caller should propagate to the new grid; a
+    # ``None`` lets the new ``Grid2D`` compute its own lazily, if anything ever
+    # asks for it.
     def via_grid_2d(self, result) -> Union[Grid2D, List[Grid2D]]:
         if not isinstance(result, list):
             return Grid2D(
                 values=result,
                 mask=self.mask,
                 over_sample_size=self.over_sample_size,
-                over_sampled=getattr(result, "over_sampled", None),
-                over_sampler=getattr(result, "over_sampler", None),
+                over_sampled=getattr(result, "_over_sampled", None),
+                over_sampler=getattr(result, "_over_sampler", None),
             )
 
         return [
@@ -23,8 +32,8 @@ class GridMaker(AbstractMaker):
                 values=res,
                 mask=self.mask,
                 over_sample_size=self.over_sample_size,
-                over_sampled=getattr(res, "over_sampled", None),
-                over_sampler=getattr(res, "over_sampler", None),
+                over_sampled=getattr(res, "_over_sampled", None),
+                over_sampler=getattr(res, "_over_sampler", None),
             )
             for res in result
         ]

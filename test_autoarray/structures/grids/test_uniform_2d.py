@@ -880,3 +880,51 @@ def test__subtracted_and_rotated_from__shift_first_then_rotate():
 
     rotated = grid.subtracted_and_rotated_from(offset=(1.0, 2.0), angle=90.0)
     assert rotated.array == pytest.approx(expected, 1.0e-4)
+
+
+def test__over_sampled__sub_size_1_is_the_slim_grid():
+    mask = aa.Mask2D(
+        mask=[
+            [True, True, True, True, True],
+            [True, False, False, False, True],
+            [True, False, True, False, True],
+            [True, False, False, False, True],
+            [True, True, True, True, True],
+        ],
+        pixel_scales=(1.5, 1.5),
+    )
+
+    grid = aa.Grid2D.from_mask(mask=mask, over_sample_size=1)
+
+    over_sampled = grid.over_sampled
+
+    assert isinstance(over_sampled, aa.Grid2DIrregular)
+    assert np.array_equal(np.array(over_sampled), np.array(grid.array))
+
+    # The cached value is not a view onto the grid itself.
+    assert not np.shares_memory(np.array(over_sampled.array), np.array(grid.array))
+
+    # The property caches, so a second read is the same object.
+    assert grid.over_sampled is over_sampled
+
+
+def test__over_sampled__sub_size_2_over_samples_every_pixel():
+    mask = aa.Mask2D(
+        mask=[
+            [True, True, True, True, True],
+            [True, False, False, False, True],
+            [True, False, True, False, True],
+            [True, False, False, False, True],
+            [True, True, True, True, True],
+        ],
+        pixel_scales=(1.5, 1.5),
+    )
+
+    grid = aa.Grid2D.from_mask(mask=mask, over_sample_size=2)
+
+    over_sampled = grid.over_sampled
+
+    assert np.array(over_sampled).shape[0] == 4 * grid.array.shape[0]
+    assert not np.array_equal(
+        np.array(over_sampled)[: grid.array.shape[0]], np.array(grid.array)
+    )
