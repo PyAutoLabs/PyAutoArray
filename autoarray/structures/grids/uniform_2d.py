@@ -1,8 +1,9 @@
 from __future__ import annotations
+import contextlib
 import os
 import numpy as np
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 
 from autonerves import conf
 from autonerves.fitsable import ndarray_via_fits_from
@@ -18,6 +19,59 @@ from autoarray.operators.over_sampling import over_sample_util
 
 from autoarray import exc
 from autoarray import type as ty
+from autoarray import validate
+
+
+def _shift_and_rotate_is_constant(offset: Any, angle: Any) -> bool:
+    """
+    Whether a shift-and-rotate of a grid by ``offset`` / ``angle`` is a constant --
+    that is, whether both are concrete numbers rather than traced model parameters.
+
+    ``grid_offset`` and ``grid_rotation_angle`` come from a ``DatasetModel``, so they
+    are Python floats in the overwhelmingly common case (no dataset model, or a fixed
+    one) and JAX tracers only when a fit leaves them free. The positive test is
+    :func:`autoarray.validate.is_concrete_scalar`, the same gate the constructor
+    guards use; a tracer is not an ``int`` / ``float`` / ``np.number`` and so fails it.
+    """
+    if not validate.is_concrete_scalar(angle):
+        return False
+
+    if not isinstance(offset, (tuple, list, np.ndarray)) or len(offset) != 2:
+        return False
+
+    return all(validate.is_concrete_scalar(value) for value in offset)
+
+
+def _compile_time_eval_context(offset: Any, angle: Any, xp):
+    """
+    The context a constant shift-and-rotate is evaluated in.
+
+    Under ``jax.jit`` **every** ``jax.numpy`` call is staged into the jaxpr, even one
+    whose operands are all concrete: ``jnp.asarray(numpy_grid) - jnp.array((0.0, 0.0))``
+    inside a trace returns a ``DynamicJaxprTracer``, not an array. The shifted and
+    rotated grid of a fit with no free ``grid_offset`` is therefore a compile-time
+    constant that JAX nevertheless recomputes on every likelihood evaluation -- and
+    this stack disables XLA's constant folding (``--xla_disable_hlo_passes=constant_folding``,
+    set by ``autonerves/jax_wrapper.py`` for compile-time reasons), so XLA does not
+    fold it away either.
+
+    ``jax.ensure_compile_time_eval()`` restores eager evaluation for the operations
+    inside it, so the grid comes out as a concrete ``jax.Array``. The arithmetic is
+    identical -- it is the same operations on the same values, executed now rather
+    than staged -- and every downstream consumer that only reads the coordinates is
+    handed a constant it can act on, which is what lets
+    ``autogalaxy.profiles.mass.abstract.deflections_memo`` fold a fixed-geometry
+    deflection field out of the trace entirely.
+
+    Numpy is unaffected (numpy has no trace to stage into), and a traced ``offset`` or
+    ``angle`` falls back to the ordinary staged path, where it belongs.
+    """
+    if xp is np or not _shift_and_rotate_is_constant(offset, angle):
+        return contextlib.nullcontext()
+
+    import jax
+
+    return jax.ensure_compile_time_eval()
 
 
 class Grid2D(Structure):
@@ -772,6 +826,16 @@ class Grid2D(Structure):
           y'' = y' cos(theta) + x' sin(theta)
           x'' = x' cos(theta) - y' sin(theta)
 
+        __Trace-time constant__
+
+        When ``offset`` and ``angle`` are concrete numbers -- which they are unless a
+        fit leaves ``grid_offset`` / ``grid_rotation_angle`` free -- the whole
+        calculation is a constant, and on the JAX backend it is evaluated eagerly
+        inside ``jax.ensure_compile_time_eval()`` rather than staged into the jaxpr
+        (see :func:`_compile_time_eval_context`). The returned grid is then a concrete
+        ``jax.Array``, which is what allows the fixed-geometry deflection memo
+        downstream to fold its field out of the trace. The arithmetic is unchanged.
+
         Parameters
         ----------
         offset
@@ -779,21 +843,22 @@ class Grid2D(Structure):
         angle
             The rotation angle in degrees. Positive values rotate counter-clockwise.
         """
-        offset_array = xp.array(offset)
-        angle_rad = xp.deg2rad(angle)
-        cos_a = xp.cos(angle_rad)
-        sin_a = xp.sin(angle_rad)
+        with _compile_time_eval_context(offset=offset, angle=angle, xp=xp):
+            offset_array = xp.array(offset)
+            angle_rad = xp.deg2rad(angle)
+            cos_a = xp.cos(angle_rad)
+            sin_a = xp.sin(angle_rad)
 
-        def _shift_and_rotate(grid_array):
-            shifted = grid_array - offset_array
-            sy = shifted[:, 0]
-            sx = shifted[:, 1]
-            ry = sx * sin_a + sy * cos_a
-            rx = sx * cos_a - sy * sin_a
-            return xp.stack((ry, rx), axis=-1)
+            def _shift_and_rotate(grid_array):
+                shifted = grid_array - offset_array
+                sy = shifted[:, 0]
+                sx = shifted[:, 1]
+                ry = sx * sin_a + sy * cos_a
+                rx = sx * cos_a - sy * sin_a
+                return xp.stack((ry, rx), axis=-1)
 
-        grid_rotated = _shift_and_rotate(self.array)
-        over_sampled_rotated = _shift_and_rotate(self.over_sampled.array)
+            grid_rotated = _shift_and_rotate(self.array)
+            over_sampled_rotated = _shift_and_rotate(self.over_sampled.array)
 
         mask = Mask2D(
             mask=self.mask,
