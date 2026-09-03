@@ -140,11 +140,19 @@ class VectorYX2D(AbstractVectorYX2D):
             grid_2d=values, mask_2d=mask, store_native=store_native
         )
 
-        grid = grid_2d_util.convert_grid_2d(
-            grid_2d=grid, mask_2d=mask, store_native=store_native
-        )
+        # A `Grid2D` already paired with this mask is the grid the vectors are located on: the
+        # `@to_vector_yx` decorator hands the input grid straight through, so re-converting its
+        # values and rebuilding a second `Grid2D` on every profile evaluation would only pay the
+        # constructor twice for the same object.
+        if isinstance(grid, Grid2D) and grid.mask is mask and not store_native:
+            self.grid = grid
+        else:
+            grid = grid_2d_util.convert_grid_2d(
+                grid_2d=grid, mask_2d=mask, store_native=store_native
+            )
 
-        self.grid = Grid2D(values=grid, mask=mask)
+            self.grid = Grid2D(values=grid, mask=mask)
+
         self.mask = mask
 
         super().__init__(values)
