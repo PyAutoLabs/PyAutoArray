@@ -519,15 +519,20 @@ def transform_grid_2d_to_reference_frame(
 
     shifted_grid_2d = grid_2d - xp.array(centre)
 
-    radius = xp.sqrt(xp.sum(xp.square(shifted_grid_2d), axis=1))
-    theta_coordinate_to_profile = xp.arctan2(
-        shifted_grid_2d[:, 0], shifted_grid_2d[:, 1]
-    ) - xp.radians(angle)
+    # A clockwise rotation by `angle` is the rotation matrix applied to the shifted (y, x)
+    # coordinates, built from one scalar cos / sin of the angle. This is algebraically
+    # identical to the polar form (r, theta - angle) -> (r sin, r cos) but costs two
+    # multiply-adds per coordinate instead of a per-pixel sqrt, arctan2, sin and cos.
+    cos_angle = xp.cos(xp.radians(angle))
+    sin_angle = xp.sin(xp.radians(angle))
+
+    y = shifted_grid_2d[:, 0]
+    x = shifted_grid_2d[:, 1]
 
     return xp.vstack(
         [
-            radius * xp.sin(theta_coordinate_to_profile),
-            radius * xp.cos(theta_coordinate_to_profile),
+            y * cos_angle - x * sin_angle,
+            x * cos_angle + y * sin_angle,
         ]
     ).T
 
