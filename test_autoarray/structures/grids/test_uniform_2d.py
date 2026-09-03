@@ -1,3 +1,4 @@
+import contextlib
 from pathlib import Path
 import numpy as np
 import pytest
@@ -880,6 +881,57 @@ def test__subtracted_and_rotated_from__shift_first_then_rotate():
 
     rotated = grid.subtracted_and_rotated_from(offset=(1.0, 2.0), angle=90.0)
     assert rotated.array == pytest.approx(expected, 1.0e-4)
+
+
+def test__shift_and_rotate_is_constant__concrete_offset_and_angle_only():
+    from autoarray.structures.grids import uniform_2d
+
+    assert uniform_2d._shift_and_rotate_is_constant(offset=(0.5, -0.5), angle=0.0)
+    assert uniform_2d._shift_and_rotate_is_constant(
+        offset=np.array([0.5, -0.5]), angle=np.float64(30.0)
+    )
+
+    # A value that is not a concrete number -- a JAX tracer reaches this the same way
+    # a string does, by failing `validate.is_concrete_scalar` -- is not a constant.
+    assert not uniform_2d._shift_and_rotate_is_constant(offset=(0.5, "x"), angle=0.0)
+    assert not uniform_2d._shift_and_rotate_is_constant(offset=(0.5, -0.5), angle=None)
+    assert not uniform_2d._shift_and_rotate_is_constant(offset=(0.5,), angle=0.0)
+    assert not uniform_2d._shift_and_rotate_is_constant(offset=0.5, angle=0.0)
+
+
+def test__subtracted_and_rotated_from__numpy_is_unchanged_by_the_constant_gate():
+    """
+    The compile-time-eval context is a JAX-only concern: on numpy the method is the
+    plain shift-and-rotate it has always been, for a concrete *and* a non-concrete
+    offset, and it never enters a context that would import jax.
+    """
+    from autoarray.structures.grids import uniform_2d
+
+    grid = aa.Grid2D.uniform(shape_native=(3, 3), pixel_scales=1.0, over_sample_size=2)
+
+    rotated = grid.subtracted_and_rotated_from(offset=(1.0, 2.0), angle=90.0)
+
+    shifted = grid.array - np.array([1.0, 2.0])
+    expected = np.stack((shifted[:, 1], -shifted[:, 0]), axis=-1)
+
+    assert rotated.array == pytest.approx(expected, 1.0e-8)
+    assert isinstance(rotated.array, np.ndarray)
+
+    over_shifted = grid.over_sampled.array - np.array([1.0, 2.0])
+    over_expected = np.stack((over_shifted[:, 1], -over_shifted[:, 0]), axis=-1)
+
+    assert rotated.over_sampled.array == pytest.approx(over_expected, 1.0e-8)
+
+    # The numpy backend takes the null context whatever the offset is.
+    context = uniform_2d._compile_time_eval_context(
+        offset=(1.0, 2.0), angle=90.0, xp=np
+    )
+    assert isinstance(context, contextlib.nullcontext)
+
+    context = uniform_2d._compile_time_eval_context(
+        offset=(1.0, None), angle=90.0, xp=np
+    )
+    assert isinstance(context, contextlib.nullcontext)
 
 
 def test__over_sampled__sub_size_1_is_the_slim_grid():
