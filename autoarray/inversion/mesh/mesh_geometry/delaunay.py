@@ -194,11 +194,20 @@ class MeshGeometryDelaunay(AbstractMeshGeometry):
     @property
     def areas_for_magnification(self) -> np.ndarray:
         """
-        Returns the area of every Voronoi pixel in the Voronoi mesh.
+        Returns the Voronoi cell area of every pixel in the mesh, as computed by `voronoi_areas_numpy` (a shoelace
+        sum over the `scipy.spatial.Voronoi` cell of each mesh point).
 
-        Pixels at boundaries can sometimes have large unrealistic areas, which can impact the magnification
-        calculation. This method therefore sets their areas to zero so they do not impact the magnification
-        calculation.
+        Only cells that are **unbounded** in the Voronoi diagram (those `voronoi_areas_numpy` flags with the `-1`
+        sentinel, because their region runs to infinity and has no finite area) are set to zero. Cells that are
+        bounded but sit at the edge of the mesh are **kept at full size**, even though they can be far larger than
+        the interior cells -- an order of magnitude is routine, because a boundary cell extends out to the
+        circumcentres of the outermost triangles rather than being clipped to the mesh.
+
+        These Voronoi areas are **not** the barycentric dual areas used by the Delaunay interpolator
+        (`barycentric_dual_area_from` in `autoarray.inversion.mesh.interpolator.delaunay`), which assign each vertex
+        the sum of `triangle_area / 3` over the triangles touching it. The dual areas tile the convex hull of the
+        mesh exactly and integrate the piecewise-linear reconstruction exactly; these Voronoi areas do neither, so
+        `sum(reconstruction * areas_for_magnification)` is not the integral of the reconstructed source.
         """
         areas = self.voronoi_areas
 
