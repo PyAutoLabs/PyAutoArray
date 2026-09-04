@@ -145,6 +145,17 @@ def kernel_interpolate_points(points, query_chunk, values, k, radius_scale):
 
 class InterpolatorKNearestNeighbor(InterpolatorDelaunay):
 
+    @property
+    def dual_areas(self):
+        """
+        The kNN interpolators build no Delaunay tables, so there are no
+        in-graph dual areas to hand the mesh geometry. Returning ``None``
+        keeps ``MeshGeometryDelaunay`` on its host-side fallback (which
+        triangulates only if the areas are actually asked for) rather than
+        forcing a qhull call here.
+        """
+        return None
+
     @cached_property
     def _mappings_sizes_weights(self):
 

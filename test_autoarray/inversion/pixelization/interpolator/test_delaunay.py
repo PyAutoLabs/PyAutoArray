@@ -75,11 +75,15 @@ def test__scipy_delaunay__split(grid_2d_sub_1_7x7):
 #   * `barycentric_dual_area_from` (here) -- sum of triangle_area / 3 over the
 #     triangles touching each vertex. These tile the convex hull exactly and
 #     integrate the piecewise-linear interpolant exactly.
-#   * `MeshGeometryDelaunay.areas_for_magnification` -- scipy Voronoi cell
-#     areas with only the *unbounded* cells zeroed. These do NOT tile the hull
-#     and do NOT integrate the interpolant.
+#   * `MeshGeometryDelaunay.areas_for_magnification` -- since PyAutoArray#524
+#     these ARE the dual areas (taken straight from the interpolator, which
+#     computes them in-graph). They used to be scipy Voronoi cell areas with
+#     only the *unbounded* cells zeroed, which do NOT tile the hull and do NOT
+#     integrate the interpolant; that quantity is still available, unchanged,
+#     as `voronoi_areas` / `voronoi_areas_numpy`.
 #
-# The tests below pin both facts, including the size of the divergence.
+# The tests below pin both facts, including the size of the divergence between
+# the dual areas and the Voronoi areas.
 # ----------------------------------------------------------------------------
 
 # jax is an `[optional]` extra and is absent on the NumPy-only matrix env, so
@@ -107,9 +111,13 @@ def test__barycentric_dual_area__single_triangle():
 def test__barycentric_dual_area__sums_to_convex_hull_area():
     """
     The dual areas partition the convex hull exactly, so they sum to the hull
-    area. The Voronoi areas behind `areas_for_magnification` do not -- on this
-    configuration they overshoot the hull by ~29%, because the bounded boundary
-    cells extend well outside the hull and are kept.
+    area. The Voronoi areas -- which `areas_for_magnification` returned before
+    PyAutoArray#524 and which `voronoi_areas_numpy` still returns -- do not: on
+    this configuration they overshoot the hull by ~29%, because the bounded
+    boundary cells extend well outside the hull and are kept.
+
+    Since #524 a `MeshGeometryDelaunay` built on the same points returns the
+    dual areas from `areas_for_magnification`, which is also asserted here.
     """
     import scipy.spatial
 
@@ -135,6 +143,18 @@ def test__barycentric_dual_area__sums_to_convex_hull_area():
     )
     assert voronoi.sum() != pytest.approx(hull_area, rel=1.0e-2)
 
+    # ... and the mesh geometry now hands out the dual areas, not those Voronoi
+    # areas. `mesh_grid_xy` may swap the (y,x) columns to (x,y); dual areas are
+    # invariant under that swap, so comparing against the dual areas of the same
+    # `points` array is exact.
+    mesh_geometry = aa.MeshGeometryDelaunay(
+        mesh=aa.mesh.Delaunay(pixels=40),
+        mesh_grid=aa.Grid2DIrregular(points),
+        data_grid=aa.Grid2D.uniform(shape_native=(7, 7), pixel_scales=1.0),
+    )
+
+    assert mesh_geometry.areas_for_magnification == pytest.approx(dual, rel=1.0e-10)
+
 
 def test__linear_field_integral__dual_areas_exact():
     """
@@ -155,9 +175,9 @@ def test__linear_field_integral__dual_areas_exact():
     p1 = points[simplices[:, 1]]
     p2 = points[simplices[:, 2]]
 
-    cross = (p1[:, 0] - p0[:, 0]) * (p2[:, 1] - p0[:, 1]) - (
-        p1[:, 1] - p0[:, 1]
-    ) * (p2[:, 0] - p0[:, 0])
+    cross = (p1[:, 0] - p0[:, 0]) * (p2[:, 1] - p0[:, 1]) - (p1[:, 1] - p0[:, 1]) * (
+        p2[:, 0] - p0[:, 0]
+    )
 
     tri_area = 0.5 * np.abs(cross)
 
@@ -174,9 +194,9 @@ def test__linear_field_integral__dual_areas_exact():
 
     voronoi_integral = (f * voronoi).sum()
 
-    assert abs(voronoi_integral - exact) / exact > 0.01, (
-        f"Voronoi-weighted integral {voronoi_integral} vs exact {exact}"
-    )
+    assert (
+        abs(voronoi_integral - exact) / exact > 0.01
+    ), f"Voronoi-weighted integral {voronoi_integral} vs exact {exact}"
 
 
 @requires_jax
@@ -186,10 +206,12 @@ def test__barycentric_dual_area__numpy_matches_jax_in_graph():
     (a masked scatter-add over the padded simplices) rather than calling
     `barycentric_dual_area_from`. The two must agree.
 
-    The dual areas are not returned by either path; they enter it as the split
-    point weights (`areas_factor * sqrt(areas)`), so the split points -- which
-    both paths do return -- are the observable that pins them. Comparing them
-    exercises the real library path rather than a hand-rolled copy of it.
+    Since PyAutoArray#524 both paths return the dual areas as the sixth element
+    of their tuple (the mesh geometry consumes them as the magnification
+    quadrature weights), so they are compared directly. The split points --
+    which carry the dual areas as `areas_factor * sqrt(areas)` -- are still
+    compared too, since they exercise the same values through the real library
+    path.
     """
     import jax.numpy as jnp
 
@@ -198,10 +220,13 @@ def test__barycentric_dual_area__numpy_matches_jax_in_graph():
     points = rng.random((25, 2))
     query_points = rng.random((30, 2))
 
-    _, simplices_np, _, split_np, _ = scipy_delaunay(points, query_points, 0.5)
-    _, simplices_jx, _, split_jx, _ = jax_delaunay(
+    _, simplices_np, _, split_np, _, areas_np = scipy_delaunay(
+        points, query_points, 0.5
+    )
+    _, simplices_jx, _, split_jx, _, areas_jx = jax_delaunay(
         jnp.asarray(points), jnp.asarray(query_points), 0.5
     )
 
     assert np.array_equal(np.asarray(simplices_np), np.asarray(simplices_jx))
     assert np.asarray(split_jx) == pytest.approx(np.asarray(split_np), abs=1.0e-10)
+    assert np.asarray(areas_jx) == pytest.approx(np.asarray(areas_np), abs=1.0e-10)

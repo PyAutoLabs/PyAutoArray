@@ -93,6 +93,39 @@ def voronoi_areas_numpy(points, qhull_options="Qbb Qc Qx Qm Q12 Pp"):
 
 class MeshGeometryDelaunay(AbstractMeshGeometry):
 
+    def __init__(
+        self,
+        mesh,
+        mesh_grid,
+        data_grid,
+        dual_areas=None,
+        xp=np,
+        **kwargs,
+    ):
+        """
+        The geometry of a Delaunay triangulation / Voronoi mesh.
+
+        Parameters
+        ----------
+        dual_areas
+            The barycentric dual area of every mesh vertex, as computed by the
+            interpolator that built this geometry (see
+            `autoarray.inversion.mesh.interpolator.delaunay`). These are the
+            quadrature weights `areas_for_magnification` returns. When the
+            geometry is built standalone (e.g. in the tests) this is `None` and
+            the dual areas are computed host-side on demand instead.
+        """
+
+        super().__init__(
+            mesh=mesh,
+            mesh_grid=mesh_grid,
+            data_grid=data_grid,
+            xp=xp,
+            **kwargs,
+        )
+
+        self.dual_areas = dual_areas
+
     @cached_property
     def mesh_grid_xy(self):
         """
@@ -194,23 +227,47 @@ class MeshGeometryDelaunay(AbstractMeshGeometry):
     @property
     def areas_for_magnification(self) -> np.ndarray:
         """
-        Returns the Voronoi cell area of every pixel in the mesh, as computed by `voronoi_areas_numpy` (a shoelace
-        sum over the `scipy.spatial.Voronoi` cell of each mesh point).
+        Returns the **barycentric dual area** of every pixel in the mesh: the sum of `triangle_area / 3` over the
+        Delaunay triangles that touch that vertex.
 
-        Only cells that are **unbounded** in the Voronoi diagram (those `voronoi_areas_numpy` flags with the `-1`
-        sentinel, because their region runs to infinity and has no finite area) are set to zero. Cells that are
-        bounded but sit at the edge of the mesh are **kept at full size**, even though they can be far larger than
-        the interior cells -- an order of magnitude is routine, because a boundary cell extends out to the
-        circumcentres of the outermost triangles rather than being clipped to the mesh.
+        These are the exact quadrature weights of the mesh's piecewise-linear (barycentric) interpolant. The
+        Delaunay mapper reconstructs the source as the linear interpolant through the vertex values `s_i`, and for
+        that interpolant
 
-        These Voronoi areas are **not** the barycentric dual areas used by the Delaunay interpolator
-        (`barycentric_dual_area_from` in `autoarray.inversion.mesh.interpolator.delaunay`), which assign each vertex
-        the sum of `triangle_area / 3` over the triangles touching it. The dual areas tile the convex hull of the
-        mesh exactly and integrate the piecewise-linear reconstruction exactly; these Voronoi areas do neither, so
-        `sum(reconstruction * areas_for_magnification)` is not the integral of the reconstructed source.
+            integral over the hull of f  =  sum_i s_i * dual_i
+
+        holds exactly, not approximately -- the dual areas tile the convex hull of the mesh exactly (they sum to the
+        hull area), so `sum(reconstruction * areas_for_magnification)` is the integral of the reconstructed source
+        over the mesh.
+
+        The value is taken from the interpolator, which computes it **in-graph** as part of the same Delaunay
+        construction that builds the mappings (`scipy_delaunay` / `jax_delaunay` and their Matérn variants). It is
+        therefore free here, and on the JAX path it is a traced value -- so this property is safe to evaluate inside
+        a `jax.jit` (e.g. PyAutoLens' per-sample latent evaluation). When the geometry is constructed standalone,
+        without an interpolator (`dual_areas is None`), the dual areas are computed host-side from a
+        `scipy.spatial.Delaunay` of the mesh grid, which gives the identical answer.
+
+        This is **not** `voronoi_areas`, which sums the shoelace area of each point's `scipy.spatial.Voronoi` cell.
+        Those are correct arithmetic but the wrong quantity for this use: a Voronoi cell that is bounded but sits at
+        the edge of the mesh extends out to the circumcentres of the outermost triangles instead of being clipped to
+        the hull, so it can be orders of magnitude larger than that vertex's dual area. Weighting the reconstruction
+        by them biased magnification by -13% to -99% across the audited configurations (PyAutoArray#522); the fix is
+        PyAutoArray#524. `voronoi_areas` itself is unchanged and remains available for the geometric uses that
+        genuinely want a Voronoi cell.
         """
-        areas = self.voronoi_areas
+        if self.dual_areas is not None:
+            return self.dual_areas
 
-        areas[areas == -1] = 0.0
+        import scipy.spatial
 
-        return areas
+        from autoarray.inversion.mesh.interpolator.delaunay import (
+            barycentric_dual_area_from,
+        )
+
+        mesh_grid_xy = np.asarray(self.mesh_grid_xy)
+
+        return barycentric_dual_area_from(
+            mesh_grid_xy,
+            scipy.spatial.Delaunay(mesh_grid_xy).simplices,
+            xp=np,
+        )

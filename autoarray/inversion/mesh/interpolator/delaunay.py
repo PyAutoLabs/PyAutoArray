@@ -9,7 +9,15 @@ from autoarray.inversion.regularization.regularization_util import (
 
 
 def scipy_delaunay(points_np, query_points_np, areas_factor):
-    """Compute Delaunay simplices (simplices_padded) and Voronoi areas in one call."""
+    """Compute the Delaunay simplices (``simplices_padded``), the query-point
+    mappings, the split-cross points and the barycentric dual areas in one call.
+
+    The dual areas are returned as the sixth element: they weight the split
+    points here, and they are also the exact quadrature weights of the
+    barycentric interpolant, which
+    :meth:`~autoarray.inversion.mesh.mesh_geometry.delaunay.MeshGeometryDelaunay.areas_for_magnification`
+    consumes (PyAutoArray#524).
+    """
     from scipy.spatial import Delaunay
 
     max_simplices = 2 * points_np.shape[0]
@@ -60,7 +68,7 @@ def scipy_delaunay(points_np, query_points_np, areas_factor):
         delaunay_points=points_np,
     )
 
-    return points, simplices_padded, mappings, split_points, splitted_mappings
+    return points, simplices_padded, mappings, split_points, splitted_mappings, areas
 
 
 # Query points are located in chunks of this size so the (chunk, N) distance
@@ -287,6 +295,30 @@ def pix_indexes_delaunay_walk_from(
     return mappings
 
 
+def _dual_areas_padded_jnp(points, simplices_padded):
+    """In-graph barycentric dual areas from the -1 padded simplex table.
+
+    A masked scatter-add of ``triangle_area / 3`` into each of a triangle's
+    three vertices, skipping the padded (-1) rows. Equivalent to
+    ``barycentric_dual_area_from`` on the unpadded simplices, but written with
+    ``.at[].add`` so it stays inside the JIT program and differentiable with
+    respect to ``points``.
+    """
+    import jax.numpy as jnp
+
+    valid = simplices_padded[:, 0] >= 0
+    s = simplices_padded.clip(min=0)
+    p0, p1, p2 = points[s[:, 0]], points[s[:, 1]], points[s[:, 2]]
+    tri_cross = (p1[:, 0] - p0[:, 0]) * (p2[:, 1] - p0[:, 1]) - (
+        p1[:, 1] - p0[:, 1]
+    ) * (p2[:, 0] - p0[:, 0])
+    contrib = jnp.where(valid, 0.5 * jnp.abs(tri_cross) / 3.0, 0.0)
+    areas = jnp.zeros(points.shape[0], dtype=points.dtype)
+    for k in range(3):
+        areas = areas.at[s[:, k]].add(contrib)
+    return areas
+
+
 def jax_delaunay(points, query_points, areas_factor=0.5):
     """JAX-path Delaunay construction. Only the qhull triangulation runs on
     the host (via ``pure_callback``); point location, dual areas and split
@@ -307,16 +339,7 @@ def jax_delaunay(points, query_points, areas_factor=0.5):
     )
 
     # dual areas via masked scatter-add over the padded simplices
-    valid = simplices_padded[:, 0] >= 0
-    s = simplices_padded.clip(min=0)
-    p0, p1, p2 = points[s[:, 0]], points[s[:, 1]], points[s[:, 2]]
-    tri_cross = (p1[:, 0] - p0[:, 0]) * (p2[:, 1] - p0[:, 1]) - (
-        p1[:, 1] - p0[:, 1]
-    ) * (p2[:, 0] - p0[:, 0])
-    contrib = jnp.where(valid, 0.5 * jnp.abs(tri_cross) / 3.0, 0.0)
-    areas = jnp.zeros(points.shape[0], dtype=points.dtype)
-    for k in range(3):
-        areas = areas.at[s[:, k]].add(contrib)
+    areas = _dual_areas_padded_jnp(points, simplices_padded)
 
     split_points = split_points_from(
         points=points,
@@ -336,7 +359,7 @@ def jax_delaunay(points, query_points, areas_factor=0.5):
         xp=jnp,
     )
 
-    return points, simplices_padded, mappings, split_points, splitted_mappings
+    return points, simplices_padded, mappings, split_points, splitted_mappings, areas
 
 
 def barycentric_dual_area_from(
@@ -441,12 +464,16 @@ def scipy_delaunay_matern(points_np, query_points_np):
     """
     Minimal SciPy Delaunay callback for Matérn regularization.
 
-    Returns only what’s needed for mapping:
+    Returns only what’s needed for mapping, plus the dual areas:
       - points (tri.points)
       - simplices_padded
       - mappings: integer array of pixel indices for each query point,
         typically of shape (Q, 3), where each row gives the indices of the
         Delaunay mesh vertices ("pixels") associated with that query point.
+      - areas: the barycentric dual area of every vertex. Matérn
+        regularization does not need them (there are no split points), but the
+        magnification quadrature does, so they are returned here too
+        (PyAutoArray#524).
     """
     from scipy.spatial import Delaunay
 
@@ -472,13 +499,19 @@ def scipy_delaunay_matern(points_np, query_points_np):
         delaunay_points=points_np,
     )
 
-    return points, simplices_padded, mappings
+    areas = barycentric_dual_area_from(
+        points,
+        simplices,
+        xp=np,
+    )
+
+    return points, simplices_padded, mappings, areas
 
 
 def jax_delaunay_matern(points, query_points):
     """JAX-path Matérn variant: qhull-only callback + JAX point location,
-    returning the same minimal (points, simplices_padded, mappings) contract
-    as ``scipy_delaunay_matern``."""
+    returning the same minimal (points, simplices_padded, mappings, areas)
+    contract as ``scipy_delaunay_matern``."""
     import jax.numpy as jnp
 
     simplices_padded, simplex_neighbors, vertex_simplex = _jax_delaunay_tables(points)
@@ -492,7 +525,9 @@ def jax_delaunay_matern(points, query_points):
         xp=jnp,
     )
 
-    return points, simplices_padded, mappings
+    areas = _dual_areas_padded_jnp(points, simplices_padded)
+
+    return points, simplices_padded, mappings, areas
 
 
 def triangle_area_xp(c0, c1, c2, xp):
@@ -589,14 +624,34 @@ def pixel_weights_delaunay_from(
 class DelaunayInterface:
 
     def __init__(
-        self, points, simplices, mappings, split_points, splitted_mappings, xp=np
+        self,
+        points,
+        simplices,
+        mappings,
+        split_points,
+        splitted_mappings,
+        xp=np,
+        dual_areas=None,
     ):
+        """
+        Parameters
+        ----------
+        dual_areas
+            The barycentric dual area of every mesh vertex (the sum of
+            ``triangle_area / 3`` over the triangles touching it), computed by
+            whichever Delaunay construction built this interface -- in-graph on
+            the JAX path, so it is safe to consume inside a ``jax.jit``.
+            ``None`` for interfaces built without them (e.g. the
+            natural-neighbour interface in ``sibson.py``), in which case the
+            mesh geometry falls back to a host-side computation.
+        """
 
         self.points = points
         self.simplices = simplices
         self.mappings = mappings
         self.split_points = split_points
         self.splitted_mappings = splitted_mappings
+        self.dual_areas = dual_areas
 
         self.xp = xp
 
@@ -653,6 +708,20 @@ class InterpolatorDelaunay(AbstractInterpolator):
             xp=xp,
         )
 
+    @property
+    def dual_areas(self):
+        """
+        The barycentric dual area of every mesh vertex, taken from the Delaunay
+        construction that already ran for the mappings -- so it is free here,
+        and on the JAX path it is an in-graph value safe to use inside a
+        ``jax.jit``.
+
+        Subclasses that build no Delaunay tables (the kNN interpolators)
+        override this with ``None``, which makes the mesh geometry compute the
+        dual areas host-side only if something actually asks for them.
+        """
+        return self.delaunay.dual_areas
+
     @cached_property
     def mesh_geometry(self):
 
@@ -664,6 +733,7 @@ class InterpolatorDelaunay(AbstractInterpolator):
             mesh=self.mesh,
             mesh_grid=self.mesh_grid,
             data_grid=self.data_grid,
+            dual_areas=self.dual_areas,
             xp=self._xp,
         )
 
@@ -700,7 +770,7 @@ class InterpolatorDelaunay(AbstractInterpolator):
 
                 import jax.numpy as jnp
 
-                points, simplices, mappings, split_points, splitted_mappings = (
+                points, simplices, mappings, split_points, splitted_mappings, areas = (
                     jax_delaunay(
                         points=self.mesh_grid_xy,
                         query_points=self.data_grid.over_sampled.array,
@@ -710,7 +780,7 @@ class InterpolatorDelaunay(AbstractInterpolator):
 
             else:
 
-                points, simplices, mappings, split_points, splitted_mappings = (
+                points, simplices, mappings, split_points, splitted_mappings, areas = (
                     scipy_delaunay(
                         points_np=self.mesh_grid_xy,
                         query_points_np=self.data_grid.over_sampled.array,
@@ -724,14 +794,14 @@ class InterpolatorDelaunay(AbstractInterpolator):
 
                 import jax.numpy as jnp
 
-                points, simplices, mappings = jax_delaunay_matern(
+                points, simplices, mappings, areas = jax_delaunay_matern(
                     points=self.mesh_grid_xy,
                     query_points=self.data_grid.over_sampled.array,
                 )
 
             else:
 
-                points, simplices, mappings = scipy_delaunay_matern(
+                points, simplices, mappings, areas = scipy_delaunay_matern(
                     points_np=self.mesh_grid_xy,
                     query_points_np=self.data_grid.over_sampled.array,
                 )
@@ -746,6 +816,7 @@ class InterpolatorDelaunay(AbstractInterpolator):
             split_points=split_points,
             splitted_mappings=splitted_mappings,
             xp=self._xp,
+            dual_areas=areas,
         )
 
     @property
