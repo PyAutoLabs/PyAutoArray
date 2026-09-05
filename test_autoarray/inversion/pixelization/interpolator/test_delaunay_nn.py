@@ -88,7 +88,7 @@ def test__smooth_source_mapping_is_numerically_close_to_delaunay():
     query_y, query_x = np.meshgrid(query_axis, query_axis, indexing="ij")
     query = np.stack([query_y.ravel(), query_x.ravel()], axis=1)
 
-    _, _, delaunay_mappings, _, _ = scipy_delaunay(points, query, areas_factor=0.5)
+    _, _, delaunay_mappings, _, _, _ = scipy_delaunay(points, query, areas_factor=0.5)
     delaunay_weights = pixel_weights_delaunay_from(
         data_grid=query,
         mesh_grid=points,

@@ -269,8 +269,20 @@ def _plot_rectangular(
 def _plot_delaunay(ax, pixel_values, mapper, norm, colormap, extent, is_subplot=False):
     """Render a Delaunay or KNN pixelization reconstruction onto *ax*.
 
-    Uses ``ax.tripcolor`` with Gouraud shading so that the reconstructed
-    flux is interpolated smoothly across the triangulated source-plane mesh.
+    Uses ``ax.tripcolor`` with its default *flat* shading: each triangle is
+    painted with the mean of its three vertex values. That is not the
+    piecewise-linear reconstruction pointwise, but its area-weighted integral
+    is identical to it by linearity -- the mean of the three vertices times the
+    triangle area is exactly the integral of the linear interpolant over that
+    triangle, which is the same sum the barycentric dual areas
+    (``mesh_geometry.areas_for_magnification``) accumulate per vertex.
+
+    The triangulation is taken from the mapper's own Delaunay tables
+    (``mapper.interpolator.delaunay.simplices``, with the ``-1`` padded rows
+    dropped) so the figure shows the mesh the inversion actually used rather
+    than a triangulation matplotlib re-derives. Mappers with no such tables
+    (kNN, mocks) fall back to matplotlib's own triangulation.
+
     A colorbar is attached after rendering.
 
     Parameters
@@ -316,7 +328,22 @@ def _plot_delaunay(ax, pixel_values, mapper, norm, colormap, extent, is_subplot=
     else:
         vals = pixel_values
 
-    tc = ax.tripcolor(x, y, vals, cmap=colormap, norm=norm)
+    # The mesh grid is (y,x) and tripcolor is given x=column 1, y=column 0; the
+    # simplices index the same points in the same order, so they pass through
+    # unchanged.
+    triangles = None
+
+    try:
+        simplices = np.asarray(mapper.interpolator.delaunay.simplices)
+        if simplices.ndim == 2 and simplices.shape[1] == 3:
+            triangles = simplices[simplices[:, 0] >= 0]
+    except AttributeError:
+        triangles = None
+
+    if triangles is not None and triangles.shape[0] > 0:
+        tc = ax.tripcolor(x, y, triangles, vals, cmap=colormap, norm=norm)
+    else:
+        tc = ax.tripcolor(x, y, vals, cmap=colormap, norm=norm)
     from autoarray.plot.utils import _apply_colorbar
 
     _apply_colorbar(tc, ax, is_subplot=is_subplot)
