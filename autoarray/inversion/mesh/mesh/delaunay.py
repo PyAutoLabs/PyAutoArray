@@ -64,52 +64,72 @@ class Delaunay(AbstractMesh):
           - prevent poorly constrained boundary vertices from absorbing flux,
           - reduce edge artefacts in the reconstructed source.
 
-        Zeroed pixels are always placed at the **end of the mesh parameter vector**
-        and are not solved for; their values are fixed to zero. Internally, the
-        inversion accounts for these excluded parameters when constructing and
-        solving the linear system.
+        Zeroed pixels are always the **last `zeroed_pixels` vertices of the
+        source-plane mesh grid** the mapper is built from — the ring
+        `append_with_circle_edge_points` appends to the image-plane mesh grid —
+        and are not solved for; their values are fixed to zero. The ring is
+        resolved against the grid actually handed to the mapper
+        (`zeroed_pixels_from`), so it does not depend on `pixels` agreeing with
+        that grid's length: passing the appended grid length, or the interior
+        count, zeroes the same vertices. Internally, the inversion accounts for
+        these excluded parameters when constructing and solving the linear system.
 
         Parameters
         ----------
         pixels : int
-            The number of active mesh vertices (linear parameters) used to represent
-            the source reconstruction.
+            The number of interior (active) mesh vertices, i.e. the number of
+            points drawn by the image mesh before any edge ring is appended. The
+            linear parameter count of a fit is set by the mesh grid the mapper
+            receives, so this is a description of the mesh rather than a control;
+            `total_pixels` adds the zeroed ring back on.
         areas_factor : float, optional
             The barycentric area of Delaunay triangles is used to weight the regularization matrix.
             This factor scales these areas, allowing for tuning of the regularization strength
             based on triangle size.
         zeroed_pixels : int, optional
             The number of edge mesh vertices to exclude from the inversion. These
-            are appended to the end of the mesh and fixed to zero.
+            are the last `zeroed_pixels` points of the mesh grid and are fixed to zero.
         """
-
-        pixels = int(pixels) + zeroed_pixels
 
         super().__init__()
-        self.pixels = pixels
+        self.pixels = int(pixels)
         self.areas_factor = areas_factor
-        self._zeroed_pixels = zeroed_pixels
+        self.zeroed_pixels = int(zeroed_pixels or 0)
 
     @property
-    def zeroed_pixels(self):
+    def total_pixels(self) -> int:
         """
-        Return the **positive** mesh-local pixel indices to zero for a Delaunay mesh.
+        The interior vertex count plus the zeroed edge ring — the length the mesh grid
+        is expected to have once `append_with_circle_edge_points` has run.
+        """
+        return self.pixels + self.zeroed_pixels
 
-        For Delaunay meshes, `self.zeroed_pixels` is interpreted as a *count* of pixels
-        to be zeroed at the end of the pixel block. For example:
-            self.pixels = 780, self.zeroed_pixels = 30
-        returns indices 750..779.
+    def zeroed_pixels_from(self, pixels: int) -> np.ndarray:
+        """
+        Return the **positive** mesh-local indices to zero for a mesh grid of `pixels`
+        vertices: the last `self.zeroed_pixels` of them.
+
+        `pixels` is the mapper's real parameter count (`Mapper.params`, the length of
+        its source-plane mesh grid), not `self.pixels`, so the ring is the appended
+        edge points whatever count the mesh was constructed with. For example a grid of
+        780 points and `zeroed_pixels = 30` gives indices 750..779.
+
+        Parameters
+        ----------
+        pixels
+            The number of vertices in the mesh grid the mapper was built from.
 
         Returns
         -------
         np.ndarray
             1D array of positive pixel indices to zero.
         """
-        if self._zeroed_pixels <= 0:
+        if self.zeroed_pixels <= 0:
             return np.array([], dtype=int)
 
-        start = self.pixels - self._zeroed_pixels
-        return np.arange(start, self.pixels, dtype=int)
+        pixels = int(pixels)
+
+        return np.arange(pixels - self.zeroed_pixels, pixels, dtype=int)
 
     @property
     def skip_areas(self):

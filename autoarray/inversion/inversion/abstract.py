@@ -418,19 +418,28 @@ class AbstractInversion:
         - The concatenated pixel blocks occupy the **final** entries of the parameter
           vector, with total length:
 
-              total_pixels = sum(mapper.mesh.pixels for mapper in mappers)
+              total_pixels = sum(mapper.params for mapper in mappers)
+
+          `mapper.params` is the length of the mapper's source-plane mesh grid — the
+          real size of its block. It is deliberately *not* `mapper.mesh.pixels`: a
+          `Delaunay` mesh's `pixels` is a description the caller supplied and can
+          disagree with the grid (every workspace script passed the appended grid
+          length until 2026-09), and offsetting by it mis-places every mapper's ring
+          but the last one's.
 
         ---------------------------------------------------------------------------
         Zeroed pixel convention
         ---------------------------------------------------------------------------
         For each mapper:
 
-        - `mapper.mesh.zeroed_pixels` must be a 1D array of **positive, mesh-local**
-          pixel indices in the range `[0, mapper.mesh.pixels - 1]`.
+        - `mapper.zeroed_pixels` is a 1D array of **positive, mesh-local** pixel
+          indices in the range `[0, mapper.params - 1]`, resolved by the mesh against
+          `mapper.params` (`AbstractMesh.zeroed_pixels_from`).
         - These indices identify pixels that should be **excluded** from the linear
           solve (e.g. edge pixels, masked regions, or padding pixels).
         - Indexing is defined purely within the mapper’s own pixelization (e.g.
-          row-major flattening for rectangular meshes).
+          row-major flattening for rectangular meshes, the last `zeroed_pixels`
+          vertices for a Delaunay mesh with an appended edge ring).
 
         This method converts all mesh-local zeroed pixel indices into **global
         parameter indices**, correctly offsetting for:
@@ -461,21 +470,25 @@ class AbstractInversion:
 
         n_total = int(self.total_params)
 
-        pixels_per_mapper = [int(m.mesh.pixels) for m in mapper_list]
+        # The real size of each mapper's block: the length of its mesh grid, never
+        # `mesh.pixels` (see the docstring).
+        pixels_per_mapper = [int(m.params) for m in mapper_list]
         total_pixels = int(sum(pixels_per_mapper))
 
         # Global start index of concatenated pixel block
         pixel_start = n_total - total_pixels
 
+        zeros_local_list = [m.zeroed_pixels for m in mapper_list]
+
         # Total number of zeroed pixels across all mappers (Python int => static)
-        total_zeroed = int(sum(len(m.mesh.zeroed_pixels) for m in mapper_list))
+        total_zeroed = int(sum(len(zeros_local) for zeros_local in zeros_local_list))
         n_keep = int(n_total - total_zeroed)
 
         # Build global indices-to-zero across all mappers
         zeros_global_list = []
         offset = 0
-        for m, n_pix in zip(mapper_list, pixels_per_mapper):
-            zeros_local = self._xp.asarray(m.mesh.zeroed_pixels, dtype=self._xp.int32)
+        for zeros_local, n_pix in zip(zeros_local_list, pixels_per_mapper):
+            zeros_local = self._xp.asarray(zeros_local, dtype=self._xp.int32)
             zeros_global_list.append(pixel_start + offset + zeros_local)
             offset += n_pix
 
