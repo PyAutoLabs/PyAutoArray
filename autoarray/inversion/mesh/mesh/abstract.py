@@ -25,6 +25,34 @@ class AbstractMesh:
     def __eq__(self, other):
         return self.__dict__ == other.__dict__ and self.__class__ is other.__class__
 
+    def zeroed_pixels_from(self, pixels: int) -> np.ndarray:
+        """
+        Return the **positive** mesh-local indices of the pixels the inversion holds at
+        zero, for a mapper whose parameter block is `pixels` long.
+
+        Meshes that know their edge pixels from their own geometry (the rectangular
+        family) expose them as a `zeroed_pixels` index array and ignore `pixels`; a
+        mesh that zeroes a *count* of appended edge vertices (`Delaunay`) overrides this
+        to resolve that count against `pixels`. A mesh with neither zeroes nothing.
+
+        Parameters
+        ----------
+        pixels
+            The number of linear parameters the mapper built from this mesh has, i.e.
+            the length of its source-plane mesh grid.
+
+        Returns
+        -------
+        np.ndarray
+            1D array of positive mesh-local pixel indices to zero (possibly empty).
+        """
+        zeroed_pixels = getattr(self, "zeroed_pixels", None)
+
+        if zeroed_pixels is None:
+            return np.array([], dtype=int)
+
+        return np.asarray(zeroed_pixels, dtype=int)
+
     def relocated_grid_from(
         self, border_relocator: BorderRelocator, source_plane_data_grid: Grid2D, xp=np
     ) -> Grid2D:

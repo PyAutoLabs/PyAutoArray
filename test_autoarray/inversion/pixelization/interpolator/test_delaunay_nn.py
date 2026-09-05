@@ -18,8 +18,10 @@ def test__mesh_is_public_and_selects_natural_neighbor_interpolator():
         areas_factor=0.4,
     )
 
-    assert mesh.pixels == 108
-    np.testing.assert_array_equal(mesh.zeroed_pixels, np.arange(100, 108))
+    assert mesh.pixels == 100
+    assert mesh.zeroed_pixels == 8
+    assert mesh.total_pixels == 108
+    np.testing.assert_array_equal(mesh.zeroed_pixels_from(pixels=108), np.arange(100, 108))
     assert mesh.areas_factor == 0.4
     assert mesh.max_cavity_triangles == 32
     assert mesh.max_neighbors == 32

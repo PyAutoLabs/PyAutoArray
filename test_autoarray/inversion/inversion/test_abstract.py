@@ -1194,3 +1194,63 @@ def test__mappings_from__pairs_each_clump_with_its_image_regions(
         assert len(mapping.source_contours) == mapping.pix_indexes.shape[0]
         assert len(mapping.image_regions) > 0
         assert len(mapping.source_centre) == 2
+
+
+def _delaunay_mapper(pixels, grid_length, zeroed_pixels=5):
+    """
+    A `MockMapper` over a Delaunay mesh whose grid is `grid_length` points long, the
+    last `zeroed_pixels` of them the appended edge ring. `pixels` is whatever the
+    caller told the mesh — the interior count, or (the pre-2026-09 workspace form)
+    the appended grid length.
+    """
+    return aa.m.MockMapper(
+        mesh=aa.mesh.Delaunay(pixels=pixels, zeroed_pixels=zeroed_pixels),
+        parameters=grid_length,
+        regularization=aa.reg.Constant(),
+    )
+
+
+def _zeroed_ids(linear_obj_list):
+    inversion = aa.m.MockInversion(
+        linear_obj_list=linear_obj_list,
+        settings=aa.Settings(use_positive_only_solver=True, use_edge_zeroed_pixels=True),
+    )
+    n_total = sum(linear_obj.params for linear_obj in linear_obj_list)
+    return sorted(set(range(n_total)) - set(inversion.zeroed_ids_to_keep.tolist()))
+
+
+def test__zeroed_ids_to_keep__delaunay__ring_is_the_last_vertices_of_the_grid():
+    """
+    One mapper over a 25-point grid (20 interior + 5 ring): the ring is zeroed whether
+    the mesh was told `pixels=20` or `pixels=25`, with or without linear light profile
+    parameters ahead of the mesh block.
+    """
+    for pixels in (20, 25):
+        assert _zeroed_ids([_delaunay_mapper(pixels, 25)]) == [20, 21, 22, 23, 24]
+
+        light = aa.m.MockLinearObj(parameters=2, regularization=None)
+
+        assert _zeroed_ids([light, _delaunay_mapper(pixels, 25)]) == [22, 23, 24, 25, 26]
+
+
+def test__zeroed_ids_to_keep__two_delaunay_mappers__every_ring_zeroed():
+    """
+    Two mappers, each over a 25-point grid: both rings ([20..24] and [45..49]) are
+    zeroed under both call forms. Before the fix the first mapper's block was offset by
+    `mesh.pixels` rather than its real size, so `pixels=25` zeroed [15..19] — five
+    interior vertices — and left its ring live.
+    """
+    expected = [20, 21, 22, 23, 24, 45, 46, 47, 48, 49]
+
+    for pixels in (20, 25):
+        assert _zeroed_ids([_delaunay_mapper(pixels, 25), _delaunay_mapper(pixels, 25)]) == expected
+
+    assert _zeroed_ids([_delaunay_mapper(20, 25), _delaunay_mapper(25, 25)]) == expected
+
+
+def test__zeroed_ids_to_keep__delaunay_without_ring__nothing_zeroed():
+    mapper = aa.m.MockMapper(
+        mesh=aa.mesh.Delaunay(pixels=9), parameters=9, regularization=aa.reg.Constant()
+    )
+
+    assert _zeroed_ids([mapper]) == []

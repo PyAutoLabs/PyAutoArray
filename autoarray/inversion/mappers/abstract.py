@@ -105,6 +105,20 @@ class Mapper(LinearObj):
         return self.params
 
     @property
+    def zeroed_pixels(self) -> np.ndarray:
+        """
+        The **positive, mesh-local** indices of this mapper's parameters that the
+        inversion holds at zero (the edge pixels), resolved against the mapper's real
+        parameter count `params` rather than anything the mesh was constructed with.
+
+        This is the only way the inversion should read a mesh's zeroed pixels: for a
+        `Delaunay` mesh the zeroed ring is the last `mesh.zeroed_pixels` points of the
+        source-plane mesh grid, which is well defined even when `mesh.pixels` does not
+        match that grid's length.
+        """
+        return self.mesh.zeroed_pixels_from(pixels=self.params)
+
+    @property
     def mask(self):
         return self.source_plane_data_grid.mask
 
