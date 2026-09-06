@@ -294,3 +294,58 @@ def test__different_interferometer_without_mock_objects__customize_constructor_i
     assert (dataset.data == 1.0 + 1.0j * np.ones((19,))).all()
     assert (dataset.noise_map == 2.0 + 2.0j * np.ones((19,))).all()
     assert (dataset.uv_wavelengths == 3.0 * np.ones((19, 2))).all()
+
+
+def test__apply_sparse_operator__disable_jax_overrides_an_explicit_use_jax(
+    monkeypatch, mask_2d_7x7
+):
+    # `PYAUTO_DISABLE_JAX=1` is a harness-level override, not a preference: it is
+    # the documented way to force the NumPy path and the smoke profiles set it so
+    # a fast run does not pay a JIT compile (2.3-3.2 s per interferometer script).
+    # A script demonstrating the production path says `use_jax=True`, and that
+    # must not defeat the harness.
+    n_visibilities = 5
+    rng = np.random.default_rng(seed=0)
+    data = aa.Visibilities(
+        visibilities=rng.normal(size=(n_visibilities, 2)).astype(np.float64)
+    )
+    noise_map = aa.VisibilitiesNoiseMap(
+        visibilities=np.ones((n_visibilities, 2), dtype=np.float64)
+    )
+    uv_wavelengths = rng.normal(size=(n_visibilities, 2)).astype(np.float64)
+
+    recorded = []
+    original = aa.Interferometer.psf_precision_operator_from
+
+    def spy(self, *args, use_jax=False, **kwargs):
+        recorded.append(use_jax)
+        # Always compute on the NumPy path, so the assertion is about the flag
+        # that arrives here and never about whether JAX is installed.
+        return original(self, *args, use_jax=False, **kwargs)
+
+    monkeypatch.setattr(aa.Interferometer, "psf_precision_operator_from", spy)
+
+    def dataset():
+        return aa.Interferometer(
+            data=data,
+            noise_map=noise_map,
+            uv_wavelengths=uv_wavelengths,
+            real_space_mask=mask_2d_7x7,
+            transformer_class=transformer.TransformerDFT,
+        )
+
+    monkeypatch.setenv("PYAUTO_DISABLE_JAX", "1")
+    dataset().apply_sparse_operator(use_jax=True)
+
+    assert recorded == [False]
+
+    # Every other value of the variable, and its absence, leave the caller's
+    # choice alone -- the predicate compares against the exact string "1".
+    for value in ["0", "true", "True"]:
+        monkeypatch.setenv("PYAUTO_DISABLE_JAX", value)
+        dataset().apply_sparse_operator(use_jax=True)
+
+    monkeypatch.delenv("PYAUTO_DISABLE_JAX", raising=False)
+    dataset().apply_sparse_operator(use_jax=True)
+
+    assert recorded == [False, True, True, True, True]

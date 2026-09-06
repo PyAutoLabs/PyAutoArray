@@ -10,6 +10,7 @@ class RectangularBilinearAdaptDensity(RectangularRTUAdaptDensity):
     def __init__(
         self,
         shape: Tuple[int, int] = (3, 3),
+        respect_small_datasets: bool = True,
     ):
         """
         A rectangular mesh of pixels used to reconstruct a source on a regular
@@ -71,7 +72,9 @@ class RectangularBilinearAdaptDensity(RectangularRTUAdaptDensity):
             If either dimension is less than 3, as a minimum of 3×3 pixels
             is required to define interior and boundary structure.
         """
-        super().__init__(shape=shape)
+        super().__init__(
+            shape=shape, respect_small_datasets=respect_small_datasets
+        )
 
     @property
     def interpolator_kwargs(self) -> dict:

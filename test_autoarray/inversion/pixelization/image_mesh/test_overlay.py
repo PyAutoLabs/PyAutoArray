@@ -503,3 +503,22 @@ def test__image_plane_mesh_grid_from__offset_mask__origin_shift_corrects():
             ]
         )
     ).all()
+
+
+def test__small_datasets__overlay_shape_is_capped_per_axis(monkeypatch):
+    # The image mesh is capped for the same reason as the pixelization mesh: the
+    # data it is overlaid on is 16x16 under PYAUTO_SMALL_DATASETS=1.
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
+
+    assert aa.image_mesh.Overlay(shape=(50, 40)).shape == (16, 16)
+    assert aa.image_mesh.Overlay(shape=(8, 30)).shape == (8, 16)
+    assert (
+        aa.image_mesh.Overlay(shape=(50, 40), respect_small_datasets=False).shape
+        == (50, 40)
+    )
+
+
+def test__small_datasets_unset__overlay_shape_is_untouched(monkeypatch):
+    monkeypatch.delenv("PYAUTO_SMALL_DATASETS", raising=False)
+
+    assert aa.image_mesh.Overlay(shape=(50, 40)).shape == (50, 40)

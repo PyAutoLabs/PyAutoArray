@@ -314,3 +314,56 @@ def test__bilinear__split_regularization_not_supported():
         ).supports_split_regularization
         is False
     )
+
+
+def test__small_datasets__mesh_shape_is_capped_per_axis(monkeypatch):
+    # `Grid2D.uniform` and `Mask2D.circular` cap the DATA to 16x16 under
+    # PYAUTO_SMALL_DATASETS=1 while a pixelization's `shape=` did not, so a
+    # capped run reconstructed 1600-2500 source pixels from ~80 image pixels --
+    # an inversion far larger than the data it fits.
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
+
+    for cls in [
+        aa.mesh.RectangularUniform,
+        aa.mesh.RectangularRTUAdaptDensity,
+        aa.mesh.RectangularRTUAdaptImage,
+        aa.mesh.RectangularBilinearAdaptDensity,
+        aa.mesh.RectangularBilinearAdaptImage,
+    ]:
+        mesh = cls(shape=(50, 40))
+
+        assert mesh.shape == (16, 16)
+        assert mesh.pixels == 16 * 16
+
+        # Per axis with `min`, never rewritten to the cap: a mesh already
+        # smaller than the cap is a mesh the script chose.
+        assert cls(shape=(8, 30)).shape == (8, 16)
+
+        # The escape hatch, for a mesh whose resolution is load-bearing.
+        assert cls(shape=(50, 40), respect_small_datasets=False).shape == (50, 40)
+
+
+def test__small_datasets_unset__mesh_shape_is_untouched(monkeypatch):
+    monkeypatch.delenv("PYAUTO_SMALL_DATASETS", raising=False)
+
+    for cls in [
+        aa.mesh.RectangularUniform,
+        aa.mesh.RectangularRTUAdaptDensity,
+        aa.mesh.RectangularRTUAdaptImage,
+        aa.mesh.RectangularBilinearAdaptDensity,
+        aa.mesh.RectangularBilinearAdaptImage,
+    ]:
+        mesh = cls(shape=(50, 40))
+
+        assert mesh.shape == (50, 40)
+        assert mesh.pixels == 50 * 40
+
+
+def test__small_datasets__cap_still_respects_the_3x3_minimum(monkeypatch):
+    # The cap only ever shrinks, and the mesh's own floor still applies to what
+    # the caller asked for -- a capped run must not turn a 2x2 request into a
+    # silently valid mesh.
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
+
+    with pytest.raises(aa.exc.MeshException):
+        aa.mesh.RectangularUniform(shape=(2, 2))

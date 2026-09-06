@@ -8,6 +8,7 @@ from autoarray.settings import Settings
 
 from autoarray.geometry import geometry_util
 from autoarray.structures.grids import grid_2d_util
+from autoarray.util.dataset_util import cap_mesh_shape_for_small_datasets
 from autoarray import numba_util
 
 
@@ -158,7 +159,7 @@ def overlay_via_unmasked_overlaid_from(
 
 
 class Overlay(AbstractImageMesh):
-    def __init__(self, shape=(3, 3)):
+    def __init__(self, shape=(3, 3), respect_small_datasets: bool = True):
         """
         Computes an image-mesh by overlaying a uniform grid of (y,x) coordinates over the masked image that the
         pixelization is fitting.
@@ -176,9 +177,17 @@ class Overlay(AbstractImageMesh):
         ----------
         shape
             The 2D shape of the grid which is overlaid over the grid to determine the image mesh.
+        respect_small_datasets
+            When `PYAUTO_SMALL_DATASETS=1` is set, `shape` is capped per axis to the small-datasets
+            cap, matching the cap `Grid2D.uniform` and `Mask2D.circular` apply to the data. Pass
+            `False` to opt out for an image mesh whose resolution is load-bearing for the script.
         """
 
         super().__init__()
+
+        shape = cap_mesh_shape_for_small_datasets(
+            shape, respect_small_datasets=respect_small_datasets
+        )
 
         self.shape = (int(shape[0]), int(shape[1]))
 

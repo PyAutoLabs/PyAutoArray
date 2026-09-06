@@ -15,6 +15,7 @@ class RectangularRTUAdaptImage(RectangularRTUAdaptDensity):
         weight_floor: float = 0.0,
         bandwidth: Optional[float] = None,
         n_knots: Optional[int] = None,
+        respect_small_datasets: bool = True,
     ):
         """
         A uniform rectangular mesh of pixels used to reconstruct a source on a
@@ -82,7 +83,12 @@ class RectangularRTUAdaptImage(RectangularRTUAdaptDensity):
             the kernel default.
         """
 
-        super().__init__(shape=shape, bandwidth=bandwidth, n_knots=n_knots)
+        super().__init__(
+            shape=shape,
+            bandwidth=bandwidth,
+            n_knots=n_knots,
+            respect_small_datasets=respect_small_datasets,
+        )
 
         self.weight_power = weight_power
         self.weight_floor = weight_floor
