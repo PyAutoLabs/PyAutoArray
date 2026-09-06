@@ -12,6 +12,7 @@ class RectangularBilinearAdaptImage(RectangularRTUAdaptImage):
         shape: Tuple[int, int] = (3, 3),
         weight_power: float = 1.0,
         weight_floor: float = 0.0,
+        respect_small_datasets: bool = True,
     ):
         """
         A rectangular mesh of pixels used to reconstruct a source on a regular
@@ -69,6 +70,7 @@ class RectangularBilinearAdaptImage(RectangularRTUAdaptImage):
             shape=shape,
             weight_power=weight_power,
             weight_floor=weight_floor,
+            respect_small_datasets=respect_small_datasets,
         )
 
     @property

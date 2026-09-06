@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 import autoarray as aa
 
@@ -114,7 +115,11 @@ from autoarray.util.dataset_util import (
     _small_datasets_stamp_on_disk,
     _stamp_contradicted_by_shape,
     _is_capped_at_the_current_cap,
+    _capped_data_paths,
+    _shape_card_in_file,
+    _small_datasets_shape_on_disk,
     SMALL_DATASETS_HEADER_KEY,
+    SMALL_DATASETS_SHAPE_HEADER_KEY,
 )
 
 def _set_stamp(file_path, stamp):
@@ -245,16 +250,18 @@ def test__small_regime__full_resolution_dataset__is_regenerated(monkeypatch, tmp
     assert not dataset_path.exists()
 
 
-def test__small_regime__interferometer_dataset__is_always_regenerated(
+def test__small_regime__interferometer_dataset__without_a_cap_card__is_regenerated(
     monkeypatch, tmp_path
 ):
-    # Deliberate and conservative. An interferometer data.fits is
-    # (n_visibilities, 2) -- its shape is fixed by the committed uv file and does
-    # not change under the cap -- so shape cannot corroborate its stamp. Rather
-    # than trust the stamp alone for precisely the family whose corruption is
-    # invisible, this family keeps regenerating every run, as before.
+    # An interferometer data.fits is (n_visibilities, 2) -- its shape is fixed by
+    # the committed uv file and does not change under the cap -- so shape cannot
+    # corroborate its stamp. Without a cap card there is nothing else to consult,
+    # so this family regenerates every run, as it always did. (With one it does
+    # not: see `test__cap_card__interferometer_dataset__is_kept_instead_of_resimulated`,
+    # which is the behaviour PyAutoArray#528 changes.)
     monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
     dataset_path = _write_dataset(tmp_path / "dataset", (360, 2), stamp=True)
+    _set_shape_card(dataset_path / "data.fits", None)
 
     assert _small_datasets_stamp_on_disk(str(dataset_path)) is True
     assert should_simulate(str(dataset_path)) is True
@@ -546,3 +553,307 @@ def test__contradiction_guard__unknown_shape_does_not_block_a_deletion(
 
     missing = tmp_path / "gone"
     assert _stamp_contradicted_by_shape(str(missing)) is False
+
+
+def _set_shape_card(file_path, value):
+    """
+    Force the ``SMALLSHP`` cap card on an already-written FITS file.
+
+    Forced for exactly the reason :func:`_set_stamp` documents for ``SMALLDAT``:
+    the card is written by PyAutoNerves, this suite owns the *reader*, and a
+    test that leaned on the writer would pass through the shape fallback in any
+    environment resolving autonerves from PyPI rather than exercising the card.
+
+    ``value=None`` strips the card, producing a file byte-equivalent to one
+    written before it existed -- which is what keeps the fallback exercised.
+    """
+    from astropy.io import fits
+
+    with fits.open(file_path, mode="update") as hdu_list:
+        for hdu in hdu_list:
+            if value is None:
+                hdu.header.pop(SMALL_DATASETS_SHAPE_HEADER_KEY, None)
+            else:
+                hdu.header[SMALL_DATASETS_SHAPE_HEADER_KEY] = value
+
+
+def _write_fits(file_path, shape, stamp=True, shape_card="16x16"):
+    """
+    Write a single FITS file with the two provenance cards forced onto it.
+    """
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+
+    aa.output_to_fits(
+        values=np.ones(shape), file_path=str(file_path), overwrite=True
+    )
+
+    _set_stamp(file_path, stamp)
+    _set_shape_card(file_path, shape_card)
+
+    return file_path
+
+
+def test__cap_card__interferometer_dataset__is_kept_instead_of_resimulated(
+    monkeypatch, tmp_path
+):
+    # THE FIX. Interferometer data.fits is (n_visibilities, 2), a shape the cap
+    # does not change, so it could never corroborate its own stamp and was
+    # deleted and re-simulated on EVERY run. The cap card states the
+    # proposition directly, so no corroboration is needed.
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
+
+    dataset_path = tmp_path / "dataset"
+    _write_fits(dataset_path / "data.fits", (360, 2))
+
+    assert _small_datasets_shape_on_disk(str(dataset_path)) == (16, 16)
+    assert _is_capped_at_the_current_cap(str(dataset_path)) is True
+
+    assert should_simulate(str(dataset_path)) is False
+    assert (dataset_path / "data.fits").exists()
+
+
+def test__cap_card__at_a_DIFFERENT_cap__is_still_regenerated(monkeypatch, tmp_path):
+    # The safety property PyAutoArray#471 / PyAutoNerves#153 established, now
+    # carried by the card rather than by shape: a dataset written under a
+    # DIFFERENT cap is stale and must still be deleted, even though its stamp
+    # says T and its shape happens to match today's cap.
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
+
+    dataset_path = tmp_path / "dataset"
+    _write_fits(
+        dataset_path / "data.fits", SMALL_DATASETS_SHAPE_NATIVE, shape_card="32x32"
+    )
+
+    assert _is_capped_at_the_current_cap(str(dataset_path)) is False
+
+    assert should_simulate(str(dataset_path)) is True
+    assert not dataset_path.exists()
+
+
+def test__cap_card__absent__is_exactly_todays_behaviour(monkeypatch, tmp_path):
+    # Every file written before the card existed has none, so its absence must
+    # leave the shape heuristic in charge -- not be read as "capped".
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
+
+    at_cap = tmp_path / "at_cap"
+    _write_fits(at_cap / "data.fits", SMALL_DATASETS_SHAPE_NATIVE, shape_card=None)
+    assert _small_datasets_shape_on_disk(str(at_cap)) is None
+    assert _is_capped_at_the_current_cap(str(at_cap)) is True
+
+    interferometer = tmp_path / "interferometer"
+    _write_fits(interferometer / "data.fits", (360, 2), shape_card=None)
+    assert _is_capped_at_the_current_cap(str(interferometer)) is False
+
+
+def test__cap_card__malformed__is_unknown_and_falls_back(monkeypatch, tmp_path):
+    # A card this code did not write is not a card it can trust. Unknown falls
+    # back to the shape heuristic; it is never coerced into a cap.
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
+
+    for card in ["16", "sixteen x sixteen", "16x", "", True]:
+        dataset_path = tmp_path / f"dataset_{str(card)[:6]}"
+        _write_fits(
+            dataset_path / "data.fits", SMALL_DATASETS_SHAPE_NATIVE, shape_card=card
+        )
+
+        assert _shape_card_in_file(dataset_path / "data.fits") is None
+
+        # Falls back: the shape IS at the cap, so this is kept exactly as it was
+        # before the card existed.
+        assert _is_capped_at_the_current_cap(str(dataset_path)) is True
+
+
+def test__cap_card__unstamped_file__is_regenerated_however_the_card_reads(
+    monkeypatch, tmp_path
+):
+    # The cap card refines the second half of the predicate; it does not replace
+    # the first. A file with no SMALLDAT stamp is still unknown, and unknown is
+    # still not "capped".
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
+
+    dataset_path = tmp_path / "dataset"
+    _write_fits(dataset_path / "data.fits", (360, 2), stamp=None)
+
+    assert _is_capped_at_the_current_cap(str(dataset_path)) is False
+    assert should_simulate(str(dataset_path)) is True
+
+
+def test__multi_dataset__prefixed_fits__are_resolved_and_kept(monkeypatch, tmp_path):
+    # multi_dataset prefixes every file with its waveband, so there is no
+    # `data.fits` at all and the dataset got no verdict -- deleted and
+    # re-simulated on every run.
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
+
+    dataset_path = tmp_path / "dataset"
+    _write_fits(dataset_path / "g_data.fits", (16, 16))
+    _write_fits(dataset_path / "r_data.fits", (16, 16))
+    _write_fits(dataset_path / "g_psf.fits", (11, 11), stamp=None, shape_card=None)
+
+    assert [path.name for path in _capped_data_paths(str(dataset_path))] == [
+        "g_data.fits",
+        "r_data.fits",
+    ]
+    assert _is_capped_at_the_current_cap(str(dataset_path)) is True
+
+    assert should_simulate(str(dataset_path)) is False
+    assert (dataset_path / "g_data.fits").exists()
+
+
+def test__multi_dataset__one_waveband_disagrees__whole_dataset_is_regenerated(
+    monkeypatch, tmp_path
+):
+    # Every resolved file must agree. A dataset half-written under a different
+    # cap is stale as a whole, and a per-file verdict would reuse the half that
+    # happens to match.
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
+
+    dataset_path = tmp_path / "dataset"
+    _write_fits(dataset_path / "g_data.fits", (16, 16))
+    _write_fits(dataset_path / "r_data.fits", (16, 16), shape_card="32x32")
+
+    assert _is_capped_at_the_current_cap(str(dataset_path)) is False
+    assert should_simulate(str(dataset_path)) is True
+
+
+def test__datacube__channel_fits__are_resolved_and_kept(monkeypatch, tmp_path):
+    # Datacubes nest one dataset per channel, so the same "no verdict" applied.
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
+
+    dataset_path = tmp_path / "dataset"
+    _write_fits(dataset_path / "channel_000" / "data.fits", (360, 2))
+    _write_fits(dataset_path / "channel_001" / "data.fits", (360, 2))
+
+    assert [path.parent.name for path in _capped_data_paths(str(dataset_path))] == [
+        "channel_000",
+        "channel_001",
+    ]
+    assert _is_capped_at_the_current_cap(str(dataset_path)) is True
+    assert should_simulate(str(dataset_path)) is False
+
+
+def test__path_resolution__top_level_data_fits_wins_and_psf_is_never_resolved(
+    tmp_path,
+):
+    # The resolution is by exact suffix at two known levels, never a `*.fits`
+    # glob: the trap recorded in autolens_workspace_test#260 was a widened match
+    # reaching `psf.fits`, which is legitimately tiny at full resolution.
+    dataset_path = tmp_path / "dataset"
+    _write_fits(dataset_path / "data.fits", (16, 16))
+    _write_fits(dataset_path / "g_data.fits", (16, 16))
+    _write_fits(dataset_path / "psf.fits", (11, 11))
+    _write_fits(dataset_path / "channel_000" / "data.fits", (16, 16))
+
+    assert [path.name for path in _capped_data_paths(str(dataset_path))] == [
+        "data.fits"
+    ]
+
+    psf_only = tmp_path / "psf_only"
+    _write_fits(psf_only / "psf.fits", (11, 11))
+    assert _capped_data_paths(str(psf_only)) == []
+
+    json_only = tmp_path / "json_only"
+    json_only.mkdir()
+    (json_only / "dataset.json").write_text(json.dumps({"a": 1}))
+    assert _capped_data_paths(str(json_only)) == []
+
+
+def test__safety_property__the_cap_card_only_spares__and_only_at_todays_cap(
+    monkeypatch, tmp_path
+):
+    # The property stated as a test rather than as prose, over every combination
+    # of shape, stamp and card:
+    #
+    #  - a KEEP requires the stamp, a shape that does not contradict the cap,
+    #    and either a card reading exactly today's cap or no card and a shape
+    #    measuring exactly today's cap;
+    #  - a dataset the shape-only rule kept is still kept, unless its card names
+    #    a different cap -- the one case where the card condemns, which is the
+    #    stale-dataset case it exists to catch;
+    #  - a card naming a different cap never keeps.
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
+
+    shapes = [SMALL_DATASETS_SHAPE_NATIVE, (360, 2), (150, 150)]
+    stamps = [True, False, None]
+    cards = ["16x16", "32x32", None, "not-a-shape"]
+
+    for index, shape in enumerate(shapes):
+        for stamp in stamps:
+            for card in cards:
+                dataset_path = tmp_path / f"dataset_{index}_{stamp}_{card}"
+                _write_fits(
+                    dataset_path / "data.fits",
+                    shape,
+                    stamp=stamp,
+                    shape_card=card,
+                )
+
+                kept = _is_capped_at_the_current_cap(str(dataset_path))
+
+                recorded = _small_datasets_shape_on_disk(str(dataset_path))
+                stamped = _small_datasets_stamp_on_disk(str(dataset_path)) is True
+                contradicted = _stamp_contradicted_by_shape(str(dataset_path))
+                measured_at_the_cap = _is_small_datasets_on_disk(str(dataset_path))
+
+                if kept:
+                    assert stamped
+                    assert not contradicted
+                    assert (
+                        recorded == SMALL_DATASETS_SHAPE_NATIVE
+                        if recorded is not None
+                        else measured_at_the_cap
+                    )
+
+                # The shape-only rule as it stood before the cap card.
+                if stamped and measured_at_the_cap:
+                    assert kept is (
+                        recorded is None or recorded == SMALL_DATASETS_SHAPE_NATIVE
+                    )
+
+                if recorded is not None and recorded != SMALL_DATASETS_SHAPE_NATIVE:
+                    assert kept is False
+
+
+def test__cap_card_constants__agree_with_the_writer_in_autonerves():
+    # The literal is duplicated on purpose (see the module docstring against
+    # SMALL_DATASETS_HEADER_KEY); this is the drift guard the duplication needs,
+    # which only a repo that can see both constants can provide. Skipped on an
+    # autonerves too old to carry them, which is the case the literal exists for.
+    autonerves_test_mode = pytest.importorskip("autonerves.test_mode")
+    autonerves_fitsable = pytest.importorskip("autonerves.fitsable")
+
+    if not hasattr(autonerves_fitsable, "SMALL_DATASETS_SHAPE_HEADER_KEY"):
+        pytest.skip("autonerves on this path predates the cap card")
+
+    assert (
+        SMALL_DATASETS_SHAPE_HEADER_KEY
+        == autonerves_fitsable.SMALL_DATASETS_SHAPE_HEADER_KEY
+    )
+    assert (
+        SMALL_DATASETS_SHAPE_NATIVE
+        == autonerves_test_mode.SMALL_DATASETS_SHAPE_NATIVE
+    )
+
+
+def test__cap_card__written_by_the_stack_is_read_back(monkeypatch, tmp_path):
+    # End to end through the real writer rather than the forced cards above, so
+    # the reader is pinned to what `aa.output_to_fits` actually emits under the
+    # capped regime whenever the installed autonerves is new enough to emit it.
+    autonerves_fitsable = pytest.importorskip("autonerves.fitsable")
+
+    if not hasattr(autonerves_fitsable, "SMALL_DATASETS_SHAPE_HEADER_KEY"):
+        pytest.skip("autonerves on this path predates the cap card")
+
+    monkeypatch.setenv("PYAUTO_SMALL_DATASETS", "1")
+
+    dataset_path = tmp_path / "dataset"
+    dataset_path.mkdir()
+    aa.output_to_fits(
+        values=np.ones((360, 2)),
+        file_path=str(dataset_path / "data.fits"),
+        overwrite=True,
+    )
+
+    assert _small_datasets_shape_on_disk(str(dataset_path)) == (
+        SMALL_DATASETS_SHAPE_NATIVE
+    )
+    assert should_simulate(str(dataset_path)) is False

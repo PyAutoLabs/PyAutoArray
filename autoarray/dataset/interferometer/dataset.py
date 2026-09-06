@@ -5,6 +5,24 @@ from typing import Optional
 from autonerves.fitsable import ndarray_via_fits_from
 from autonerves import cached_property
 
+try:
+    from autonerves.test_mode import disable_jax
+except ImportError:
+    # `disable_jax()` arrives in the autonerves release that closes
+    # PyAutoNerves#159. Importing it unconditionally would make an autonerves
+    # older than that release an `ImportError` at module load -- and a
+    # `--no-deps` install, an editable checkout or a hand-built virtualenv can
+    # all put one on the path regardless of the floor in `pyproject.toml`,
+    # which constrains resolution only. This is the same trade `dataset_util`
+    # records against `SMALL_DATASETS_HEADER_KEY`: degrade to the predicate's
+    # own one-line body rather than fail hard to avoid restating it. Delete the
+    # fallback when the floor names a release carrying the predicate.
+    import os
+
+    def disable_jax():
+        return os.environ.get("PYAUTO_DISABLE_JAX") == "1"
+
+
 from autoarray.dataset.abstract.dataset import AbstractDataset
 from autoarray.dataset.grids import GridsDataset
 from autoarray.inversion.inversion.interferometer.inversion_interferometer_util import (
@@ -266,6 +284,14 @@ class Interferometer(AbstractDataset):
         use_jax
             If `True`, JAX is used to accelerate the NUFFT precision matrix computation.
 
+            `PYAUTO_DISABLE_JAX=1` overrides this to `False`. That variable is a
+            harness-level switch, not a preference: it is the documented way to force the
+            NumPy path (the workspace `start_here` guides name it beside `use_jax=False`),
+            and the smoke profiles set it so a fast run does not pay a JIT compile. An
+            explicit `use_jax=True` in a script -- which is the right thing for a script
+            demonstrating the production path to say -- must therefore not defeat it, or
+            the harness pays 2.3-3.2 s of compile for a backend it asked to disable.
+
         Precondition
         ------------
         Every visibility must have equal real and imaginary noise sigma
@@ -288,6 +314,9 @@ class Interferometer(AbstractDataset):
         exc.DatasetException
             If any visibility has unequal real and imaginary noise sigma.
         """
+
+        if disable_jax():
+            use_jax = False
 
         noise_map_real = np.asarray(self.noise_map.real)
         noise_map_imag = np.asarray(self.noise_map.imag)

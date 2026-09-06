@@ -22,6 +22,27 @@ SMALL_DATASETS_PIXEL_SCALES = 0.6
 # Keep in sync with PyAutoNerves#153.
 SMALL_DATASETS_HEADER_KEY = "SMALLDAT"
 
+# The cap the writing process was capping to, as ``"<rows>x<cols>"``, written by
+# the same PyAutoNerves stamp (``SMALL_DATASETS_SHAPE_HEADER_KEY`` there).
+#
+# ``SMALLDAT`` records the wrong proposition for the question this module asks.
+# ``SMALLDAT = T`` means "the env var was set in the writing process"; the
+# question is "capped at *today's* cap", which is why every reader below has to
+# corroborate the card against the measured shape of the data. This card answers
+# the question directly, so no corroboration is needed -- which is what lets the
+# families whose shape *cannot* corroborate (interferometer ``(n_visibilities,
+# 2)``, multi_dataset's prefixed FITS, datacube's per-channel FITS) be reused at
+# all rather than being deleted and re-simulated on every single run.
+#
+# Duplicated as a literal for exactly the reason recorded above against
+# ``SMALL_DATASETS_HEADER_KEY``, and with more force: an autonerves too old to
+# *write* this card is precisely an autonerves too old to export its name, so an
+# import would turn "the card is absent" -- the case this reader already handles
+# by falling back -- into an ``ImportError`` at module load.
+# Keep in sync with PyAutoNerves#159; ``test_dataset_util.py`` pins the two
+# together whenever a stamp-aware autonerves is importable.
+SMALL_DATASETS_SHAPE_HEADER_KEY = "SMALLSHP"
+
 
 def cap_array_2d_for_small_datasets(array_2d, pixel_scales):
     """
@@ -85,6 +106,46 @@ def cap_array_2d_for_small_datasets(array_2d, pixel_scales):
     )
 
 
+def cap_mesh_shape_for_small_datasets(shape, respect_small_datasets=True):
+    """
+    Cap a pixelization / image-mesh ``shape`` to the small-datasets cap when
+    ``PYAUTO_SMALL_DATASETS=1`` is active, per axis.
+
+    Returns ``shape`` unchanged when the env var is not set to ``"1"``, when
+    ``respect_small_datasets`` is ``False``, or when the shape is already
+    at-or-below the cap on both axes.
+
+    This is the mesh-side counterpart of the cap ``Grid2D.uniform`` and
+    ``Mask2D.circular`` already apply to ``shape_native``, and it exists because
+    the two were out of step. A capped run reduces the *data* to a 16x16 image
+    while a pixelization's ``shape=`` stayed at whatever the script asked for,
+    so the smoke profile reconstructed 1600-2500 source pixels from ~80 image
+    pixels -- an inversion far larger than the data it is fitting, and the
+    dominant cost of the four HowTo chapter-3 scripts (43.6 s -> 17.3 s once
+    capped).
+
+    Capped per axis with ``min``, never rewritten to the cap: a mesh smaller
+    than the cap on one axis is a mesh the script chose, and shrinking is the
+    only direction this may move.
+
+    ``respect_small_datasets`` is the same escape hatch ``Grid2D.uniform``
+    carries, for the same reason -- a script whose mesh resolution is
+    load-bearing (a visualization of a specific reconstruction, a test pinning
+    a pixel count) opts out at the call site rather than by unsetting the env
+    var for the whole run.
+    """
+    if not respect_small_datasets:
+        return shape
+
+    if os.environ.get("PYAUTO_SMALL_DATASETS") != "1":
+        return shape
+
+    return (
+        min(int(shape[0]), SMALL_DATASETS_SHAPE_NATIVE[0]),
+        min(int(shape[1]), SMALL_DATASETS_SHAPE_NATIVE[1]),
+    )
+
+
 def _on_disk_shape_native(data_path):
     """
     Returns the ``(rows, columns)`` shape of the first 2D image in the FITS file
@@ -129,11 +190,21 @@ def _small_datasets_stamp_on_disk(dataset_path):
     Callers must treat ``None`` as "leave the dataset alone" and fall back to
     :func:`_is_small_datasets_on_disk`. Unknown must never mean "full".
     """
+    return _stamp_card_in_file(Path(dataset_path) / "data.fits")
+
+
+def _stamp_card_in_file(data_path):
+    """
+    Returns the ``SMALLDAT`` regime recorded in the FITS file at ``data_path``,
+    as the same tri-state :func:`_small_datasets_stamp_on_disk` documents.
+
+    Split out from that function so the multi-file dataset families -- whose
+    data does not live at ``<dataset_path>/data.fits`` -- can be read with the
+    same rules rather than a second, subtly different implementation.
+    """
     from astropy.io import fits
 
-    data_path = Path(dataset_path) / "data.fits"
-
-    if not data_path.exists():
+    if not Path(data_path).exists():
         return None
 
     try:
@@ -146,6 +217,113 @@ def _small_datasets_stamp_on_disk(dataset_path):
         return None
 
     return None
+
+
+def _shape_card_in_file(data_path):
+    """
+    Returns the cap recorded by the ``SMALLSHP`` card in the FITS file at
+    ``data_path`` as a ``(rows, columns)`` tuple, or ``None`` when there is no
+    usable card.
+
+    ``None`` means "unknown cap" and never "no cap": it is returned for a
+    missing or unreadable file, a file written before the card existed, a file
+    written at full resolution (where there is no cap to record), and a card
+    whose value is not the ``"<rows>x<cols>"`` string this stack writes. Every
+    caller must treat it as "fall back to what you did before the card
+    existed", which for :func:`_is_capped_at_the_current_cap` is the shape
+    heuristic.
+
+    A malformed card is deliberately read as unknown rather than coerced. The
+    predicate this feeds ends in ``shutil.rmtree`` in one direction and in
+    "reuse this data" in the other, and a card this code did not write is not a
+    card this code can trust in either.
+    """
+    from astropy.io import fits
+
+    if not Path(data_path).exists():
+        return None
+
+    try:
+        with fits.open(data_path) as hdu_list:
+            for hdu in hdu_list:
+                value = hdu.header.get(SMALL_DATASETS_SHAPE_HEADER_KEY)
+
+                if not isinstance(value, str):
+                    continue
+
+                rows, separator, columns = value.partition("x")
+
+                if not separator:
+                    return None
+
+                try:
+                    return (int(rows), int(columns))
+                except ValueError:
+                    return None
+    except Exception:
+        return None
+
+    return None
+
+
+def _small_datasets_shape_on_disk(dataset_path):
+    """
+    Returns the cap recorded in ``<dataset_path>/data.fits``'s ``SMALLSHP``
+    card, or ``None`` if there is none (see :func:`_shape_card_in_file`).
+    """
+    return _shape_card_in_file(Path(dataset_path) / "data.fits")
+
+
+def _capped_data_paths(dataset_path):
+    """
+    Returns the FITS files that carry ``dataset_path``'s data array(s), as the
+    list :func:`_is_capped_at_the_current_cap` reads its cards from.
+
+    Three layouts, tried in order, and the first that matches wins:
+
+    - ``<dataset_path>/data.fits`` -- the ordinary case, roughly 228 of the 253
+      ``should_simulate`` call sites in autolens_workspace. When it exists it is
+      the only file consulted, so nothing about the single-file case changes.
+    - ``<dataset_path>/{prefix}_data.fits`` -- multi_dataset, which prefixes
+      every file with its waveband.
+    - ``<dataset_path>/channel_*/data.fits`` -- interferometer datacubes, which
+      nest one dataset per channel.
+
+    The suffix is matched exactly (``_data.fits``, never ``*.fits``) and only at
+    the two levels above. That narrowness is the whole safety argument: this
+    list feeds a predicate whose *false* branch ends in ``shutil.rmtree``, and
+    every trap recorded in autolens_workspace_test#260 was a widened match
+    reaching a file it should not have -- a bare ``*.fits`` glob would sweep in
+    ``psf.fits``, which is legitimately tiny at full resolution.
+
+    Returns ``[]`` for a directory with none of those, which callers must read
+    as "no verdict" -- exactly the position those datasets were in before this
+    resolution existed.
+    """
+    path = Path(dataset_path)
+
+    if not path.is_dir():
+        return []
+
+    data_path = path / "data.fits"
+
+    if data_path.exists():
+        return [data_path]
+
+    prefixed = sorted(
+        candidate
+        for candidate in path.glob("*_data.fits")
+        if candidate.is_file()
+    )
+
+    if prefixed:
+        return prefixed
+
+    return sorted(
+        candidate
+        for candidate in path.glob("channel_*/data.fits")
+        if candidate.is_file()
+    )
 
 
 def _is_small_datasets_on_disk(dataset_path):
@@ -213,7 +391,21 @@ def _stamp_contradicted_by_shape(dataset_path):
     deletion, so failing to read the file must not silently protect a genuinely
     stale dataset the stamp correctly identified.
     """
-    shape = _on_disk_shape_native(Path(dataset_path) / "data.fits")
+    return _shape_contradicts_the_cap(Path(dataset_path) / "data.fits")
+
+
+def _shape_contradicts_the_cap(data_path):
+    """
+    Returns True when the FITS file at ``data_path`` is larger than the cap on
+    **both** axes, i.e. when its shape says it cannot have been written by a
+    capped write however its provenance cards read.
+
+    Split out of :func:`_stamp_contradicted_by_shape` so both branches of
+    :func:`should_simulate` can apply the same guard to the same question. Both
+    axes, never either, and unknown means not contradicted: the reasoning for
+    both is in that function's docstring.
+    """
+    shape = _on_disk_shape_native(data_path)
 
     return (
         shape is not None
@@ -241,23 +433,71 @@ def _is_capped_at_the_current_cap(dataset_path):
     the writer's *environment*, not a measured property of the data. Neither
     branch may treat it as unfalsifiable.
 
-    Interferometer datasets deliberately never satisfy this. Their ``data.fits``
-    is ``(n_visibilities, 2)`` -- its shape is fixed by the committed uv file and
-    does not change under the cap -- so shape cannot corroborate their stamp, and
-    a capped interferometer dataset is regenerated on every run exactly as it was
-    before. That is the conservative choice and it is deliberate: the alternative
-    is trusting the stamp alone for precisely the family whose corruption is
-    invisible.
+    The corroboration the second half needs no longer has to come from the
+    data's shape. A capped writer now also records the cap it used, as
+    ``SMALLSHP = '16x16'`` (:data:`SMALL_DATASETS_SHAPE_HEADER_KEY`), which is
+    that proposition stated directly rather than inferred. When the card is
+    present it is read and the shape is not consulted; when it is absent --
+    every file written before it existed -- the shape heuristic runs exactly as
+    it did before, so a pre-card dataset behaves identically.
 
-    Anything without a readable ``data.fits`` at the top level -- JSON-only
-    datasets, datacubes nesting theirs in ``channel_XXX/``, multi_dataset's
-    prefixed names -- also returns False and is regenerated, preserving today's
-    behaviour for the families this cannot speak about.
+    That matters because the shape heuristic is structurally blind to three
+    families. Interferometer ``data.fits`` is ``(n_visibilities, 2)``, fixed by
+    the committed uv file and unchanged by the cap; multi_dataset prefixes its
+    files (``{waveband}_data.fits``); datacubes nest theirs in
+    ``channel_XXX/``. None of them could ever corroborate a stamp, so all three
+    were deleted and re-simulated on **every** run -- 5.2-6.5 s per script, and
+    the dominant cost of several smoke entries in both workspaces. They are
+    reached now: the cards are read from every file
+    :func:`_capped_data_paths` resolves, and every one of them must agree.
+
+    The card is read *with* the contradiction guard the full-resolution branch
+    already applies (:func:`_shape_contradicts_the_cap`), and that pairing is
+    load-bearing. Both cards record the writing **process**, not a measured
+    property of the array: a 180x180 image written in a shell exporting
+    ``PYAUTO_SMALL_DATASETS=1`` -- a user converting real data, or any array
+    written with ``respect_small_datasets=False`` -- carries ``SMALLDAT = T``
+    and ``SMALLSHP = '16x16'`` while being full resolution. Trusting the card
+    alone would reuse it in a capped run, which is the shape-mismatch class the
+    capped branch exists to prevent. A file over the cap on **both** axes is
+    therefore refused however its cards read, which leaves interferometer
+    ``(n_visibilities, 2)`` -- over on one axis only -- reachable, as intended.
+
+    The safety property is unchanged, and is the one this predicate has always
+    had to hold: relative to the shape-only rule, this can only ever move a
+    dataset from *delete* to *keep*, and only when the writing process recorded
+    **exactly** today's cap. A dataset stamped at a different cap has a
+    mismatching card and is still deleted -- which is the whole point of the
+    second half, and the property PyAutoArray#471 / PyAutoNerves#153
+    established. An absent or malformed card falls back rather than being
+    coerced, so "unknown" still never means "capped".
+
+    A dataset with none of the three layouts -- JSON-only datasets, the
+    FITS-less pair named in :func:`should_simulate`'s "Known gap" -- still
+    returns False and is regenerated, preserving today's behaviour for the
+    families this cannot speak about.
     """
-    return (
-        _small_datasets_stamp_on_disk(dataset_path) is True
-        and _is_small_datasets_on_disk(dataset_path)
-    )
+    data_paths = _capped_data_paths(dataset_path)
+
+    if not data_paths:
+        return False
+
+    for data_path in data_paths:
+        if _stamp_card_in_file(data_path) is not True:
+            return False
+
+        if _shape_contradicts_the_cap(data_path):
+            return False
+
+        recorded = _shape_card_in_file(data_path)
+
+        if recorded is not None:
+            if recorded != SMALL_DATASETS_SHAPE_NATIVE:
+                return False
+        elif _on_disk_shape_native(data_path) != SMALL_DATASETS_SHAPE_NATIVE:
+            return False
+
+    return True
 
 
 def should_simulate(dataset_path):
@@ -331,14 +571,28 @@ def should_simulate(dataset_path):
 
     Known gap
     ---------
-    This reads ``<dataset_path>/data.fits`` and nothing else, which covers
-    roughly 228 of the 253 ``should_simulate`` call sites in autolens_workspace.
-    The rest have no file of that name at that level and so get no verdict:
+    The **capped** branch resolves three layouts (:func:`_capped_data_paths`):
+    ``<dataset_path>/data.fits``, multi_dataset's ``{waveband}_data.fits``, and
+    a datacube's ``channel_XXX/data.fits``. The **full-resolution** branch below
+    still reads ``<dataset_path>/data.fits`` and nothing else.
+
+    That asymmetry is deliberate, and is the safety property stated as code.
+    Widening the capped branch can only move a dataset from *delete* to *keep*:
+    a directory with no ``data.fits`` had no verdict, so it was deleted and
+    re-simulated on every run, and a resolved, agreeing set of cards is the
+    only thing that now spares it. Widening the full branch would move datasets
+    the other way, into ``shutil.rmtree``, and growing the reach of a
+    destructive predicate is its own change with its own review -- not a rider
+    on the one that stops re-simulating data that is already correct.
+
+    So under ``PYAUTO_SMALL_DATASETS=1`` the families below are covered; in the
+    full-resolution regime they still get no verdict, which is *keep*:
 
     - interferometer **datacube** datasets, whose FITS sit in ``channel_XXX/``
       subdirectories;
     - **multi_dataset** datasets, which prefix the name (``{waveband}_data.fits``);
-    - **sample** datasets, which nest under ``dataset_N/``;
+    - **sample** datasets, which nest under ``dataset_N/`` (covered by neither
+      branch);
     - the two FITS-less directories, ``dataset/weak/simple`` and
       ``dataset/point_source/multiple_sources``, which a FITS-header stamp
       cannot reach under any placement.

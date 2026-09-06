@@ -9,6 +9,7 @@ from autoarray.inversion.mesh.mesh.abstract import AbstractMesh
 from autoarray.inversion.mesh.border_relocator import BorderRelocator
 
 from autoarray.structures.grids import grid_2d_util
+from autoarray.util.dataset_util import cap_mesh_shape_for_small_datasets
 
 from autoarray import exc
 
@@ -71,6 +72,7 @@ class RectangularRTUAdaptDensity(AbstractMesh):
         shape: Tuple[int, int] = (3, 3),
         bandwidth: Optional[float] = None,
         n_knots: Optional[int] = None,
+        respect_small_datasets: bool = True,
     ):
         """
         A rectangular mesh of pixels used to reconstruct a source on a regular
@@ -132,6 +134,11 @@ class RectangularRTUAdaptDensity(AbstractMesh):
         n_knots
             Size of the fixed knot table used to invert the CDF. Defaults to
             the kernel default.
+        respect_small_datasets
+            When ``PYAUTO_SMALL_DATASETS=1`` is set, `shape` is capped per axis
+            to the small-datasets cap, matching the cap `Grid2D.uniform` and
+            `Mask2D.circular` apply to the data. Pass ``False`` to opt out for a
+            mesh whose resolution is load-bearing for the script.
 
         Raises
         ------
@@ -142,6 +149,10 @@ class RectangularRTUAdaptDensity(AbstractMesh):
         from autoarray.inversion.mesh.interpolator.rectangular import (
             KERNEL_CDF_DEFAULT_BANDWIDTH,
             KERNEL_CDF_DEFAULT_KNOTS,
+        )
+
+        shape = cap_mesh_shape_for_small_datasets(
+            shape, respect_small_datasets=respect_small_datasets
         )
 
         if shape[0] <= 2 or shape[1] <= 2:

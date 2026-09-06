@@ -602,6 +602,20 @@ class Imaging(AbstractDataset):
         Imaging
             A new `Imaging` dataset with the precomputed `ImagingSparseOperator` attached, enabling
             efficient pixelized source reconstruction via the sparse linear algebra formalism.
+
+        Notes
+        -----
+        `PYAUTO_DISABLE_JAX=1` is *not* honoured here, unlike
+        `Interferometer.apply_sparse_operator`, and the asymmetry is deliberate. There the
+        variable overrides a `use_jax` argument that already selects between two backends
+        computing the same operator. Here there is no such argument: this method is the JAX
+        implementation, and the NumPy/CPU alternative is the separately named
+        `apply_sparse_operator_cpu`, which returns a different operator class
+        (`SparseLinAlgImagingNumba`) and requires numba. Silently returning that under an
+        environment variable would change the type of the returned object based on the
+        environment, which is a larger change than honouring a switch -- and an unmeasured
+        one: every JIT cost the phase-8 workspace timings attribute to this variable
+        (2.3-3.2 s per script) was on the interferometer path.
         """
 
         if self.psf is not None and self.psf.convolve_over_sample_size > 1:
