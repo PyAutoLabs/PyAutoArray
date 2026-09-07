@@ -71,15 +71,19 @@ def scipy_delaunay(points_np, query_points_np, areas_factor):
     return points, simplices_padded, mappings, split_points, splitted_mappings, areas
 
 
-# Query points are located in chunks of this size so the (chunk, N) distance
-# intermediate stays bounded on GPU when the likelihood is vmapped over many
-# live points.
+# Memory guard for the nearest-vertex seed only (``_nearest_vertex_seed_from``):
+# the (chunk, N) squared-distance intermediate stays bounded on GPU when the
+# likelihood is vmapped over many live points. The walk itself is NOT chunked —
+# it runs once over every query, so its (latency-bound) steps are not
+# serialised across ~Q/chunk sequential map iterations.
 DELAUNAY_LOCATE_CHUNK = 1024
 
-# Iteration cap of the visibility walk. On production Hilbert/Delaunay meshes
-# every point resolves within ~64 steps from a nearest-vertex start; a query
-# still unresolved at the cap (a would-be fp cycle on degenerate slivers)
-# falls back to its nearest-vertex mapping, the outside-hull convention.
+# Safety cap on the visibility walk's ``while_loop`` (``_walk_from_seed``), not
+# a trip count: from a nearest-vertex start production Hilbert/Delaunay meshes
+# typically resolve every query in fewer than 10 steps and the loop exits then.
+# A query still unresolved at the cap (a would-be fp cycle on degenerate
+# slivers) falls back to its nearest-vertex mapping, the outside-hull
+# convention.
 DELAUNAY_WALK_STEPS = 128
 
 
@@ -166,6 +170,136 @@ def _jax_delaunay_tables(points):
     )
 
 
+def _nearest_vertex_seed_from(query_points, points, xp=np):
+    """Nearest mesh vertex of every query point — the visibility walk's start.
+
+    Returns a ``(Q,)`` int32 array of vertex indices (a brute-force distance
+    ``argmin``, exact and tie-broken by lowest index, matching what
+    ``cKDTree(points).query`` returns away from exact ties).
+
+    The ``(Q, N)`` squared-distance intermediate is the only large temporary
+    in point location, so on the JAX path the queries are processed in
+    ``DELAUNAY_LOCATE_CHUNK``-sized chunks through ``jax.lax.map`` and only
+    the per-chunk ``argmin`` is kept. That bounds the live intermediate at
+    ``(chunk, N)`` even when the likelihood is vmapped over many live points.
+    ``Q`` is padded up to a multiple of the chunk with rows at 1e9 (far
+    outside any mesh); their seeds are sliced away.
+    """
+
+    def argmin_chunk(q_chunk):
+        d2 = ((q_chunk[:, None, :] - points[None, :, :]) ** 2).sum(-1)
+        return xp.argmin(d2, axis=1).astype(xp.int32)
+
+    if xp is np:
+        return argmin_chunk(query_points)
+
+    import jax
+
+    Q = query_points.shape[0]
+    chunk = DELAUNAY_LOCATE_CHUNK
+    pad = (-Q) % chunk
+    q_padded = xp.concatenate(
+        [query_points, xp.full((pad, 2), 1.0e9, dtype=query_points.dtype)]
+    )
+    seed = jax.lax.map(argmin_chunk, q_padded.reshape(-1, chunk, 2))
+    return seed.reshape(-1)[:Q]
+
+
+def _walk_from_seed(
+    query_points,
+    seed,
+    points,
+    simplices_padded,
+    simplex_neighbors,
+    vertex_simplex,
+    xp=np,
+):
+    """Visibility walk from a per-query start simplex to its containing simplex.
+
+    Starting at a simplex incident to each query's ``seed`` vertex, compute the
+    signed barycentric weights of the query in the current simplex; if all are
+    >= -1e-12 the simplex contains the point (``done``); otherwise step to the
+    neighbor simplex opposite the most-negative vertex. Crossing a hull edge
+    (neighbor -1) marks the query ``outside``.
+
+    All ``Q`` queries walk in lockstep with ``done`` / ``outside`` masks, so the
+    body is fixed-shape and JIT/vmap-safe. Both backends exit as soon as every
+    query is resolved: NumPy with a ``break``, JAX with a ``lax.while_loop``
+    whose condition is ``step < DELAUNAY_WALK_STEPS and any(~done & ~outside)``.
+    (Under ``vmap`` the loop necessarily runs to the slowest lane.)
+
+    Returns ``(cur, done, outside)``: the current simplex index, and the two
+    resolution masks, each of length ``Q``.
+    """
+
+    def cross(u, v):
+        return u[..., 0] * v[..., 1] - u[..., 1] * v[..., 0]
+
+    def weights_of(cur):
+        verts = simplices_padded[cur]  # (Q, 3)
+        valid_simplex = (verts >= 0).all(axis=1)
+        safe_verts = verts.clip(min=0)
+        a = points[safe_verts[:, 0]]
+        b = points[safe_verts[:, 1]]
+        c = points[safe_verts[:, 2]]
+        den = cross(b - a, c - a)
+        den = xp.where(den != 0.0, den, 1.0)
+        w = (
+            xp.stack(
+                [
+                    cross(b - query_points, c - query_points),
+                    cross(c - query_points, a - query_points),
+                    cross(a - query_points, b - query_points),
+                ],
+                axis=1,
+            )
+            / den[:, None]
+        )
+        return verts, w, valid_simplex
+
+    def walk_step(carry):
+        cur, done, outside = carry
+        _, w, valid_simplex = weights_of(cur)
+        minw = w.min(axis=1)
+        opposite = w.argmin(axis=1)
+        outside = outside | (~done & ~valid_simplex)
+        done = done | (~outside & (minw >= -1.0e-12))
+        nxt = simplex_neighbors[cur, opposite]
+        outside = outside | (~done & (nxt < 0))
+        move = ~done & ~outside
+        cur = xp.where(move, nxt.clip(min=0), cur)
+        return cur, done, outside
+
+    cur = vertex_simplex[seed].clip(min=0).astype(xp.int32)
+    done = xp.zeros(query_points.shape[0], dtype=bool)
+    outside = xp.zeros(query_points.shape[0], dtype=bool)
+
+    if xp is np:
+        for _ in range(DELAUNAY_WALK_STEPS):
+            cur, done, outside = walk_step((cur, done, outside))
+            if (done | outside).all():
+                break
+        return cur, done, outside
+
+    import jax
+
+    def cond(carry):
+        step, _, done, outside = carry
+        return (step < DELAUNAY_WALK_STEPS) & xp.any(~done & ~outside)
+
+    def body(carry):
+        step, cur, done, outside = carry
+        cur, done, outside = walk_step((cur, done, outside))
+        return step + 1, cur, done, outside
+
+    _, cur, done, outside = jax.lax.while_loop(
+        cond,
+        body,
+        (xp.zeros((), dtype=xp.int32), cur, done, outside),
+    )
+    return cur, done, outside
+
+
 def pix_indexes_delaunay_walk_from(
     query_points,
     points,
@@ -179,118 +313,59 @@ def pix_indexes_delaunay_walk_from(
     on the JAX likelihood path, via the same visibility-walk algorithm
     ``find_simplex`` itself uses — so the result is exact, not approximate.
 
-    For each query point: find the nearest mesh vertex (brute-force distance
-    argmin), start from a simplex incident to it, and walk: compute the
-    signed barycentric weights of the query in the current simplex; if all
-    are >= -1e-12 the simplex contains the point (done); otherwise step to
-    the neighbor simplex opposite the most-negative vertex. Crossing a hull
-    edge (neighbor -1) means the point is outside the triangulation and it
-    falls back to the nearest-vertex mapping ``[v, -1, -1]`` — the identical
-    convention ``scipy_delaunay`` applies via its KDTree.
-
-    The walk is bounded at DELAUNAY_WALK_STEPS (production meshes resolve in
-    <= ~64); the loop runs in lockstep over a chunk of queries with done/
-    outside masks, so it is fixed-shape and JIT/vmap-safe. Chunking over
-    query points bounds the (chunk, N) nearest-vertex intermediate under
-    vmap (JAX path; the NumPy path — used by the unit tests — processes the
-    whole array with early exit). Returns a (Q, 3) int32 mapping array with
-    the same semantics as ``pix_indexes_for_sub_slim_index_delaunay_from``.
+    Each query is seeded at its nearest mesh vertex
+    (:func:`_nearest_vertex_seed_from`) and walked to its containing simplex
+    (:func:`_walk_from_seed`). A query that leaves the convex hull falls back to
+    the nearest-vertex mapping ``[v, -1, -1]`` — the identical convention
+    ``scipy_delaunay`` applies via its KDTree. Returns a ``(Q, 3)`` int32
+    mapping array with the same semantics as
+    ``pix_indexes_for_sub_slim_index_delaunay_from``.
 
     When ``return_simplex_indexes`` is true, also return the containing
-    simplex index for every query (or -1 outside the convex hull).  Sibson
+    simplex index for every query (or -1 outside the convex hull). Sibson
     interpolation uses this as the seed of its circumcircle-cavity walk, so
     point location is not repeated.
+
+    Gradients
+    ---------
+    On the JAX path ``query_points`` and ``points`` are ``stop_gradient``-wrapped
+    before the seed ``argmin`` and the walk. ``lax.while_loop`` has no
+    reverse-mode rule, and none is wanted: this function returns only int32
+    indices, which are piecewise-constant in the vertex and query positions —
+    their true derivative is exactly zero away from the measure-zero
+    re-wiring / triangle-crossing events, exactly the argument made for the
+    frozen connectivity tables in the :func:`_jax_delaunay_tables` docstring.
+    Every differentiable downstream quantity (the barycentric weights via
+    ``pixel_weights_delaunay_from``, the dual areas, the split points, the
+    Sibson weights) is recomputed from the *traced* arrays, so ``jax.grad``
+    through the Delaunay likelihood is unaffected.
     """
+    if xp is not np:
+        import jax
 
-    def cross(u, v):
-        return u[..., 0] * v[..., 1] - u[..., 1] * v[..., 0]
+        # See "Gradients" above: location is integer-valued, and while_loop is
+        # not reverse-mode differentiable.
+        query_points = jax.lax.stop_gradient(query_points)
+        points = jax.lax.stop_gradient(points)
 
-    def weights_of(cur, q_chunk):
-        verts = simplices_padded[cur]  # (chunk, 3)
-        valid_simplex = (verts >= 0).all(axis=1)
-        safe_verts = verts.clip(min=0)
-        a = points[safe_verts[:, 0]]
-        b = points[safe_verts[:, 1]]
-        c = points[safe_verts[:, 2]]
-        den = cross(b - a, c - a)
-        den = xp.where(den != 0.0, den, 1.0)
-        w = (
-            xp.stack(
-                [
-                    cross(b - q_chunk, c - q_chunk),
-                    cross(c - q_chunk, a - q_chunk),
-                    cross(a - q_chunk, b - q_chunk),
-                ],
-                axis=1,
-            )
-            / den[:, None]
-        )
-        return verts, w, valid_simplex
+    seed = _nearest_vertex_seed_from(query_points, points, xp=xp)
 
-    def walk_step(carry, q_chunk):
-        cur, done, outside = carry
-        _, w, valid_simplex = weights_of(cur, q_chunk)
-        minw = w.min(axis=1)
-        opposite = w.argmin(axis=1)
-        outside = outside | (~done & ~valid_simplex)
-        done = done | (~outside & (minw >= -1.0e-12))
-        nxt = simplex_neighbors[cur, opposite]
-        outside = outside | (~done & (nxt < 0))
-        move = ~done & ~outside
-        cur = xp.where(move, nxt.clip(min=0), cur)
-        return cur, done, outside
-
-    def locate_chunk(q_chunk):
-        # nearest mesh vertex: (chunk, N) distance intermediate
-        d2 = ((q_chunk[:, None, :] - points[None, :, :]) ** 2).sum(-1)
-        seed = xp.argmin(d2, axis=1).astype(xp.int32)
-
-        cur = vertex_simplex[seed].clip(min=0).astype(xp.int32)
-        done = xp.zeros(q_chunk.shape[0], dtype=bool)
-        outside = xp.zeros(q_chunk.shape[0], dtype=bool)
-
-        if xp is np:
-            for _ in range(DELAUNAY_WALK_STEPS):
-                cur, done, outside = walk_step((cur, done, outside), q_chunk)
-                if (done | outside).all():
-                    break
-        else:
-            import jax
-
-            cur, done, outside = jax.lax.fori_loop(
-                0,
-                DELAUNAY_WALK_STEPS,
-                lambda _, carry: walk_step(carry, q_chunk),
-                (cur, done, outside),
-            )
-
-        verts = simplices_padded[cur]
-        fallback = xp.stack([seed, -xp.ones_like(seed), -xp.ones_like(seed)], axis=1)
-        mappings = xp.where(done[:, None], verts, fallback).astype(xp.int32)
-        simplex_indexes = xp.where(done, cur, -1).astype(xp.int32)
-        return mappings, simplex_indexes
-
-    if xp is np:
-        mappings, simplex_indexes = locate_chunk(query_points)
-        if return_simplex_indexes:
-            return mappings, simplex_indexes
-        return mappings
-
-    import jax
-
-    Q = query_points.shape[0]
-    chunk = DELAUNAY_LOCATE_CHUNK
-    pad = (-Q) % chunk
-    # pad rows sit far outside the mesh; their located rows are sliced away
-    q_padded = xp.concatenate(
-        [query_points, xp.full((pad, 2), 1.0e9, dtype=query_points.dtype)]
+    cur, done, _ = _walk_from_seed(
+        query_points=query_points,
+        seed=seed,
+        points=points,
+        simplices_padded=simplices_padded,
+        simplex_neighbors=simplex_neighbors,
+        vertex_simplex=vertex_simplex,
+        xp=xp,
     )
-    mappings, simplex_indexes = jax.lax.map(
-        locate_chunk, q_padded.reshape(-1, chunk, 2)
-    )
-    mappings = mappings.reshape(-1, 3)[:Q]
-    simplex_indexes = simplex_indexes.reshape(-1)[:Q]
+
+    verts = simplices_padded[cur]
+    fallback = xp.stack([seed, -xp.ones_like(seed), -xp.ones_like(seed)], axis=1)
+    mappings = xp.where(done[:, None], verts, fallback).astype(xp.int32)
+
     if return_simplex_indexes:
+        simplex_indexes = xp.where(done, cur, -1).astype(xp.int32)
         return mappings, simplex_indexes
     return mappings
 
@@ -329,15 +404,6 @@ def jax_delaunay(points, query_points, areas_factor=0.5):
 
     simplices_padded, simplex_neighbors, vertex_simplex = _jax_delaunay_tables(points)
 
-    mappings = pix_indexes_delaunay_walk_from(
-        query_points=query_points,
-        points=points,
-        simplices_padded=simplices_padded,
-        simplex_neighbors=simplex_neighbors,
-        vertex_simplex=vertex_simplex,
-        xp=jnp,
-    )
-
     # dual areas via masked scatter-add over the padded simplices
     areas = _dual_areas_padded_jnp(points, simplices_padded)
 
@@ -347,17 +413,23 @@ def jax_delaunay(points, query_points, areas_factor=0.5):
         xp=jnp,
     )
 
-    # Split points are seeded at their own nearest vertex (not their parent
-    # vertex): a split point can land outside the hull, and the fallback must
-    # then match scipy_delaunay's KDTree nearest-vertex assignment.
-    splitted_mappings = pix_indexes_delaunay_walk_from(
-        query_points=split_points,
+    # Data grid and split-cross points are located in ONE walk: the walk is
+    # latency-bound, so a single while_loop over the concatenated queries costs
+    # roughly one walk instead of two. Split points are still seeded at their
+    # own nearest vertex (not their parent vertex): a split point can land
+    # outside the hull, and the fallback must then match scipy_delaunay's
+    # KDTree nearest-vertex assignment.
+    n_query = query_points.shape[0]
+    all_mappings = pix_indexes_delaunay_walk_from(
+        query_points=jnp.concatenate([query_points, split_points]),
         points=points,
         simplices_padded=simplices_padded,
         simplex_neighbors=simplex_neighbors,
         vertex_simplex=vertex_simplex,
         xp=jnp,
     )
+    mappings = all_mappings[:n_query]
+    splitted_mappings = all_mappings[n_query:]
 
     return points, simplices_padded, mappings, split_points, splitted_mappings, areas
 

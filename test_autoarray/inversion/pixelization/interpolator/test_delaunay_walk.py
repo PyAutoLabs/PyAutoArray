@@ -2,6 +2,8 @@ import numpy as np
 from scipy.spatial import Delaunay, cKDTree
 
 from autoarray.inversion.mesh.interpolator.delaunay import (
+    _nearest_vertex_seed_from,
+    _walk_from_seed,
     pix_indexes_delaunay_walk_from,
     scipy_delaunay_tri_only,
 )
@@ -191,3 +193,125 @@ def test__walk_locator__points_on_vertices_and_edges():
     has_e0 = (mappings == e0[:, None]).any(axis=1)
     has_e1 = (mappings == e1[:, None]).any(axis=1)
     assert (has_e0 & has_e1).all()
+
+
+def test__nearest_vertex_seed__matches_kdtree_query():
+    """The seed of the walk is the nearest mesh vertex — the same vertex
+    ``cKDTree.query`` returns, which is what ``scipy_delaunay``'s outside-hull
+    fallback assigns. Exact distance ties are excluded: argmin and the KD-tree
+    are both free to pick either vertex there."""
+    rng = np.random.default_rng(11)
+    points = _blob_ring_mesh(400, rng)
+    query = np.concatenate(
+        [_blob_ring_mesh(2800, rng), rng.normal(size=(200, 2)) * 1.6]
+    )
+
+    seed = _nearest_vertex_seed_from(query, points, xp=np)
+
+    assert seed.shape == (query.shape[0],)
+    assert seed.dtype == np.int32
+
+    d, nearest = cKDTree(points).query(query, k=2)
+    ties = np.isclose(d[:, 0], d[:, 1], rtol=0.0, atol=1e-12)
+
+    assert (seed[~ties] == nearest[~ties, 0]).all()
+
+
+def test__walk_from_seed__reaches_find_simplex_answer_from_a_far_seed():
+    """The walk converges from ANY start simplex, not just the nearest-vertex
+    one — the property the JAX path relies on when the seed argmin and the walk
+    are split apart. Seeding every query at vertex 0 (far from most of them)
+    must still reproduce ``find_simplex`` within the step cap."""
+    rng = np.random.default_rng(12)
+    points = _blob_ring_mesh(400, rng)
+    query = _blob_ring_mesh(1500, rng)
+
+    simplices_padded, simplex_neighbors, vertex_simplex = scipy_delaunay_tri_only(
+        points
+    )
+
+    far_seed = np.zeros(query.shape[0], dtype=np.int32)
+
+    cur, done, outside = _walk_from_seed(
+        query_points=query,
+        seed=far_seed,
+        points=points,
+        simplices_padded=simplices_padded,
+        simplex_neighbors=simplex_neighbors,
+        vertex_simplex=vertex_simplex,
+        xp=np,
+    )
+
+    # every query resolved within the cap
+    assert (done | outside).all()
+
+    tri = Delaunay(points)
+    simplex_idx = tri.find_simplex(query)
+    inside = simplex_idx >= 0
+
+    assert (done == inside).all()
+
+    verts = np.sort(simplices_padded[cur[inside]], axis=1)
+    expected = np.sort(tri.simplices[simplex_idx[inside]], axis=1)
+    same = (verts == expected).all(axis=1)
+
+    # fp edge ties may land on the neighbouring simplex; it must still contain
+    # the query point
+    if not same.all():
+        v = simplices_padded[cur[inside]][~same]
+        q = query[inside][~same]
+        a, b, c = points[v[:, 0]], points[v[:, 1]], points[v[:, 2]]
+
+        def cr(u, w):
+            return u[:, 0] * w[:, 1] - u[:, 1] * w[:, 0]
+
+        den = cr(b - a, c - a)
+        w = (
+            np.stack([cr(b - q, c - q), cr(c - q, a - q), cr(a - q, b - q)], 1)
+            / den[:, None]
+        )
+        assert (w.min(axis=1) >= -1e-9).all()
+
+    assert same.mean() >= 0.999
+
+
+def test__walk_locator__shapes_and_dtypes_on_an_odd_query_count():
+    """The wrapper's public contract: (Q, 3) int32 mappings and (Q,) int32
+    simplex indexes for a query count that is not a round multiple of
+    ``DELAUNAY_LOCATE_CHUNK``."""
+    rng = np.random.default_rng(13)
+    points = _blob_ring_mesh(300, rng)
+    query = np.concatenate([_blob_ring_mesh(1500, rng), rng.normal(size=(37, 2)) * 1.7])
+    assert query.shape[0] == 1537
+
+    simplices_padded, simplex_neighbors, vertex_simplex = scipy_delaunay_tri_only(
+        points
+    )
+
+    mappings, simplex_indexes = pix_indexes_delaunay_walk_from(
+        query_points=query,
+        points=points,
+        simplices_padded=simplices_padded,
+        simplex_neighbors=simplex_neighbors,
+        vertex_simplex=vertex_simplex,
+        xp=np,
+        return_simplex_indexes=True,
+    )
+
+    assert mappings.shape == (1537, 3)
+    assert mappings.dtype == np.int32
+    assert simplex_indexes.shape == (1537,)
+    assert simplex_indexes.dtype == np.int32
+
+    # inside-hull rows carry a real simplex; outside-hull rows are the
+    # nearest-vertex fallback with simplex index -1
+    inside = simplex_indexes >= 0
+    assert (mappings[inside] >= 0).all()
+    assert (mappings[~inside, 1:] == -1).all()
+    assert (mappings[~inside, 0] >= 0).all()
+
+    # the simplex index and the mapping row must describe the same triangle
+    assert (
+        np.sort(simplices_padded[simplex_indexes[inside]], axis=1)
+        == np.sort(mappings[inside], axis=1)
+    ).all()
