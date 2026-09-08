@@ -7,6 +7,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 from autoarray.plot.utils import (
+    _FAST_PLOTS,
     subplots,
     apply_extent,
     apply_labels,
@@ -143,7 +144,12 @@ def plot_array(
     try:
         if extent is None:
             extent = array.geometry.extent
-        if mask is None:
+        # The mask-edge overlay derives the edge grid of the mask on EVERY call
+        # (~0.4s on a 2000x100 CTI frame, times ~100 on-the-fly figures per
+        # bypassed fit). PYAUTO_FAST_PLOTS already drops the figure before it
+        # is rasterised or saved, so under it the overlay is never seen:
+        # skip deriving it (PyAutoBrain /ci_speedup, 2026-09-08).
+        if mask is None and not _FAST_PLOTS:
             mask = auto_mask_edge(array)
         array = array.native.array
     except AttributeError:

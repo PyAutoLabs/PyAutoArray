@@ -393,3 +393,71 @@ def test__convolve_bin_segment_ids_from__divisibility_guard():
         util.over_sample.convolve_bin_segment_ids_from(
             sub_size=np.array([4, 3]), convolve_over_sample_size=2
         )
+
+
+def _reference_grid_2d_slim_over_sampled_via_mask_from(mask_2d, pixel_scales, sub_size, origin=(0.0, 0.0)):
+    """The per-pixel construction `grid_2d_slim_over_sampled_via_mask_from`
+    replaced on 2026-09-08 (one linspace + meshgrid + stack per unmasked
+    pixel). Kept verbatim as the oracle: the vectorised routine must return
+    exactly these values in exactly this order."""
+    H, W = mask_2d.shape
+    sy, sx = pixel_scales
+    oy, ox = origin
+    rows, cols = np.nonzero(~mask_2d)
+    sub_arr = np.asarray(sub_size)
+    sub_arr = np.full(rows.size, sub_arr, dtype=int) if sub_arr.size == 1 else sub_arr
+    valid = sub_arr > 0
+    rows, cols, sub_arr = rows[valid], cols[valid], sub_arr[valid]
+    if sub_arr.size == 0:
+        return np.empty((0, 2), dtype=float)
+    cy, cx = (H - 1) / 2.0, (W - 1) / 2.0
+    y_pix = (cy - rows) * sy + oy
+    x_pix = (cols - cx) * sx + ox
+    coords_list = []
+    for i, s in enumerate(sub_arr):
+        dy, dx = sy / s, sx / s
+        y_off = np.linspace(+sy / 2 - dy / 2, -sy / 2 + dy / 2, s)
+        x_off = np.linspace(-sx / 2 + dx / 2, +sx / 2 - dx / 2, s)
+        y_sub, x_sub = np.meshgrid(y_off, x_off, indexing="ij")
+        coords_list.append(np.stack([y_pix[i] + y_sub.ravel(), x_pix[i] + x_sub.ravel()], axis=1))
+    return np.vstack(coords_list)
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test__grid_2d_slim_over_sampled_via_mask_from__matches_per_pixel_reference(seed):
+    rng = np.random.default_rng(seed)
+    mask_2d = rng.random((7, 9)) < 0.4
+    pixel_scales = (0.7, 0.3)
+    origin = (0.25, -0.5)
+
+    # uniform sub-size (the single-broadcast branch)
+    for sub_size in (1, 2, 3):
+        grid = aa.util.over_sample.grid_2d_slim_over_sampled_via_mask_from(
+            mask_2d=mask_2d, pixel_scales=pixel_scales, sub_size=sub_size, origin=origin
+        )
+        ref = _reference_grid_2d_slim_over_sampled_via_mask_from(mask_2d, pixel_scales, sub_size, origin)
+        assert grid.shape == ref.shape
+        assert grid == pytest.approx(ref, abs=0.0)
+
+    # per-pixel sub-sizes including zeros (skipped pixels) and mixed sizes (the block-start branch)
+    n_unmasked = int((~mask_2d).sum())
+    sub_size = rng.integers(0, 5, size=n_unmasked)
+    grid = aa.util.over_sample.grid_2d_slim_over_sampled_via_mask_from(
+        mask_2d=mask_2d, pixel_scales=pixel_scales, sub_size=sub_size, origin=origin
+    )
+    ref = _reference_grid_2d_slim_over_sampled_via_mask_from(mask_2d, pixel_scales, sub_size, origin)
+    assert grid.shape == ref.shape
+    assert grid == pytest.approx(ref, abs=0.0)
+
+
+def test__grid_2d_slim_over_sampled_via_mask_from__all_masked_or_all_zero_sub_size():
+    mask_2d = np.full((3, 3), True)
+    grid = aa.util.over_sample.grid_2d_slim_over_sampled_via_mask_from(
+        mask_2d=mask_2d, pixel_scales=(1.0, 1.0), sub_size=2
+    )
+    assert grid.shape == (0, 2)
+    mask_2d = np.full((3, 3), False)
+    grid = aa.util.over_sample.grid_2d_slim_over_sampled_via_mask_from(
+        mask_2d=mask_2d, pixel_scales=(1.0, 1.0), sub_size=np.zeros(9, dtype=int)
+    )
+    assert grid.shape == (0, 2)
