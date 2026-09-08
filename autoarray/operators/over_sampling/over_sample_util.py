@@ -413,21 +413,51 @@ def grid_2d_slim_over_sampled_via_mask_from(
     y_pix = (cy - rows) * sy + oy
     x_pix = (cols - cx) * sx + ox
 
-    # 5) For each valid pixel, generate its sub-pixel coords
-    coords_list = []
-    for i, s in enumerate(sub_arr):
-        dy = sy / s
-        dx = sx / s
+    # 5) Sub-pixel offsets, one block per pixel in row-major pixel order, each
+    #    block in ``meshgrid(y_off, x_off, indexing="ij")`` (y-major) order.
+    #
+    #    Vectorised per distinct sub-size rather than looped per pixel: the
+    #    per-pixel loop built a linspace, a meshgrid and a stack for every
+    #    unmasked pixel, and on a 2000x100 CTI frame that was ~180k iterations
+    #    and ~12s per call (four calls per bypassed CTI fit, ~50s of a 90s
+    #    smoke script — PyAutoBrain /ci_speedup, 2026-09-08). The offsets for a
+    #    given sub-size are the same for every pixel, so they are built once
+    #    per distinct sub-size and broadcast onto that sub-size's pixel centres.
+    #    Non-uniform sub-sizes keep the pixel-ordered layout through a block
+    #    start offset per pixel (a cumulative sum of the block sizes).
+    centres = np.stack([y_pix, x_pix], axis=1)
+    block_sizes = sub_arr * sub_arr
+    unique_sizes = np.unique(sub_arr)
 
-        y_off = np.linspace(+sy / 2 - dy / 2, -sy / 2 + dy / 2, s)
-        x_off = np.linspace(-sx / 2 + dx / 2, +sx / 2 - dx / 2, s)
+    if unique_sizes.size == 1:
+        s = int(unique_sizes[0])
+        offsets = _sub_pixel_offsets_from(sy=sy, sx=sx, sub_size=s)
+        return (centres[:, None, :] + offsets[None, :, :]).reshape(-1, 2)
 
-        y_sub, x_sub = np.meshgrid(y_off, x_off, indexing="ij")
+    starts = np.concatenate([[0], np.cumsum(block_sizes)[:-1]])
+    out = np.empty((int(block_sizes.sum()), 2), dtype=float)
+    for s in unique_sizes:
+        s = int(s)
+        sel = np.nonzero(sub_arr == s)[0]
+        offsets = _sub_pixel_offsets_from(sy=sy, sx=sx, sub_size=s)
+        rows_out = starts[sel][:, None] + np.arange(s * s)[None, :]
+        out[rows_out.ravel()] = (centres[sel][:, None, :] + offsets[None, :, :]).reshape(-1, 2)
+    return out
 
-        coords = np.stack([y_pix[i] + y_sub.ravel(), x_pix[i] + x_sub.ravel()], axis=1)
-        coords_list.append(coords)
 
-    return np.vstack(coords_list)
+def _sub_pixel_offsets_from(sy: float, sx: float, sub_size: int) -> np.ndarray:
+    """
+    The (y, x) offsets of the ``sub_size * sub_size`` sub-pixels of one pixel
+    from that pixel's centre, in the y-major order
+    ``np.meshgrid(y_off, x_off, indexing="ij")`` produces — identical values
+    and order to the per-pixel construction this replaces.
+    """
+    dy = sy / sub_size
+    dx = sx / sub_size
+    y_off = np.linspace(+sy / 2 - dy / 2, -sy / 2 + dy / 2, sub_size)
+    x_off = np.linspace(-sx / 2 + dx / 2, +sx / 2 - dx / 2, sub_size)
+    y_sub, x_sub = np.meshgrid(y_off, x_off, indexing="ij")
+    return np.stack([y_sub.ravel(), x_sub.ravel()], axis=1)
 
 
 def over_sample_size_via_radial_bins_from(
