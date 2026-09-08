@@ -349,3 +349,130 @@ def test__apply_sparse_operator__disable_jax_overrides_an_explicit_use_jax(
     dataset().apply_sparse_operator(use_jax=True)
 
     assert recorded == [False, True, True, True, True]
+
+    # The default builder is the type-1 NUFFT, which runs on JAX too (nufftax is a JAX library),
+    # so the same kill switch has to demote it to the NumPy brute force rather than to the JAX
+    # one. Nothing above tests that: `use_jax` only ever selected between the two brute forces.
+    monkeypatch.setattr(aa.Interferometer, "psf_precision_operator_from", original)
+
+    monkeypatch.setenv("PYAUTO_DISABLE_JAX", "1")
+    operator_under_kill_switch = np.asarray(dataset().psf_precision_operator_from())
+
+    monkeypatch.delenv("PYAUTO_DISABLE_JAX", raising=False)
+    operator_via_numpy = np.asarray(
+        dataset().psf_precision_operator_from(method="numpy")
+    )
+
+    np.testing.assert_array_equal(operator_under_kill_switch, operator_via_numpy)
+
+
+def _interferometer_for_precision_operator(mask_2d_7x7, transformer_class):
+    n_visibilities = 5
+    rng = np.random.default_rng(seed=0)
+
+    return aa.Interferometer(
+        data=aa.Visibilities(
+            visibilities=rng.normal(size=(n_visibilities, 2)).astype(np.float64)
+        ),
+        noise_map=aa.VisibilitiesNoiseMap(
+            visibilities=np.ones((n_visibilities, 2), dtype=np.float64)
+        ),
+        uv_wavelengths=rng.normal(size=(n_visibilities, 2)).astype(np.float64),
+        real_space_mask=mask_2d_7x7,
+        transformer_class=transformer_class,
+    )
+
+
+def test__psf_precision_operator_from__nufft_default_matches_the_numpy_brute_force(
+    mask_2d_7x7,
+):
+    dataset = _interferometer_for_precision_operator(
+        mask_2d_7x7, transformer.TransformerDFT
+    )
+
+    operator_via_numpy = np.asarray(dataset.psf_precision_operator_from(method="numpy"))
+    operator_default = np.asarray(dataset.psf_precision_operator_from())
+
+    # Mixed tolerance: a type-1 NUFFT bounds its error against the sum of the weights, so the
+    # near-zero entries carry no relative accuracy guarantee and need the absolute floor.
+    np.testing.assert_allclose(
+        operator_default,
+        operator_via_numpy,
+        rtol=1.0e-10,
+        atol=1.0e-10 * np.abs(operator_via_numpy[0, 0]),
+    )
+
+    # `nufft_chunk_size` is a memory ceiling, not an approximation.
+    np.testing.assert_allclose(
+        np.asarray(dataset.psf_precision_operator_from(nufft_chunk_size=2)),
+        operator_default,
+        rtol=1.0e-10,
+        atol=1.0e-10 * np.abs(operator_via_numpy[0, 0]),
+    )
+
+
+def test__psf_precision_operator_from__eps_and_chunk_size_default_to_the_transformers(
+    mask_2d_7x7, monkeypatch
+):
+    recorded = []
+
+    original = aa.util.inversion_interferometer.nufft_precision_operator_from
+
+    def spy(*args, eps, chunk_size, **kwargs):
+        recorded.append((eps, chunk_size))
+        return original(*args, eps=eps, chunk_size=chunk_size, **kwargs)
+
+    monkeypatch.setattr(
+        aa.util.inversion_interferometer, "nufft_precision_operator_from", spy
+    )
+
+    # A `TransformerNUFFT` has already chosen an accuracy and a memory ceiling; the precision
+    # operator spreads the same visibilities with the same library, so it inherits them.
+    dataset_nufft = _interferometer_for_precision_operator(
+        mask_2d_7x7, transformer.TransformerNUFFT
+    )
+    dataset_nufft.transformer.eps = 1.0e-9
+    dataset_nufft.transformer.chunk_size = 3
+
+    dataset_nufft.psf_precision_operator_from()
+
+    assert recorded[-1] == (1.0e-9, 3)
+
+    # A `TransformerDFT` has neither, so the builder's own defaults are used.
+    _interferometer_for_precision_operator(
+        mask_2d_7x7, transformer.TransformerDFT
+    ).psf_precision_operator_from()
+
+    assert recorded[-1] == (1.0e-12, None)
+
+    # An explicit value always wins over both.
+    dataset_nufft.psf_precision_operator_from(eps=1.0e-11, nufft_chunk_size=4)
+
+    assert recorded[-1] == (1.0e-11, 4)
+
+
+def test__apply_sparse_operator__method_and_nufft_kwargs_reach_the_builder(mask_2d_7x7):
+    dataset = _interferometer_for_precision_operator(
+        mask_2d_7x7, transformer.TransformerDFT
+    )
+
+    operator_via_numpy = np.asarray(dataset.psf_precision_operator_from(method="numpy"))
+
+    dataset_via_numpy = dataset.apply_sparse_operator(method="numpy")
+    dataset_default = dataset.apply_sparse_operator()
+    dataset_chunked = dataset.apply_sparse_operator(nufft_chunk_size=2, eps=1.0e-12)
+
+    # The operator only keeps `Khat`, so the plumbing is checked through it: routing to the brute
+    # force and to the NUFFT must give the same operator to the pin's tolerance.
+    np.testing.assert_allclose(
+        np.asarray(dataset_default.sparse_operator.Khat),
+        np.asarray(dataset_via_numpy.sparse_operator.Khat),
+        rtol=1.0e-10,
+        atol=1.0e-10 * np.abs(operator_via_numpy[0, 0]),
+    )
+    np.testing.assert_allclose(
+        np.asarray(dataset_chunked.sparse_operator.Khat),
+        np.asarray(dataset_default.sparse_operator.Khat),
+        rtol=1.0e-10,
+        atol=1.0e-10 * np.abs(operator_via_numpy[0, 0]),
+    )
