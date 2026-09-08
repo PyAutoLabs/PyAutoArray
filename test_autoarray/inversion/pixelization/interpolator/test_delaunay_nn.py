@@ -25,7 +25,7 @@ def test__mesh_is_public_and_selects_natural_neighbor_interpolator():
     assert mesh.areas_factor == 0.4
     assert mesh.max_cavity_triangles == 32
     assert mesh.max_neighbors == 32
-    assert mesh.query_chunk == 256
+    assert mesh.query_chunk == 4096
     assert mesh.interpolator_cls is InterpolatorDelaunayNN
     assert aa.InterpolatorDelaunayNN is InterpolatorDelaunayNN
 

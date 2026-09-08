@@ -11,6 +11,8 @@ the internal interface: a fixed-shape limit failure produces NaN weights so a
 model sample is rejected instead of silently using a truncated stencil.
 """
 
+import os
+
 import numpy as np
 from autonerves import cached_property
 
@@ -33,7 +35,126 @@ from autoarray.inversion.regularization.regularization_util import (
 # autolens_workspace_test/scripts/misc/jax_assertions/delaunay_nn_caps.py.
 SIBSON_MAX_CAVITY_TRIANGLES = 32
 SIBSON_MAX_NEIGHBORS = 32
-SIBSON_QUERY_CHUNK = 256
+
+
+def _positive_int_env(name, raw):
+    """Parse a positive-integer environment override; ``None`` when unset."""
+    if raw is None:
+        return None
+    message = f"{name} must be a positive integer, got {raw!r}"
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise ValueError(message) from error
+    if value <= 0:
+        raise ValueError(message)
+    return value
+
+
+def _bool_env(name, raw):
+    """Parse a ``"0"``/``"1"`` environment override; ``None`` when unset."""
+    if raw is None:
+        return None
+    if raw not in ("0", "1"):
+        raise ValueError(f"{name} must be '0' or '1', got {raw!r}")
+    return raw == "1"
+
+
+# ``jax.lax.map`` block size for the JAX Sibson query loop, bound onto the mesh
+# as ``DelaunayNN.query_chunk``.  It is a MEMORY GUARD and nothing else: it
+# bounds the ``(C, 3, 2)`` per-query intermediates of the cavity -- the
+# inserted Watson circumcircle centres and their contributions, of order
+# 15-25 kB per query per lane at cap 32 -- so the live footprint stays bounded
+# when the likelihood is vmapped over many live points.
+#
+# It is emphatically not a speed knob to be kept small.  The walk and the two
+# cavity loops inside a chunk are latency-bound, so each extra chunk serialises
+# another complete set of kernel launches: halving the chunk roughly doubles
+# the launch count of the pass (issue #532).  Raise it as far as device memory
+# allows for the mesh and vmap batch in use.
+#
+# The default is the A100 sweep of issue #532 (2026-09-08, RAL
+# ``euclid-ral-gpu-2``, NVIDIA A100 80GB PCIe, fp64, jobs 342321/342322 and the
+# array 342323_[0-3]; autolens_profiling
+# ``results/notes/delaunay_nn_launch_latency.md``).  Cell: the HST imaging
+# DelaunayNN likelihood breakdown, Hilbert-1500 mesh, MGE-60 lens light,
+# ConstantSplit regularization, 17,980 over-sampled data queries + 6,000 split
+# points, ``--split-setup --vmap-batch 16``.  Measured params->H prefix and the
+# peak ``nvidia-smi`` memory sampled through the whole run at vmap 16:
+#
+#   chunk | params->H unbatched | params->H per call @vmap 16 | peak VRAM
+#     256 |            88.29 ms |                    23.07 ms | 41,495 MiB
+#     512 |            52.21 ms |                    18.24 ms | 41,503 MiB
+#    1024 |            35.32 ms |                    19.57 ms | 41,503 MiB
+#    2048 |            27.22 ms |                    19.13 ms | 41,503 MiB
+#    4096 |            24.66 ms |                    16.45 ms | 41,503 MiB
+#
+# (control, ``main`` at ``d7c96762``, chunk 256: 143.90 ms / 24.32 ms /
+# 41,495 MiB.  The eager ``EXPECTED_LOG_EVIDENCE_HST = 29144.581944`` pin held
+# on every row, so the chunk is bit-neutral as designed.)
+#
+# 4096 is fastest on both readings and the VRAM clause of the sweep's decision
+# rule turned out uninformative: the ~41.5 GiB plateau is identical at every
+# chunk *and* on the control, because it is the vmap-16 dense inversion block,
+# not the cavity intermediates.  The guard arithmetic says why there is room --
+# ``(C, 3, 2)`` fp64 intermediates at ~25 kB per query per lane over 4096
+# queries x 16 lanes is ~1.6 GB, ~2 % of an 80 GB card.
+#
+# Set ``PYAUTO_SIBSON_QUERY_CHUNK`` (a positive integer) to override the
+# default at import time.  That is both how the sweep above was run without
+# editing source and the escape hatch for a smaller GPU or a much larger cell:
+# lower it until the ``(C, 3, 2)`` intermediates fit, at a proportional cost in
+# sequential ``lax.map`` trips.
+SIBSON_QUERY_CHUNK = 4096
+
+_QUERY_CHUNK_OVERRIDE = _positive_int_env(
+    "PYAUTO_SIBSON_QUERY_CHUNK", os.environ.get("PYAUTO_SIBSON_QUERY_CHUNK")
+)
+if _QUERY_CHUNK_OVERRIDE is not None:
+    SIBSON_QUERY_CHUNK = _QUERY_CHUNK_OVERRIDE
+
+# Candidate-edge loop strategy inside the cavity walk
+# (:func:`_cavity_triangle_indexes_jax`).  The three edges of a cavity triangle
+# are either unrolled at trace time or run through a 3-trip ``fori_loop``.  The
+# two are BIT-IDENTICAL -- the same ``add_candidate`` calls for edges 0, 1, 2 in
+# that order, so the same cavity insertion order and therefore the same stencil
+# column order and the same floating-point summation order downstream (verified
+# against a frozen reference of every ``jax_delaunay_nn`` output).  They differ
+# only in how the program is emitted, and which is faster is a property of the
+# backend, so it is decided at trace time:
+#
+#   * accelerator -- the cavity walk is launch-latency bound, and unrolling the
+#     inner loop removes ~28% of the kernel launches per chunk (1,244 -> 892 on
+#     the A100 HST / Hilbert-1500 cell, issue #532), so unroll.
+#   * CPU -- there is no launch cost to remove, and the unrolled body is three
+#     times the code inside a 32-trip loop.  Measured with an interleaved
+#     in-process paired A/B of ``jax_delaunay_nn`` (N=1500, Q=17,980 data +
+#     6,000 split, fp64, warm median of 25-30 alternating rounds): rolled
+#     566.0 / 567.8 ms vs unrolled 614.4 / 614.7 ms, i.e. the rolled loop is
+#     ~8-9% faster.  The same harness reads 0.998 between two copies of
+#     identical code, so that gap is real, and the standing no-CPU-slowdown
+#     constraint keeps the loop rolled here.
+#
+# ``PYAUTO_SIBSON_UNROLL_CANDIDATES`` ("1" or "0") forces one strategy for
+# benchmarking; unset means decide from ``jax.default_backend()``.
+SIBSON_UNROLL_CANDIDATES = _bool_env(
+    "PYAUTO_SIBSON_UNROLL_CANDIDATES",
+    os.environ.get("PYAUTO_SIBSON_UNROLL_CANDIDATES"),
+)
+
+
+def _sibson_unroll_candidates():
+    """Whether to unroll the cavity walk's three candidate edges.
+
+    ``SIBSON_UNROLL_CANDIDATES`` (the environment override) wins when set;
+    otherwise every backend but CPU unrolls.  See the comment above.
+    """
+    if SIBSON_UNROLL_CANDIDATES is not None:
+        return SIBSON_UNROLL_CANDIDATES
+
+    import jax
+
+    return jax.default_backend() != "cpu"
 
 
 def _cross(u, v):
@@ -165,6 +286,8 @@ def _cavity_triangle_indexes_jax(
     import jax
     import jax.numpy as jnp
 
+    unroll = _sibson_unroll_candidates()
+
     safe_seed = jnp.maximum(seed_simplex, 0)
     cavity = -jnp.ones((max_cavity_triangles,), dtype=jnp.int32)
     cavity = cavity.at[0].set(safe_seed)
@@ -198,7 +321,16 @@ def _cavity_triangle_indexes_jax(
             overflow = overflow | (accepted & ~has_space)
             return cavity, count, overflow
 
-        return jax.lax.fori_loop(0, 3, add_candidate, (cavity, count, overflow))
+        # Unrolled or rolled by ``_sibson_unroll_candidates()``; the two are
+        # bit-identical by construction (same calls, edges 0, 1, 2, same
+        # order), and the choice is a backend performance question only --
+        # see the comment on ``SIBSON_UNROLL_CANDIDATES``.
+        carry = (cavity, count, overflow)
+        if unroll:
+            for edge in range(3):
+                carry = add_candidate(edge, carry)
+            return carry
+        return jax.lax.fori_loop(0, 3, add_candidate, carry)
 
     return jax.lax.fori_loop(
         0,
@@ -434,9 +566,36 @@ def sibson_mappings_weights_from_tables(
     max_cavity_triangles=SIBSON_MAX_CAVITY_TRIANGLES,
     max_neighbors=SIBSON_MAX_NEIGHBORS,
     query_chunk=SIBSON_QUERY_CHUNK,
+    circumcircles=None,
     xp=np,
 ):
     """Calculate fixed-shape Sibson mappings and weights from Delaunay tables.
+
+    Loop structure (and why the chunk exists)
+    -----------------------------------------
+    On the JAX path this is three nested loops: a ``jax.lax.map`` over
+    ``query_chunk``-sized blocks of queries, a ``fori_loop`` of
+    ``max_cavity_triangles`` trips walking the insertion cavity
+    (:func:`_cavity_triangle_indexes_jax`), and the three candidate edges of
+    each cavity triangle -- the last of which is unrolled.  Only the outer
+    ``lax.map`` is sequential *in the queries*: every chunk re-runs the whole
+    cavity walk, so the kernel-launch count of one call is roughly
+    ``ceil(Q / query_chunk)`` times the launches of a single chunk.  With the
+    cavity loop dominating that per-chunk count, a small chunk multiplies a
+    latency-bound program rather than saving time, which is why
+    ``query_chunk`` is documented as a memory guard on the ``(C, 3, 2)``
+    per-cavity intermediates and nothing else (issue #532).  The NumPy path
+    ignores ``query_chunk`` entirely and loops over queries in Python.
+
+    Parameters
+    ----------
+    circumcircles
+        Optional precomputed ``(centres, radii_squared, valid)`` triple for
+        ``simplices_padded``, as returned by
+        :func:`delaunay_circumcircles_from`.  They depend only on the frozen
+        simplex table, so a caller interpolating several query sets against
+        one mesh (``jax_delaunay_nn``) computes them once and passes them in.
+        ``None`` computes them here, which is what every other caller does.
 
     Returns
     -------
@@ -447,9 +606,9 @@ def sibson_mappings_weights_from_tables(
         Prototype diagnostics.  Overflow or a Watson edge degeneracy produces
         NaN weights rather than silently returning an approximate stencil.
     """
-    circumcentres, circumradii_squared, circumcircle_valid = (
-        delaunay_circumcircles_from(points, simplices_padded, xp=xp)
-    )
+    if circumcircles is None:
+        circumcircles = delaunay_circumcircles_from(points, simplices_padded, xp=xp)
+    circumcentres, circumradii_squared, circumcircle_valid = circumcircles
 
     def single(query, seed_simplex, outside_fallback_index):
         return _sibson_single_from_tables(
@@ -639,37 +798,22 @@ def jax_delaunay_nn(
     Qhull returns only fixed-shape integer connectivity through a stopped
     ``pure_callback``.  Point location, circumcircles, Sibson weights, dual
     areas, and split-cross coordinates all remain in the JAX graph.
+
+    The data grid and the ``4N`` split-cross points are located *and*
+    interpolated in ONE concatenated pass, the same pattern
+    :func:`jax_delaunay` uses for its walk.  Both the visibility walk and the
+    Sibson cavity loops are latency-bound, so two passes pay two full sets of
+    kernel launches while one concatenated pass pays roughly one (issue #532).
+    The circumcircles of the frozen simplex table do not depend on the
+    queries, so they are computed once here and handed to
+    :func:`sibson_mappings_weights_from_tables` instead of being recomputed
+    per pass.  Split points are still seeded at their own nearest vertex and
+    keep their own outside-hull fallback: concatenation changes only how many
+    programs run, never a per-query result.
     """
     import jax.numpy as jnp
 
     simplices_padded, simplex_neighbors, vertex_simplex = _jax_delaunay_tables(points)
-
-    def mappings_weights_for(query):
-        delaunay_mappings, simplex_indexes = pix_indexes_delaunay_walk_from(
-            query_points=query,
-            points=points,
-            simplices_padded=simplices_padded,
-            simplex_neighbors=simplex_neighbors,
-            vertex_simplex=vertex_simplex,
-            xp=jnp,
-            return_simplex_indexes=True,
-        )
-        return sibson_mappings_weights_from_tables(
-            query_points=query,
-            points=points,
-            simplices_padded=simplices_padded,
-            simplex_neighbors=simplex_neighbors,
-            simplex_indexes=simplex_indexes,
-            outside_fallback_indexes=delaunay_mappings[:, 0],
-            max_cavity_triangles=max_cavity_triangles,
-            max_neighbors=max_neighbors,
-            query_chunk=query_chunk,
-            xp=jnp,
-        )
-
-    mappings, sizes, weights, cavity_sizes, overflow, degenerate = mappings_weights_for(
-        query_points
-    )
 
     valid = simplices_padded[:, 0] >= 0
     simplices = simplices_padded.clip(min=0)
@@ -689,6 +833,44 @@ def jax_delaunay_nn(
         area_weights=areas_factor * jnp.sqrt(areas),
         xp=jnp,
     )
+
+    n_query = query_points.shape[0]
+    all_query_points = jnp.concatenate([query_points, split_points])
+
+    delaunay_mappings, simplex_indexes = pix_indexes_delaunay_walk_from(
+        query_points=all_query_points,
+        points=points,
+        simplices_padded=simplices_padded,
+        simplex_neighbors=simplex_neighbors,
+        vertex_simplex=vertex_simplex,
+        xp=jnp,
+        return_simplex_indexes=True,
+    )
+
+    circumcircles = delaunay_circumcircles_from(points, simplices_padded, xp=jnp)
+
+    outputs = sibson_mappings_weights_from_tables(
+        query_points=all_query_points,
+        points=points,
+        simplices_padded=simplices_padded,
+        simplex_neighbors=simplex_neighbors,
+        simplex_indexes=simplex_indexes,
+        outside_fallback_indexes=delaunay_mappings[:, 0],
+        max_cavity_triangles=max_cavity_triangles,
+        max_neighbors=max_neighbors,
+        query_chunk=query_chunk,
+        circumcircles=circumcircles,
+        xp=jnp,
+    )
+
+    (
+        mappings,
+        sizes,
+        weights,
+        cavity_sizes,
+        overflow,
+        degenerate,
+    ) = (output[:n_query] for output in outputs)
     (
         splitted_mappings,
         splitted_sizes,
@@ -696,7 +878,7 @@ def jax_delaunay_nn(
         split_cavity_sizes,
         split_overflow,
         split_degenerate,
-    ) = mappings_weights_for(split_points)
+    ) = (output[n_query:] for output in outputs)
 
     return (
         points,
