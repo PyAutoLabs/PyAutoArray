@@ -251,10 +251,10 @@ class Interferometer(AbstractDataset):
 
         The default builder (`method="nufft"`) computes the precision operator as a type-1 NUFFT, so
         it costs `O(N_vis * nspread^2 + M log M)` for `M = 4 * Ny * Nx` — seconds even at a million
-        visibilities. The brute-force builders (`method="numpy"` / `"jax"`, and the `use_jax` kwarg)
-        are `O(N_vis * N_pix)` and can take minutes to hours; they are kept as the reference the
-        NUFFT builder is pinned against. Either way the result can be cached to disk and reloaded
-        via `nufft_precision_operator=`.
+        visibilities. The brute-force builders (`method="numpy"` / `"jax"`) are `O(N_vis * N_pix)`
+        and can take minutes to hours; they are kept as the reference the NUFFT builder is pinned
+        against. Either way the result can be cached to disk and reloaded via
+        `nufft_precision_operator=`.
 
         Parameters
         ----------
@@ -284,7 +284,11 @@ class Interferometer(AbstractDataset):
         show_memory
             If `True`, memory usage statistics are printed while computing the NUFFT precision matrix.
         use_jax
-            If `True`, JAX is used to accelerate the NUFFT precision matrix computation.
+            Only honoured when a brute-force builder is selected: `method="numpy"` with
+            `use_jax=True` runs the JAX brute force (equivalent to `method="jax"`). Under the
+            default `method="nufft"` it is ignored, because the NUFFT already runs on JAX --
+            so an existing `use_jax=True` call keeps the fast path rather than being demoted
+            to the `O(N_vis * N_pix)` brute force.
 
             `PYAUTO_DISABLE_JAX=1` overrides this to `False`. That variable is a
             harness-level switch, not a preference: it is the documented way to force the
@@ -292,7 +296,9 @@ class Interferometer(AbstractDataset):
             and the smoke profiles set it so a fast run does not pay a JIT compile. An
             explicit `use_jax=True` in a script -- which is the right thing for a script
             demonstrating the production path to say -- must therefore not defeat it, or
-            the harness pays 2.3-3.2 s of compile for a backend it asked to disable.
+            the harness pays 2.3-3.2 s of compile for a backend it asked to disable. (The
+            same switch demotes the `"nufft"` builder to the NumPy brute force inside
+            `nufft_precision_operator_from`.)
 
         Precondition
         ------------
@@ -317,6 +323,9 @@ class Interferometer(AbstractDataset):
             If any visibility has unequal real and imaginary noise sigma.
         """
 
+        # `use_jax` now only selects between the two brute forces (the `"nufft"` builder
+        # runs on JAX whatever it says), so this clears it before it can upgrade
+        # `method="numpy"` to the JAX brute force under the kill switch.
         if disable_jax():
             use_jax = False
 
@@ -357,7 +366,7 @@ class Interferometer(AbstractDataset):
             n_vis = self.uv_wavelengths.shape[0]
             n_pix = self.real_space_mask.pixels_in_mask
 
-            if method != "nufft" or use_jax:
+            if method != "nufft":
                 logger.info(
                     f"INTERFEROMETER - The precision operator is being built by a brute-force "
                     f"builder, which is O(N_vis x N_pix) = O({n_vis * n_pix:.1e}) and can take "
@@ -432,9 +441,9 @@ class Interferometer(AbstractDataset):
 
         The default builder (`method="nufft"`) computes this as a type-1 (adjoint) NUFFT, which is
         `O(N_vis * nspread^2 + M log M)` for `M = 4 * Ny * Nx` — seconds even at a million
-        visibilities. The brute-force builders (`method="numpy"` / `"jax"`, and the `use_jax`
-        kwarg) are `O(N_vis * N_pix)` and can take minutes to hours on a CPU for a
-        high-resolution mask; they are kept as the reference the NUFFT builder is pinned against.
+        visibilities. The brute-force builders (`method="numpy"` / `"jax"`) are
+        `O(N_vis * N_pix)` and can take minutes to hours on a CPU for a high-resolution mask;
+        they are kept as the reference the NUFFT builder is pinned against.
         The result can still be saved to disk and reloaded rather than recomputed on each run —
         use `apply_sparse_operator(nufft_precision_operator=...)` to attach a cached result.
 
@@ -448,7 +457,9 @@ class Interferometer(AbstractDataset):
         show_memory
             If `True`, memory usage statistics are printed during computation.
         use_jax
-            If `True`, the JAX brute-force builder is used (equivalent to `method="jax"`).
+            Only honoured when a brute-force builder is selected: `method="numpy"` with
+            `use_jax=True` runs the JAX brute force (equivalent to `method="jax"`). It is
+            ignored under the default `method="nufft"`, which already runs on JAX.
         method
             Which builder computes the operator: `"nufft"` (default), `"numpy"` or `"jax"`.
         eps

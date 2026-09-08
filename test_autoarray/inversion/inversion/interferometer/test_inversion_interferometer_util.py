@@ -577,15 +577,32 @@ def test__nufft_precision_operator_from__method_routes_to_each_builder():
         operator_via_jax,
     )
 
-    # `use_jax=True` is kept for backwards compatibility and maps onto `method="jax"`.
+    # `use_jax=True` only upgrades a brute-force method, so `method="numpy"` with it set is
+    # the JAX brute force.
     np.testing.assert_array_equal(
         np.asarray(
             aa.util.inversion_interferometer.nufft_precision_operator_from(
-                use_jax=True, **inputs
+                method="numpy", use_jax=True, **inputs
             )
         ),
         operator_via_jax,
     )
+
+    # Under the default `method="nufft"` it is ignored -- the NUFFT already runs on JAX, so
+    # honouring it there would demote every existing `use_jax=True` caller (the workspace
+    # `apply_sparse_operator(use_jax=True)` calls) from seconds to the O(N_pix * K) brute force.
+    operator_use_jax = np.asarray(
+        aa.util.inversion_interferometer.nufft_precision_operator_from(
+            use_jax=True, **inputs
+        )
+    )
+
+    np.testing.assert_array_equal(operator_use_jax, operator_via_nufft)
+    _assert_matches_brute_force(operator_use_jax, operator_via_np)
+
+    # The control: the NUFFT array is not the JAX brute-force array, so the assertion above is
+    # testing the routing and not two builders that happen to agree bitwise.
+    assert not np.array_equal(operator_use_jax, operator_via_jax)
 
     # The default is the NUFFT builder, and it agrees with the brute force.
     operator_default = np.asarray(
@@ -616,10 +633,17 @@ def test__nufft_precision_operator_from__disable_jax_falls_back_to_the_numpy_bui
 
     # `PYAUTO_DISABLE_JAX=1` is the harness-level kill switch. Both the default NUFFT builder and
     # the `"jax"` brute force run on JAX, so both must fall back -- and loudly, because the NumPy
-    # brute force is O(N_pix * K) where the NUFFT is O(K * nspread^2 + M log M).
+    # brute force is O(N_pix * K) where the NUFFT is O(K * nspread^2 + M log M). `use_jax=True`
+    # falls back either way: ignored under the default, and demoted again when it upgrades
+    # `method="numpy"` to the JAX brute force.
     monkeypatch.setenv("PYAUTO_DISABLE_JAX", "1")
 
-    for kwargs in ({}, {"method": "jax"}, {"use_jax": True}):
+    for kwargs in (
+        {},
+        {"method": "jax"},
+        {"use_jax": True},
+        {"method": "numpy", "use_jax": True},
+    ):
         caplog.clear()
 
         with caplog.at_level("WARNING"):

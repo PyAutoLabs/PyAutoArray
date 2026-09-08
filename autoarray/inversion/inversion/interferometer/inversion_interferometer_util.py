@@ -122,15 +122,15 @@ def nufft_precision_operator_from(
      matrix construction without performing a NUFFT per source pixel.
 
      -------------------------------------------------------------------------------
-     Backend behaviour
+     Backend behaviour (the two brute-force builders)
      -------------------------------------------------------------------------------
-     - NumPy backend (use_jax=False, default):
+     - NumPy backend (`method="numpy"`):
          * CPU execution
          * Explicit Python loop over visibility chunks
          * Supports progress bars and optional memory reporting
          * Numerically closest to the original reference implementation
 
-     - JAX backend (use_jax=True):
+     - JAX backend (`method="jax"`, or `method="numpy"` with `use_jax=True`):
          * JIT-compilable and GPU/TPU capable
          * Uses fixed-size chunking and lax.fori_loop
          * No Python-side loops during execution
@@ -240,7 +240,13 @@ def nufft_precision_operator_from(
       `O(N_pix*K)` reference builder. Kept as the reference the NUFFT builder is
       pinned against, and used as the fallback below.
     - `"jax"` -- `nufft_precision_operator_via_jax_from`, the same brute force on
-      JAX. `use_jax=True` is kept for backwards compatibility and maps to this.
+      JAX. `method="jax"` is the explicit way to ask for it.
+
+    `use_jax` is only honoured when a brute-force method is selected: it upgrades
+    `method="numpy"` to `method="jax"` and is otherwise ignored. Under the default
+    `method="nufft"` it does nothing, because the NUFFT already runs on JAX -- an
+    existing `use_jax=True` caller therefore keeps the fast path rather than being
+    demoted to the `O(N_pix*K)` brute force.
 
     Two fallbacks to `"numpy"` are taken, both logged loudly (never silently),
     because they cost `O(N_pix*K)` where the NUFFT is `O(K*nspread^2 + M log M)`:
@@ -273,8 +279,12 @@ def nufft_precision_operator_from(
         optimisation), used by `method="nufft"` only. `None` is one shot.
     chunk_k
         The visibility chunk size of the two brute-force builders.
+    use_jax
+        Only honoured when a brute-force method is selected: `method="numpy"` with
+        `use_jax=True` runs the JAX brute force (equivalent to `method="jax"`). It is
+        ignored under the default `method="nufft"`, which already runs on JAX.
     """
-    if use_jax:
+    if method == "numpy" and use_jax:
         method = "jax"
 
     if method not in ("nufft", "numpy", "jax"):
