@@ -230,6 +230,9 @@ class Interferometer(AbstractDataset):
         self,
         nufft_precision_operator=None,
         batch_size: int = 128,
+        method: str = "nufft",
+        eps: Optional[float] = None,
+        nufft_chunk_size: Optional[int] = None,
         chunk_k: int = 2048,
         show_progress: bool = False,
         show_memory: bool = False,
@@ -246,24 +249,12 @@ class Interferometer(AbstractDataset):
         and is used automatically by `FitInterferometer` when performing pixelized reconstructions via
         the inversion module.
 
-        Computing the NUFFT precision matrix from scratch can be very slow (runtime scales with both
-        the number of visibilities and the real-space mask resolution — potentially hours for large
-        datasets). The result can be cached to disk and reloaded to avoid recomputation.
-
-        Both `TransformerDFT` and `TransformerNUFFT` are supported here and agree to ~3e-13 relative.
-        Which is faster is governed by the product `N_vis * N_pix`, because the DFT setup cost scales
-        as `O(N_vis * N_pix)` whereas the NUFFT scales as `O((N_vis + N_pix) log N)` on top of a fixed
-        ~2s overhead:
-
-        - below `N_vis * N_pix ~ 1e7`, `TransformerDFT` is faster (measured 0.2-0.7x the NUFFT time)
-        - above it, `TransformerNUFFT` is faster (1.2-1.9x at 1e7-1e8)
-        - above `~1e8`, the DFT's `O(N_vis * N_pix)` allocation makes it infeasible rather than merely
-          slow — extrapolating a measured 446 MB at N_vis=4e3 / N_pix=1e4 gives ~109 GB at 1M
-          visibilities, whereas the NUFFT path allocates nothing beyond its working buffers.
-
-        As a rule of thumb at a typical 64x64 mask the crossover sits near 5,000 visibilities, but on a
-        coarser mask the DFT stays ahead well beyond that — it is the product that matters, not the
-        visibility count alone.
+        The default builder (`method="nufft"`) computes the precision operator as a type-1 NUFFT, so
+        it costs `O(N_vis * nspread^2 + M log M)` for `M = 4 * Ny * Nx` — seconds even at a million
+        visibilities. The brute-force builders (`method="numpy"` / `"jax"`, and the `use_jax` kwarg)
+        are `O(N_vis * N_pix)` and can take minutes to hours; they are kept as the reference the
+        NUFFT builder is pinned against. Either way the result can be cached to disk and reloaded
+        via `nufft_precision_operator=`.
 
         Parameters
         ----------
@@ -274,9 +265,20 @@ class Interferometer(AbstractDataset):
         batch_size
             The number of real-space pixels processed per batch when building the sparse operator.
             Reducing this lowers peak memory usage at the cost of speed.
+        method
+            Which builder computes the precision operator: `"nufft"` (default, the type-1 NUFFT),
+            `"numpy"` or `"jax"` (the brute-force reference builders).
+        eps
+            The requested NUFFT precision of the `"nufft"` builder. `None` takes the transformer's
+            own `eps` when it is a `TransformerNUFFT`, else `1e-12`.
+        nufft_chunk_size
+            The visibility chunk size of the `"nufft"` builder, a memory ceiling rather than an
+            optimisation. `None` takes the transformer's own `chunk_size` when it is a
+            `TransformerNUFFT`, else no chunking.
         chunk_k
-            The number of visibilities processed per chunk when computing the NUFFT precision matrix
-            inside `psf_precision_operator_from()`. Reducing this lowers peak memory usage.
+            The number of visibilities processed per chunk by the brute-force builders when computing
+            the NUFFT precision matrix inside `psf_precision_operator_from()`. Reducing this lowers
+            peak memory usage.
         show_progress
             If `True`, a progress bar is displayed while computing the NUFFT precision matrix.
         show_memory
@@ -350,25 +352,41 @@ class Interferometer(AbstractDataset):
 
         if nufft_precision_operator is None:
 
-            logger.info(
-                "INTERFEROMETER - Computing NUFFT Precision Operator; runtime scales with visibility count and mask resolution, CPU run times may exceed hours."
-            )
+            logger.info("INTERFEROMETER - Computing NUFFT Precision Operator.")
 
             n_vis = self.uv_wavelengths.shape[0]
             n_pix = self.real_space_mask.pixels_in_mask
 
-            if n_vis * n_pix < 10**7 and not isinstance(
-                self.transformer, TransformerDFT
-            ):
+            if method != "nufft" or use_jax:
                 logger.info(
-                    f"INTERFEROMETER - This dataset is small for the NUFFT setup path "
-                    f"(N_vis x N_pix = {n_vis * n_pix:.1e}, below the ~1e7 crossover). "
-                    f"`TransformerDFT` computes this operator faster below that point; "
-                    f"`TransformerNUFFT` wins above it, and above ~1e8 it is the only "
-                    f"option that fits in memory. Both are supported here."
+                    f"INTERFEROMETER - The precision operator is being built by a brute-force "
+                    f"builder, which is O(N_vis x N_pix) = O({n_vis * n_pix:.1e}) and can take "
+                    f"minutes to hours. The default `method='nufft'` builds the same array as a "
+                    f"type-1 NUFFT in seconds."
                 )
 
+            if isinstance(self.transformer, TransformerDFT):
+                # This is about the transformer, not the precision operator: the operator is
+                # built by `nufft_precision_operator_from` either way and does not go through
+                # the transformer at all. The DFT transformer allocates O(N_vis x N_pix) for
+                # every subsequent transform, which is what becomes infeasible at scale --
+                # extrapolating a measured 446 MB at N_vis=4e3 / N_pix=1e4 gives ~109 GB at a
+                # million visibilities, whereas `TransformerNUFFT` allocates nothing beyond its
+                # working buffers. Below `N_vis x N_pix ~ 1e7` the DFT is the faster transform
+                # (0.2-0.7x the NUFFT time) and there is nothing to warn about.
+                if n_vis * n_pix > 10**7:
+                    logger.info(
+                        f"INTERFEROMETER - This dataset uses `TransformerDFT` at "
+                        f"N_vis x N_pix = {n_vis * n_pix:.1e}, above the ~1e7 crossover where "
+                        f"`TransformerNUFFT` transforms faster (1.2-1.9x at 1e7-1e8); above ~1e8 "
+                        f"the DFT's O(N_vis x N_pix) allocation makes it infeasible rather than "
+                        f"merely slow. The two agree to ~3e-13 relative."
+                    )
+
             nufft_precision_operator = self.psf_precision_operator_from(
+                method=method,
+                eps=eps,
+                nufft_chunk_size=nufft_chunk_size,
                 chunk_k=chunk_k,
                 show_progress=show_progress,
                 show_memory=show_memory,
@@ -401,6 +419,9 @@ class Interferometer(AbstractDataset):
         show_progress: bool = False,
         show_memory: bool = False,
         use_jax: bool = False,
+        method: str = "nufft",
+        eps: Optional[float] = None,
+        nufft_chunk_size: Optional[int] = None,
     ):
         """
         Compute the NUFFT precision matrix for this interferometer dataset.
@@ -409,23 +430,34 @@ class Interferometer(AbstractDataset):
         baseline, weighted by the noise map. It is the core precomputed quantity required for
         efficient pixelized source reconstruction via the sparse linear algebra formalism.
 
-        This computation can be very slow for large datasets (runtime scales with the number of
-        visibilities multiplied by the number of unmasked real-space pixels). For datasets with
-        tens of thousands of visibilities and high-resolution masks, computation can take hours
-        on a CPU. The result should be saved to disk and reloaded rather than recomputed on each
-        run. Use `apply_sparse_operator(nufft_precision_operator=...)` to attach a cached result.
+        The default builder (`method="nufft"`) computes this as a type-1 (adjoint) NUFFT, which is
+        `O(N_vis * nspread^2 + M log M)` for `M = 4 * Ny * Nx` — seconds even at a million
+        visibilities. The brute-force builders (`method="numpy"` / `"jax"`, and the `use_jax`
+        kwarg) are `O(N_vis * N_pix)` and can take minutes to hours on a CPU for a
+        high-resolution mask; they are kept as the reference the NUFFT builder is pinned against.
+        The result can still be saved to disk and reloaded rather than recomputed on each run —
+        use `apply_sparse_operator(nufft_precision_operator=...)` to attach a cached result.
 
         Parameters
         ----------
         chunk_k
-            The number of visibilities processed per chunk. Reducing this lowers peak memory
-            usage during computation at the cost of speed.
+            The number of visibilities processed per chunk by the brute-force builders. Reducing
+            this lowers peak memory usage during computation at the cost of speed.
         show_progress
-            If `True`, a progress bar is shown during computation.
+            If `True`, a progress bar is shown during computation by the NumPy brute force.
         show_memory
             If `True`, memory usage statistics are printed during computation.
         use_jax
-            If `True`, JAX is used to accelerate the computation.
+            If `True`, the JAX brute-force builder is used (equivalent to `method="jax"`).
+        method
+            Which builder computes the operator: `"nufft"` (default), `"numpy"` or `"jax"`.
+        eps
+            The requested NUFFT precision of the `"nufft"` builder. `None` takes the transformer's
+            own `eps` when it is a `TransformerNUFFT`, else `1e-12`.
+        nufft_chunk_size
+            The visibility chunk size of the `"nufft"` builder, a memory ceiling rather than an
+            optimisation. `None` takes the transformer's own `chunk_size` when it is a
+            `TransformerNUFFT`, else no chunking.
 
         Returns
         -------
@@ -433,11 +465,29 @@ class Interferometer(AbstractDataset):
             The NUFFT precision matrix of shape (total_pixels, total_pixels) where total_pixels
             is the number of unmasked real-space pixels.
         """
+        transformer = self.transformer
+
+        # The NUFFT builder and `TransformerNUFFT` spread the same visibilities onto a mode grid
+        # with the same library, so a dataset that has already chosen an accuracy and a memory
+        # ceiling for its transformer should not have to repeat them here.
+        if eps is None:
+            eps = (
+                transformer.eps
+                if isinstance(transformer, TransformerNUFFT)
+                else 1.0e-12
+            )
+
+        if nufft_chunk_size is None and isinstance(transformer, TransformerNUFFT):
+            nufft_chunk_size = transformer.chunk_size
+
         return inversion_interferometer_util.nufft_precision_operator_from(
             noise_map_real=self.noise_map.array.real,
             uv_wavelengths=self.uv_wavelengths,
-            shape_masked_pixels_2d=self.transformer.grid.mask.shape_native_masked_pixels,
-            grid_radians_2d=self.transformer.grid.mask.derive_grid.all_false.in_radians.native.array,
+            shape_masked_pixels_2d=transformer.grid.mask.shape_native_masked_pixels,
+            grid_radians_2d=transformer.grid.mask.derive_grid.all_false.in_radians.native.array,
+            method=method,
+            eps=eps,
+            chunk_size=nufft_chunk_size,
             chunk_k=chunk_k,
             show_memory=show_memory,
             show_progress=show_progress,

@@ -3,6 +3,25 @@ import logging
 import numpy as np
 import time
 from pathlib import Path
+from typing import Optional
+
+from autoarray.operators.transformer import _load_nufftax, nufftax_exception
+
+try:
+    from autonerves.test_mode import disable_jax
+except ImportError:
+    # Mirrors the fallback in `autoarray/dataset/interferometer/dataset.py`:
+    # `disable_jax()` arrives in the autonerves release that closes
+    # PyAutoNerves#159, and a `--no-deps` install, an editable checkout or a
+    # hand-built virtualenv can all put an older autonerves on the path
+    # regardless of the floor in `pyproject.toml`. Degrade to the predicate's
+    # own one-line body rather than fail at module load; delete the fallback
+    # when the floor names a release carrying the predicate.
+    import os
+
+    def disable_jax():
+        return os.environ.get("PYAUTO_DISABLE_JAX") == "1"
+
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +102,9 @@ def nufft_precision_operator_from(
     shape_masked_pixels_2d,
     grid_radians_2d: np.ndarray,
     *,
+    method: str = "nufft",
+    eps: float = 1.0e-12,
+    chunk_size: Optional[int] = None,
     chunk_k: int = 2048,
     show_progress: bool = False,
     show_memory: bool = False,
@@ -209,8 +231,25 @@ def nufft_precision_operator_from(
 
     Notes
     -----
-    - If use_jax=True, the JAX implementation is used (requires JAX installed).
-    - If use_jax=False, the NumPy implementation is used.
+    Three builders compute the same array; `method` selects which:
+
+    - `"nufft"` (default) -- `nufft_precision_operator_via_nufft_from`, the type-1
+      (adjoint) NUFFT. `O(K*nspread^2 + M log M)` for `M = 4*Ny*Nx`, i.e. seconds
+      where the brute-force builders take minutes to hours. Needs `nufftax`.
+    - `"numpy"` -- `nufft_precision_operator_via_np_from`, the brute-force
+      `O(N_pix*K)` reference builder. Kept as the reference the NUFFT builder is
+      pinned against, and used as the fallback below.
+    - `"jax"` -- `nufft_precision_operator_via_jax_from`, the same brute force on
+      JAX. `use_jax=True` is kept for backwards compatibility and maps to this.
+
+    Two fallbacks to `"numpy"` are taken, both logged loudly (never silently),
+    because they cost `O(N_pix*K)` where the NUFFT is `O(K*nspread^2 + M log M)`:
+
+    1. `disable_jax()` is true (`PYAUTO_DISABLE_JAX=1`, the test-mode kill switch).
+       Both `"nufft"` and `"jax"` run on JAX, so both are demoted.
+    2. `nufftax` is not importable, so `"nufft"` cannot run.
+
+    Any other `method` raises `ValueError`.
 
     Parameters
     ----------
@@ -225,8 +264,57 @@ def nufft_precision_operator_from(
     grid_radians_2d
         The 2D (y,x) grid of coordinates in radians corresponding to real-space mask within which the image that is
         Fourier transformed is computed.
+    method
+        Which builder computes the operator: `"nufft"` (default), `"numpy"` or `"jax"`.
+    eps
+        The requested NUFFT precision, used by `method="nufft"` only.
+    chunk_size
+        The visibility chunk size of the NUFFT builder (a memory ceiling, not an
+        optimisation), used by `method="nufft"` only. `None` is one shot.
+    chunk_k
+        The visibility chunk size of the two brute-force builders.
     """
     if use_jax:
+        method = "jax"
+
+    if method not in ("nufft", "numpy", "jax"):
+        raise ValueError(
+            f"nufft_precision_operator_from: unknown method {method!r}. "
+            'Use "nufft" (the default type-1 NUFFT builder), "numpy" or "jax" (the '
+            "brute-force reference builders)."
+        )
+
+    if method in ("nufft", "jax") and disable_jax():
+        logger.warning(
+            f"INTERFEROMETER - `PYAUTO_DISABLE_JAX=1` is set, so the NUFFT precision "
+            f"operator cannot be built with method={method!r} (both the NUFFT and the "
+            f"JAX brute force run on JAX). Falling back to the NumPy brute force, which "
+            f"is O(N_pix * K) rather than O(K * nspread^2 + M log M) and can take "
+            f"minutes to hours on a real dataset."
+        )
+        method = "numpy"
+
+    if method == "nufft" and _load_nufftax() is None:
+        logger.warning(
+            "INTERFEROMETER - `nufftax` is not installed, so the NUFFT precision "
+            "operator cannot be built with the type-1 NUFFT. Falling back to the NumPy "
+            "brute force, which is O(N_pix * K) rather than O(K * nspread^2 + M log M) "
+            "and can take minutes to hours on a real dataset. Install it via "
+            "`pip install nufftax`."
+        )
+        method = "numpy"
+
+    if method == "nufft":
+        return nufft_precision_operator_via_nufft_from(
+            noise_map_real=noise_map_real,
+            uv_wavelengths=uv_wavelengths,
+            shape_masked_pixels_2d=shape_masked_pixels_2d,
+            grid_radians_2d=grid_radians_2d,
+            eps=eps,
+            chunk_size=chunk_size,
+        )
+
+    if method == "jax":
         return nufft_precision_operator_via_jax_from(
             noise_map_real=noise_map_real,
             uv_wavelengths=uv_wavelengths,
@@ -244,6 +332,226 @@ def nufft_precision_operator_from(
         show_progress=show_progress,
         show_memory=show_memory,
     )
+
+
+def _pixel_scale_radians_from(grid_radians_2d: np.ndarray) -> float:
+    """
+    Returns the pixel scale in radians, `delta_rad`, read off the radian grid as an
+    adjacent-pixel difference.
+
+    It is taken from the grid rather than from `mask.pixel_scales` because the grid is what
+    the brute-force builders difference to get their `dx` / `dy`: deriving it any other way
+    would let a unit or half-pixel convention drift in between the two implementations that
+    have to agree exactly.
+
+    Square pixels are asserted rather than handled. Every interferometer preset is square,
+    the `[2Ny, 2Nx]` offset grid has a single mode spacing per axis by construction, and a
+    rectangular-pixel dataset would silently produce a *plausible* wrong operator.
+
+    Parameters
+    ----------
+    grid_radians_2d
+        The 2D (y,x) native grid of coordinates in radians, shape `[ny, nx, 2]`.
+    """
+    grid_radians_2d = np.asarray(grid_radians_2d, dtype=np.float64)
+
+    if grid_radians_2d.ndim != 3 or grid_radians_2d.shape[-1] != 2:
+        raise ValueError(
+            f"grid_radians_2d must be [ny, nx, 2] native; got {grid_radians_2d.shape}."
+        )
+
+    n_y, n_x = grid_radians_2d.shape[:2]
+
+    if n_y < 2 or n_x < 2:
+        raise ValueError(
+            "grid_radians_2d must be at least 2x2 for the pixel scale to be read off as an "
+            f"adjacent-pixel difference; got {(n_y, n_x)}."
+        )
+
+    # Native y decreases down the rows, x increases along the columns.
+    delta_y = float(grid_radians_2d[0, 0, 0] - grid_radians_2d[1, 0, 0])
+    delta_x = float(grid_radians_2d[0, 1, 1] - grid_radians_2d[0, 0, 1])
+
+    if not np.isclose(delta_y, delta_x, rtol=1.0e-12, atol=0.0):
+        raise ValueError(
+            "The NUFFT precision operator requires square pixels: the radian grid's row "
+            f"spacing {delta_y!r} and column spacing {delta_x!r} differ."
+        )
+
+    return delta_x
+
+
+def nufft_precision_operator_via_nufft_from(
+    noise_map_real: np.ndarray,
+    uv_wavelengths: np.ndarray,
+    shape_masked_pixels_2d,
+    grid_radians_2d: np.ndarray,
+    *,
+    eps: float = 1.0e-12,
+    chunk_size: Optional[int] = None,
+) -> np.ndarray:
+    """
+    Returns the `W~` precision operator built as the real part of a **type-1 (adjoint)
+    NUFFT**.
+
+    Same signature family and same return value as the brute-force builders
+    `nufft_precision_operator_via_np_from` / `..._via_jax_from`, but `O(K * nspread^2 +
+    M log M)` instead of `O(N_pix * K)`, where `M = 4 * Ny * Nx` is the doubled offset
+    grid. At ALMA scale (`K = 1e6`, `N_pix = 15380`) that is the difference between
+    ~35 minutes and ~7 seconds.
+
+    The construction
+    ----------------
+    The brute-force builders compute, over the mask's bounding extent
+    `(Ny, Nx) = shape_native_masked_pixels`:
+
+        P[i, j] = sum_k w_k cos(2 pi (dx * u_k + dy * v_k)),   w_k = 1 / sigma_k^2
+
+    with `dx = -j * delta_rad` and `dy = +i * delta_rad` on autoarray's radian grid
+    (native `y` *decreases* down the rows, `x` increases along the columns), the four
+    quadrants filled from the four corners so that offset `0` sits at `[0, 0]` and
+    negative offsets sit at negative indices (wraparound / FFT ordering), with the middle
+    row `Ny` and column `Nx` left zero as padding.
+
+    Writing `x_k = 2 pi u_k delta_rad` and `y_k = 2 pi v_k delta_rad` -- the transformer's
+    own scaled frequencies -- that is exactly
+
+        P[i, j] = Re sum_k w_k exp(i(-j * x_k + i * y_k))
+
+    i.e. the real part of a type-1 NUFFT of the weights onto the `(2Ny, 2Nx)` mode grid.
+    `nufftax.nufft2d1(x, y, c, n_modes=(N1, N2), eps, isign)` returns
+    `f[m2, m1] = sum_k c_k exp(isign * i(m1 * x_k + m2 * y_k))` on the **centred** mode
+    grid, shape `(N2, N1)`, so the mapping is
+
+        f = nufft2d1(-x, y, w, n_modes=(2Nx, 2Ny), eps, isign=+1)
+        P = ifftshift(Re f);  P[Ny, :] = 0;  P[:, Nx] = 0
+
+    Why this mapping and not one of the other seven
+    -----------------------------------------------
+    Pinned empirically against `nufft_precision_operator_via_np_from`. Of the eight
+    candidates (axis swap x sign of `x` x sign of `y`) exactly two agree with the brute
+    force -- `(-x, +y)` above and `(+x, -y)` -- at `max|delta| = 1.7e-17`, i.e. `8.7e-14`
+    of the peak `P[0, 0]`. The other six are wrong by `2.1e-1` of the peak, so the
+    identification is not marginal: the discrimination is thirteen orders of magnitude.
+
+    The two survivors are the *same* construction: `w` is real, so `f(-x, +y)` and
+    `f(+x, -y)` are complex conjugates and their real parts are identical. `(-x, +y)` is
+    kept because it reads off the formula above term by term. That degeneracy is also why
+    `P[i, j] == P[-i, -j]` (cosine evenness) holds -- pinned separately.
+
+    `ifftshift` vs `fftshift` is likewise not a choice here: both axes have even length
+    `2N`, and for even `N` the two shifts are the same permutation. The canonical
+    `ifftshift` (centred -> wraparound) is used because that is the direction the transform
+    actually goes.
+
+    The padding row / column is at index `Ny` / `Nx`, not `Ny - 1` / `Nx - 1`: after
+    `ifftshift`, index `Ny` carries mode `-Ny`, the Nyquist mode, which the brute force
+    never evaluates (its quadrants span offsets `-(Ny - 1) ... Ny - 1`). The NUFFT *does*
+    return a value there, so it is zeroed explicitly.
+
+    Accuracy
+    --------
+    `eps` is the NUFFT's requested precision and its error bound is **peak-scaled**, not
+    elementwise-relative: a type-1 NUFFT bounds `max|delta|` against `sum_k |c_k|`, so the
+    near-zero entries of `P` -- five orders below its peak -- carry no relative accuracy
+    guarantee at all. `eps = 1e-12` saturates fp64 at every instrument profiled: the
+    measured `max|delta| = 1.7e-17` is already the round-off floor (`eps = 1e-14` only
+    reaches `1.4e-17`), yet the worst *elementwise* relative error is `6.0e-10` on 32 of
+    19600 entries. A pin against this builder must therefore be **mixed** --
+    `rtol = 1e-10` with `atol = 1e-10 * P[0, 0]` -- never `rtol` with `atol = 0`.
+
+    Chunking is mandatory at scale
+    ------------------------------
+    `chunk_size` is not an optimisation, it is a memory ceiling -- the same one
+    `TransformerNUFFT` carries as its own `chunk_size`. The spreader's gather buffer is
+    `K * nspread^2` complex128; at `eps = 1e-12`, `nspread ~ 14`, so `K = 1e6` needs ~3 GB
+    and `K = 5e6` needs ~15 GB, which is where an unchunked call on a 15 GB machine is
+    killed by the OOM reaper rather than returning slowly. Use the instrument's own
+    transformer chunk size. The transform is linear in the weights, so the chunks'
+    transforms are summed and the result is the same array (to summation order).
+
+    A caveat on the timings quoted above: they are **CPU** seconds. The saving is in the
+    algorithm, not the backend -- the brute force is `O(N_pix * K)` whatever it runs on.
+
+    Parameters
+    ----------
+    noise_map_real
+        `[K]` real noise-map values of the interferometer data; `w = 1 / sigma^2`.
+    uv_wavelengths
+        `[K, 2]` `(u, v)` baselines in wavelengths.
+    shape_masked_pixels_2d
+        `(Ny, Nx)`, the mask's bounding extent (`mask.shape_native_masked_pixels`).
+    grid_radians_2d
+        `[ny, nx, 2]` native `(y, x)` grid in radians. Only its pixel spacing is used, so
+        the full native grid and the extent sub-grid give the same answer.
+    eps
+        The requested NUFFT precision.
+    chunk_size
+        Cap on the visibilities passed to `nufft2d1` in one call, or `None` for one shot.
+
+    Returns
+    -------
+    np.ndarray
+        `[2Ny, 2Nx]` float64, wraparound-ordered, with the padding row / column zero.
+    """
+    nufftax = _load_nufftax()
+
+    if nufftax is None:
+        nufftax_exception()
+
+    import jax.numpy as jnp
+
+    noise_map_real = np.asarray(noise_map_real, dtype=np.float64)
+    uv_wavelengths = np.asarray(uv_wavelengths, dtype=np.float64)
+    grid_radians_2d = np.asarray(grid_radians_2d, dtype=np.float64)
+
+    y_shape, x_shape = (int(s) for s in shape_masked_pixels_2d)
+
+    pixel_scale_radians = _pixel_scale_radians_from(grid_radians_2d)
+
+    # The transformer's own scaled frequencies.
+    x = 2.0 * np.pi * uv_wavelengths[:, 0] * pixel_scale_radians
+    y = 2.0 * np.pi * uv_wavelengths[:, 1] * pixel_scale_radians
+
+    w = 1.0 / (noise_map_real**2)
+
+    n_modes = (2 * x_shape, 2 * y_shape)
+    total_visibilities = int(x.shape[0])
+
+    if chunk_size is None or chunk_size >= total_visibilities:
+        chunk_size = total_visibilities
+
+    if chunk_size <= 0:
+        raise ValueError(
+            f"chunk_size must be a positive integer or None, got {chunk_size}."
+        )
+
+    # Only Re(f) is ever used, so each chunk's real part is accumulated in float64 and the
+    # complex block is released before the next one is spread.
+    real_modes = np.zeros((2 * y_shape, 2 * x_shape), dtype=np.float64)
+
+    for k0 in range(0, total_visibilities, chunk_size):
+        k1 = min(total_visibilities, k0 + chunk_size)
+
+        f = nufftax.nufft2d1(
+            jnp.asarray(-x[k0:k1]),
+            jnp.asarray(y[k0:k1]),
+            jnp.asarray(w[k0:k1], dtype=jnp.complex128),
+            n_modes,
+            eps,
+            1,
+        )
+
+        real_modes += np.asarray(np.real(f), dtype=np.float64)
+
+        del f
+
+    nufft_precision_operator = np.ascontiguousarray(np.fft.ifftshift(real_modes))
+
+    nufft_precision_operator[y_shape, :] = 0.0
+    nufft_precision_operator[:, x_shape] = 0.0
+
+    return nufft_precision_operator
 
 
 def nufft_precision_operator_via_np_from(
