@@ -11,6 +11,13 @@ from autoarray.inversion.inversion.interferometer.mapping import (
 from autoarray.inversion.inversion.interferometer.sparse import (
     InversionInterferometerSparse,
 )
+from autoarray.inversion.inversion.interferometer_numba.sparse import (
+    InversionInterferometerSparseNumba,
+)
+from autoarray.inversion.inversion.interferometer_numba import (
+    inversion_interferometer_numba_util,
+)
+from autoarray.inversion.mappers.abstract import Mapper
 from autoarray.inversion.inversion.dataset_interface import DatasetInterface
 from autoarray.inversion.linear_obj.linear_obj import LinearObj
 from autoarray.inversion.linear_obj.func_list import AbstractLinearObjFuncList
@@ -202,6 +209,19 @@ def inversion_interferometer_from(
 
     if dataset.sparse_operator is not None and use_sparse_operator:
 
+        if _use_interferometer_numba(
+            linear_obj_list=linear_obj_list,
+            settings=settings,
+            xp=xp,
+        ):
+            return InversionInterferometerSparseNumba(
+                dataset=dataset,
+                linear_obj_list=linear_obj_list,
+                settings=settings,
+                xp=xp,
+                preloads=preloads,
+            )
+
         return InversionInterferometerSparse(
             dataset=dataset,
             linear_obj_list=linear_obj_list,
@@ -216,3 +236,85 @@ def inversion_interferometer_from(
         settings=settings,
         xp=xp,
     )
+
+
+def _use_interferometer_numba(
+    linear_obj_list: List[LinearObj],
+    settings: Settings = None,
+    xp=np,
+) -> bool:
+    """
+    Whether an interferometer inversion is routed to the numba `direct_conv` curvature
+    path (`InversionInterferometerSparseNumba`) rather than the FFT one
+    (`InversionInterferometerSparse`).
+
+    Every condition below is a routing decision, not an error: a model the kernel cannot
+    represent, or a geometry where the FFT route is faster, simply falls through to the
+    sparse path silently. Constructing `InversionInterferometerSparseNumba` directly with
+    such inputs still raises -- the class checks the same preconditions itself, so the two
+    cannot drift apart in meaning, only in whether they are fatal.
+
+    The conditions are, in order of cost to evaluate:
+
+    - `xp is np` -- the kernel is numba, with no JAX path.
+    - `settings.interferometer_numba_nnz_per_source_max > 0` -- `0` is the kill switch.
+    - exactly one `Mapper` and no `AbstractLinearObjFuncList` -- the kernel builds a single
+      mapper-mapper block and has no off-diagonal or function blocks.
+    - no over-sampling (`sub_fraction == 1`) -- the kernel uses the mapper's weights as-is.
+    - the mapper's mean non-zeros per source column is at or below the gate -- above it the
+      FFT route is faster (see `Settings.interferometer_numba_nnz_per_source_max`).
+    - `import numba` succeeds.
+
+    Parameters
+    ----------
+    linear_obj_list
+        The linear objects reconstructing the data.
+    settings
+        The inversion settings, whose `interferometer_numba_nnz_per_source_max` is the
+        geometry gate. `None` uses the packaged defaults.
+    xp
+        The array module the inversion runs on.
+    """
+    if xp is not np:
+        return False
+
+    settings = settings if settings is not None else Settings()
+
+    nnz_max = settings.interferometer_numba_nnz_per_source_max
+
+    if nnz_max is None or nnz_max <= 0:
+        return False
+
+    if any(
+        isinstance(linear_obj, AbstractLinearObjFuncList)
+        for linear_obj in linear_obj_list
+    ):
+        return False
+
+    mapper_list = [
+        linear_obj for linear_obj in linear_obj_list if isinstance(linear_obj, Mapper)
+    ]
+
+    if len(mapper_list) != 1 or len(mapper_list) != len(linear_obj_list):
+        return False
+
+    mapper = mapper_list[0]
+
+    sub_fraction = np.asarray(mapper.over_sampler.sub_fraction.array)
+
+    if not np.all(sub_fraction == 1.0):
+        return False
+
+    nnz_per_source_column = (
+        inversion_interferometer_numba_util.nnz_per_source_column_from(mapper=mapper)
+    )
+
+    if nnz_per_source_column > nnz_max:
+        return False
+
+    try:
+        import numba  # noqa: F401
+    except ModuleNotFoundError:
+        return False
+
+    return True

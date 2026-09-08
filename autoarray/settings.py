@@ -21,6 +21,7 @@ class Settings:
         nnls_warm_start_error_tolerance: Optional[float] = None,
         log_det_method: Optional[str] = None,
         regularization_term_method: Optional[str] = None,
+        interferometer_numba_nnz_per_source_max: Optional[float] = None,
     ):
         """
         The settings of an Inversion, customizing how a linear set of equations are solved for.
@@ -174,6 +175,13 @@ class Settings:
               Note neither option removes the explicit inverse from the inversion as a whole —
               ``curvature_reg_matrix`` is a dense ``F + H`` feeding the dense solve for the
               reconstruction, so ``H`` is still formed there regardless.
+        interferometer_numba_nnz_per_source_max
+            The geometry gate above which the numba `direct_conv` interferometer curvature
+            path is not used, in mean non-zeros per source column
+            (``mapper.pix_sizes_for_sub_slim_index.sum() / mapper.params``). `None`
+            (default) reads the packaged value (`60.0`); `0` disables the numba path. See
+            the property of the same name for the measured crossovers and why the constant
+            is machine-dependent.
         """
         self.use_mixed_precision = use_mixed_precision
         self.nnls_solver_tol = nnls_solver_tol
@@ -188,6 +196,9 @@ class Settings:
         )
         self._log_det_method = log_det_method
         self._regularization_term_method = regularization_term_method
+        self._interferometer_numba_nnz_per_source_max = (
+            interferometer_numba_nnz_per_source_max
+        )
 
     @property
     def use_positive_only_solver(self):
@@ -285,3 +296,41 @@ class Settings:
             return conf.instance["general"]["inversion"]["regularization_term_method"]
 
         return self._regularization_term_method
+
+    @property
+    def interferometer_numba_nnz_per_source_max(self) -> float:
+        """
+        The geometry gate above which the numba `direct_conv` interferometer curvature
+        path is not used.
+
+        `InversionInterferometerSparseNumba` convolves each source column of the mapping
+        operator over the extent rectangle, at a cost that scales with the column's
+        non-zeros; the FFT route (`InversionInterferometerSparse`) costs the same whatever
+        the density. The two therefore cross at a roughly fixed number of non-zeros per
+        source column, `mapper.pix_sizes_for_sub_slim_index.sum() / mapper.params`, and
+        the factory routes to numba only at or below this value.
+
+        The measured crossovers are **~60 non-zeros per source column on Delaunay meshes**
+        and **~77 on rectangular meshes** (autolens_profiling issue #226 verdict, section
+        2), where the numba kernel is 2-7x faster than JAX-CPU well below the crossover.
+        The default is the conservative of the two.
+
+        This is a **machine-dependent constant**: it is set by the ratio of scalar AXPY
+        throughput to FFT throughput on the CPU running the fit, so a machine with a very
+        different cache hierarchy or FFT library will cross somewhere else. Re-measure
+        before tuning it for a new machine; `0` disables the numba path entirely.
+        """
+        if self._interferometer_numba_nnz_per_source_max is None:
+            try:
+                return conf.instance["general"]["inversion"][
+                    "interferometer_numba_nnz_per_source_max"
+                ]
+            except KeyError:
+                # A workspace `general.yaml` normally omits this key, so autoconf's
+                # config-path list falls through to autoarray's packaged value (`60.0`).
+                # This fallback fires only when the workspace config is the sole config
+                # path (isolated test configs push one dir) and returns that same value,
+                # so both routes resolve identically.
+                return 60.0
+
+        return self._interferometer_numba_nnz_per_source_max
