@@ -563,7 +563,7 @@ class InterferometerSparseOperator:
     M: int
     batch_size: int
     w_dtype: "jax.numpy.dtype"
-    Khat: "jax.Array"  # (2y, 2x), complex
+    Khat: "jax.Array"  # (2y, x+1), rfft2 of the real preload
     col_offsets: "jax.Array"  # (batch_size,) int32
     """
     Cached FFT operator state for fast interferometer curvature-matrix assembly.
@@ -578,9 +578,10 @@ class InterferometerSparseOperator:
     By taking an FFT of this preload, the operator can be applied to batches of
     images via elementwise multiplication in Fourier space:
 
-        apply_W(F) = IFFT( FFT(F_pad) * Khat )
+        apply_W(F) = IRFFT( RFFT(F_pad) * Khat )
 
-    where `F_pad` is a (2y, 2x) padded version of `F` and `Khat = FFT(nufft_precision_operator)`.
+    where `F_pad` is a (2y, 2x) padded version of `F` and
+    `Khat = rfft2(nufft_precision_operator)`.
 
     The curvature matrix for a pixelization (mapper) is then assembled from sparse
     mapping triplets without forming dense mapping matrices:
@@ -614,7 +615,7 @@ class InterferometerSparseOperator:
     w_dtype
         Floating-point dtype for weights and accumulations (e.g. float64).
     Khat
-        FFT of the curvature preload, shape (2y_shape, 2x_shape), complex.
+        Real FFT of the curvature preload, shape (2y_shape, x_shape + 1), complex.
         This is the frequency-domain representation of the W~ operator kernel.
     """
 
@@ -633,8 +634,9 @@ class InterferometerSparseOperator:
 
         The curvature preload is assumed to be defined on a (2y, 2x) rectangular
         grid of pixel offsets, where y and x correspond to the *unmasked extent*
-        of the real-space grid. The preload is FFT'd once to obtain `Khat`, which
-        is then reused for every subsequent curvature matrix build.
+        of the real-space grid. The preload is real, so it is transformed once with
+        a real FFT (`rfft2`) to obtain `Khat` of shape (2y, x + 1), which is then
+        reused for every subsequent curvature matrix build.
 
         Parameters
         ----------
@@ -654,7 +656,8 @@ class InterferometerSparseOperator:
         Returns
         -------
         InterferometerSparseOperator
-            Immutable cached state object containing shapes and FFT kernel `Khat`.
+            Immutable cached state object containing shapes and FFT kernel `Khat`,
+            of shape (2y, x + 1) and complex dtype.
 
         Raises
         ------
@@ -673,7 +676,7 @@ class InterferometerSparseOperator:
         x_shape = W2 // 2
         M = y_shape * x_shape
 
-        Khat = jnp.fft.fft2(nufft_precision_operator)
+        Khat = jnp.fft.rfft2(nufft_precision_operator)
 
         return InterferometerSparseOperator(
             dirty_image=dirty_image,
@@ -697,9 +700,18 @@ class InterferometerSparseOperator:
 
         via FFT-based convolution with the cached `Khat` kernel:
 
-            apply_W(F) = Re( IFFT( FFT(F_pad) * Khat ) )[:y, :x]
+            apply_W(F) = IRFFT( RFFT(F_pad) * Khat )[:y, :x]
 
         where `F_pad` is the (2y, 2x) zero-padded version of `F`.
+
+        Both the preload and the batch are real-valued, so the real-transform pair
+        (`rfft2` / `irfft2`) is exact here rather than an approximation: the discarded
+        half of the spectrum is the conjugate mirror of the half that is kept, and the
+        inverse real transform reconstructs it, so the product is identical to the
+        complex `fft2` / `ifft2` route to floating-point round-off (the old code took
+        `Re(...)` of an already-real result). It halves the transform work and the size
+        of `Khat`, measured at 1.27-1.61x faster on every backend (autolens_profiling
+        #226, `results/notes/numba_interferometer_verdict.md`).
 
         Parameters
         ----------
@@ -720,10 +732,10 @@ class InterferometerSparseOperator:
         B = Fbatch_flat.shape[1]
         F_img = Fbatch_flat.T.reshape((B, y_shape, x_shape))
         F_pad = jnp.pad(F_img, ((0, 0), (0, y_shape), (0, x_shape)))
-        Fhat = jnp.fft.fft2(F_pad)
+        Fhat = jnp.fft.rfft2(F_pad)
         Ghat = Fhat * Khat[None, :, :]
-        G_pad = jnp.fft.ifft2(Ghat)
-        G = jnp.real(G_pad[:, :y_shape, :x_shape])
+        G_pad = jnp.fft.irfft2(Ghat, s=(2 * y_shape, 2 * x_shape))
+        G = G_pad[:, :y_shape, :x_shape]
         return G.reshape((B, M)).T
 
     def curvature_matrix_diag_from(self, rows, cols, vals, *, S: int):

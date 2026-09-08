@@ -68,26 +68,12 @@ def test__data_vector_via_transformed_mapping_matrix_from():
     assert (data_vector_complex_via_blurred == data_vector_via_transformed).all()
 
 
-def _sparse_operator_and_mask():
+def _dataset_from(mask, n_visibilities, seed):
     """
-    Returns a real `InterferometerSparseOperator` (and the mask it is defined on) built from a
-    small 7x7 `TransformerDFT` interferometer dataset.
+    Returns a small `TransformerDFT` interferometer dataset on the input mask, with `n_visibilities`
+    seeded random visibilities and unit noise, alongside the random generator used to build it.
     """
-    mask = aa.Mask2D(
-        mask=[
-            [True, True, True, True, True, True, True],
-            [True, True, True, True, True, True, True],
-            [True, True, True, False, True, True, True],
-            [True, True, False, False, False, True, True],
-            [True, True, True, False, True, True, True],
-            [True, True, True, True, True, True, True],
-            [True, True, True, True, True, True, True],
-        ],
-        pixel_scales=2.0,
-    )
-
-    n_visibilities = 5
-    rng = np.random.default_rng(seed=3)
+    rng = np.random.default_rng(seed=seed)
 
     dataset = aa.Interferometer(
         data=aa.Visibilities(
@@ -100,6 +86,33 @@ def _sparse_operator_and_mask():
         real_space_mask=mask,
         transformer_class=aa.TransformerDFT,
     )
+
+    return dataset, rng
+
+
+def _mask_7x7():
+    return aa.Mask2D(
+        mask=[
+            [True, True, True, True, True, True, True],
+            [True, True, True, True, True, True, True],
+            [True, True, True, False, True, True, True],
+            [True, True, False, False, False, True, True],
+            [True, True, True, False, True, True, True],
+            [True, True, True, True, True, True, True],
+            [True, True, True, True, True, True, True],
+        ],
+        pixel_scales=2.0,
+    )
+
+
+def _sparse_operator_and_mask():
+    """
+    Returns a real `InterferometerSparseOperator` (and the mask it is defined on) built from a
+    small 7x7 `TransformerDFT` interferometer dataset.
+    """
+    mask = _mask_7x7()
+
+    dataset, rng = _dataset_from(mask=mask, n_visibilities=5, seed=3)
 
     return dataset.apply_sparse_operator(use_jax=False).sparse_operator, mask, rng
 
@@ -253,3 +266,65 @@ def test__interferometer_sparse_operator__operated_matrix_slim_from():
 
     assert operated.shape == (mask.pixels_in_mask, 2)
     assert operated == pytest.approx(operated_dense, 1.0e-8)
+
+
+def _apply_operator_via_complex_fft2(preload, operator):
+    """
+    Returns `W~ @ I` computed with the complex `fft2` / `ifft2` pair, written out in NumPy so that
+    it is an independent reference for the `rfft2` / `irfft2` implementation in
+    `InterferometerSparseOperator.apply_operator`.
+    """
+    y_shape, x_shape = operator.y_shape, operator.x_shape
+    M = operator.M
+
+    Fbatch_flat = np.eye(M)
+    B = Fbatch_flat.shape[1]
+
+    F_img = Fbatch_flat.T.reshape((B, y_shape, x_shape))
+    F_pad = np.pad(F_img, ((0, 0), (0, y_shape), (0, x_shape)))
+
+    Khat = np.fft.fft2(preload)
+    Ghat = np.fft.fft2(F_pad) * Khat[None, :, :]
+    G_pad = np.fft.ifft2(Ghat)
+    G = np.real(G_pad[:, :y_shape, :x_shape])
+
+    return G.reshape((B, M)).T
+
+
+def test__interferometer_sparse_operator__apply_operator__rfft2_matches_complex_fft2_reference():
+    pytest.importorskip("jax")
+
+    cases = [
+        (_mask_7x7(), 5, 3),
+        (
+            aa.Mask2D.circular(shape_native=(12, 12), pixel_scales=1.0, radius=4.0),
+            64,
+            11,
+        ),
+    ]
+
+    for mask, n_visibilities, seed in cases:
+        dataset, _ = _dataset_from(mask=mask, n_visibilities=n_visibilities, seed=seed)
+
+        preload = dataset.psf_precision_operator_from(use_jax=False)
+        operator = dataset.apply_sparse_operator(
+            nufft_precision_operator=preload
+        ).sparse_operator
+
+        # The preload and the batch are both real, so `rfft2` stores only the non-redundant half
+        # of the spectrum: (2y, x + 1) rather than (2y, 2x).
+        assert operator.Khat.shape == (2 * operator.y_shape, operator.x_shape + 1)
+
+        operated = np.array(operator.apply_operator(np.eye(operator.M)))
+        operated_via_complex_fft2 = _apply_operator_via_complex_fft2(
+            preload=preload, operator=operator
+        )
+
+        # The real transform pair is exact for a real preload and a real batch, so this pin is at
+        # round-off, not at an algorithmic tolerance.
+        np.testing.assert_allclose(
+            operated,
+            operated_via_complex_fft2,
+            rtol=1.0e-10,
+            atol=1.0e-10 * np.abs(operated_via_complex_fft2).max(),
+        )
