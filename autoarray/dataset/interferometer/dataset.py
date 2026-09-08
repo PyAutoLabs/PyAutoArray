@@ -249,6 +249,10 @@ class Interferometer(AbstractDataset):
         and is used automatically by `FitInterferometer` when performing pixelized reconstructions via
         the inversion module.
 
+        The backend the operator is *applied* with follows the inversion's `xp` (NumPy/scipy for
+        `xp=np`, JAX for `xp=jnp`); `use_jax` below only selects which brute-force builder computes
+        the preload, and never puts JAX on a NumPy fit's application path.
+
         The default builder (`method="nufft"`) computes the precision operator as a type-1 NUFFT, so
         it costs `O(N_vis * nspread^2 + M log M)` for `M = 4 * Ny * Nx` — seconds even at a million
         visibilities. The brute-force builders (`method="numpy"` / `"jax"`) are `O(N_vis * N_pix)`

@@ -170,11 +170,6 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
             )
 
         if len(self.no_regularization_index_list) > 0:
-            if self._xp is np:
-                # The sparse operator returns JAX arrays, which the NumPy in-place diagonal
-                # update below cannot write to.
-                curvature_matrix = np.array(curvature_matrix)
-
             curvature_matrix = inversion_util.curvature_matrix_with_added_to_diag_from(
                 curvature_matrix=curvature_matrix,
                 value=self.settings.no_regularization_add_to_curvature_diag_value,
@@ -205,6 +200,7 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
             cols=cols,
             vals=vals,
             S=mapper.params,
+            xp=self._xp,
         )
 
     @property
@@ -233,6 +229,7 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
                 cols=cols,
                 vals=vals,
                 S=mapper.params,
+                xp=self._xp,
             )
 
             start, end = mapper_param_range_list[mapper_index]
@@ -263,6 +260,7 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
             vals1=vals_1,
             S0=mapper_0.params,
             S1=mapper_1.params,
+            xp=self._xp,
         )
 
     @property
@@ -359,6 +357,7 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
                     cols=cols,
                     vals=vals,
                     S=mapper.params,
+                    xp=self._xp,
                 )
 
                 if self._xp is np:
@@ -384,6 +383,7 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
                     curvature_weights_0=mapping_matrix_list[index_0],
                     curvature_weights_1=mapping_matrix_list[index_1],
                     extent_index_for_masked_pixel=extent_index_for_masked_pixel,
+                    xp=self._xp,
                 )
 
                 if self._xp is np:
