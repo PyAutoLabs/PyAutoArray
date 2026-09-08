@@ -1,3 +1,5 @@
+import os
+
 import autoarray as aa
 import numpy as np
 import pytest
@@ -700,3 +702,426 @@ def test__nufft_precision_operator_from__nufftax_absent_falls_back_to_the_numpy_
         aa.util.inversion_interferometer.nufft_precision_operator_via_nufft_from(
             **inputs
         )
+
+
+def _numpy_backend_fixtures():
+    """
+    The two `InterferometerSparseOperator` fixtures the NumPy/JAX parity tests below run on,
+    each built with `batch_size=4`.
+
+    The 7x7 / K=5 case is the module's shared shape fixture. The 12x12 / K=64 case is the
+    seeded one the `rfft2` pin uses: its source-pixel count exceeds `batch_size`, so the
+    block sweep runs more than one block and finishes on a partial one -- the branch the JAX
+    path needs `dynamic_update_slice` and a column mask for, and the NumPy path a plain
+    Python loop.
+    """
+    fixtures = []
+
+    for mask, n_visibilities, seed in (
+        (_mask_7x7(), 5, 3),
+        (
+            aa.Mask2D.circular(shape_native=(12, 12), pixel_scales=1.0, radius=4.0),
+            64,
+            11,
+        ),
+    ):
+        dataset, rng = _dataset_from(
+            mask=mask, n_visibilities=n_visibilities, seed=seed
+        )
+
+        operator = dataset.apply_sparse_operator(
+            nufft_precision_operator=dataset.psf_precision_operator_from(
+                method="numpy"
+            ),
+            batch_size=4,
+        ).sparse_operator
+
+        fixtures.append((operator, mask, rng))
+
+    return fixtures
+
+
+def _assert_numpy_matches_jax(result, result_via_jax):
+    """
+    Asserts a NumPy-branch result matches the JAX branch at the module's exact pin.
+
+    Both branches evaluate the same real-FFT convolution and the same sparse triple product
+    in float64, so they agree to floating-point round-off and nothing looser is warranted.
+    `atol` is peak-scaled so that entries orders below the peak -- which carry no relative
+    accuracy of their own -- do not turn round-off into a failure.
+    """
+    result_via_jax = np.asarray(result_via_jax)
+
+    np.testing.assert_allclose(
+        np.asarray(result),
+        result_via_jax,
+        rtol=1.0e-10,
+        atol=1.0e-10 * np.abs(result_via_jax).max(),
+    )
+
+
+def _triplets_with_duplicates(rng, M, S, nnz):
+    """
+    Returns COO triplets whose row/column index ranges are small enough that
+    `(row, col)` pairs repeat, so the assembly has to *sum* duplicate entries. The JAX
+    branch does this with `.at[].add`, the NumPy branch with `scipy.sparse`'s COO
+    duplicate summation; a NumPy branch that overwrote instead would fail the pin.
+    """
+    rows = rng.integers(0, min(M, 6), size=nnz)
+    cols = rng.integers(0, S, size=nnz)
+    vals = rng.normal(size=nnz)
+
+    return rows, cols, vals
+
+
+def test__interferometer_sparse_operator__numpy_branch_matches_jax_branch():
+    """
+    Every public method of `InterferometerSparseOperator` takes an `xp` and must return the
+    same matrix on either backend: a CPU fit passing `xp=np` runs the NumPy/scipy bodies
+    instead of the JAX ones, and that must be a change of backend only.
+    """
+    pytest.importorskip("jax")
+
+    import jax.numpy as jnp
+
+    for operator, mask, rng in _numpy_backend_fixtures():
+        M = operator.M
+        S = 11
+        S1 = 9
+
+        assert S > operator.batch_size
+
+        extent_index_for_masked_pixel = np.array(mask.extent_index_for_masked_pixel)
+
+        # apply_operator
+        Fbatch = rng.normal(size=(M, 7))
+
+        _assert_numpy_matches_jax(
+            operator.apply_operator(Fbatch, xp=np),
+            operator.apply_operator(jnp.asarray(Fbatch), xp=jnp),
+        )
+
+        # curvature_matrix_diag_from
+        rows, cols, vals = _triplets_with_duplicates(rng, M=M, S=S, nnz=40)
+
+        _assert_numpy_matches_jax(
+            operator.curvature_matrix_diag_from(
+                rows=rows, cols=cols, vals=vals, S=S, xp=np
+            ),
+            operator.curvature_matrix_diag_from(
+                rows=rows, cols=cols, vals=vals, S=S, xp=jnp
+            ),
+        )
+
+        # curvature_matrix_off_diag_from
+        rows_1, cols_1, vals_1 = _triplets_with_duplicates(rng, M=M, S=S1, nnz=30)
+
+        _assert_numpy_matches_jax(
+            operator.curvature_matrix_off_diag_from(
+                rows0=rows,
+                cols0=cols,
+                vals0=vals,
+                rows1=rows_1,
+                cols1=cols_1,
+                vals1=vals_1,
+                S0=S,
+                S1=S1,
+                xp=np,
+            ),
+            operator.curvature_matrix_off_diag_from(
+                rows0=rows,
+                cols0=cols,
+                vals0=vals,
+                rows1=rows_1,
+                cols1=cols_1,
+                vals1=vals_1,
+                S0=S,
+                S1=S1,
+                xp=jnp,
+            ),
+        )
+
+        # operated_matrix_slim_from
+        matrix_slim = rng.normal(size=(mask.pixels_in_mask, 3))
+
+        _assert_numpy_matches_jax(
+            operator.operated_matrix_slim_from(
+                matrix_slim=matrix_slim,
+                extent_index_for_masked_pixel=extent_index_for_masked_pixel,
+                xp=np,
+            ),
+            operator.operated_matrix_slim_from(
+                matrix_slim=matrix_slim,
+                extent_index_for_masked_pixel=extent_index_for_masked_pixel,
+                xp=jnp,
+            ),
+        )
+
+        # curvature_matrix_off_diag_func_list_from
+        curvature_weights = rng.normal(size=(mask.pixels_in_mask, 3))
+
+        _assert_numpy_matches_jax(
+            operator.curvature_matrix_off_diag_func_list_from(
+                curvature_weights=curvature_weights,
+                extent_index_for_masked_pixel=extent_index_for_masked_pixel,
+                rows=rows,
+                cols=cols,
+                vals=vals,
+                S=S,
+                xp=np,
+            ),
+            operator.curvature_matrix_off_diag_func_list_from(
+                curvature_weights=curvature_weights,
+                extent_index_for_masked_pixel=extent_index_for_masked_pixel,
+                rows=rows,
+                cols=cols,
+                vals=vals,
+                S=S,
+                xp=jnp,
+            ),
+        )
+
+        # curvature_matrix_func_list_from
+        curvature_weights_0 = rng.normal(size=(mask.pixels_in_mask, 2))
+
+        _assert_numpy_matches_jax(
+            operator.curvature_matrix_func_list_from(
+                curvature_weights_0=curvature_weights_0,
+                curvature_weights_1=curvature_weights,
+                extent_index_for_masked_pixel=extent_index_for_masked_pixel,
+                xp=np,
+            ),
+            operator.curvature_matrix_func_list_from(
+                curvature_weights_0=curvature_weights_0,
+                curvature_weights_1=curvature_weights,
+                extent_index_for_masked_pixel=extent_index_for_masked_pixel,
+                xp=jnp,
+            ),
+        )
+
+
+def _delaunay_triplets_from(mask, over_sample_size):
+    """
+    Returns the COO triplets of a real Delaunay mapper on `mask`, alongside its parameter
+    count, exactly as `InversionInterferometerSparse._sparse_triplets_curvature_from`
+    builds them.
+
+    These are the triplets the production path actually hands the operator, and they carry
+    two properties hand-written triplets do not: `mapper_util.sparse_triplets_from` pads
+    each sub-pixel's interpolation stencil to the longest, emitting `col = -1` with weight
+    `0.0` for the unused slots, and at `over_sample_size > 1` several sub-pixels of the same
+    image pixel hit the same source pixel, so `(row, col)` pairs repeat.
+    """
+    grid = aa.Grid2D.from_mask(mask=mask, over_sample_size=over_sample_size)
+
+    image_mesh_grid = aa.image_mesh.Overlay(shape=(4, 4)).image_plane_mesh_grid_from(
+        mask=mask, adapt_data=None
+    )
+    interpolator = aa.mesh.Delaunay(pixels=16).interpolator_from(
+        source_plane_data_grid=grid,
+        source_plane_mesh_grid=image_mesh_grid,
+    )
+    mapper = aa.Mapper(interpolator=interpolator)
+
+    rows, cols, vals = aa.util.mapper.sparse_triplets_from(
+        pix_indexes_for_sub=mapper.pix_indexes_for_sub_slim_index,
+        pix_weights_for_sub=mapper.pix_weights_for_sub_slim_index,
+        slim_index_for_sub=mapper.slim_index_for_sub_slim_index,
+        fft_index_for_masked_pixel=mask.extent_index_for_masked_pixel,
+        sub_fraction_slim=mapper.over_sampler.sub_fraction.array,
+        return_rows_slim=False,
+        xp=np,
+    )
+
+    return np.asarray(rows), np.asarray(cols), np.asarray(vals), mapper.params
+
+
+def test__interferometer_sparse_operator__numpy_branch_matches_jax_branch__delaunay_triplets():
+    """
+    The same parity, on the triplets a real over-sampled Delaunay mapper produces: padded
+    `col = -1` entries and repeated `(row, col)` pairs, both of which the JAX branch handles
+    implicitly (an out-of-range column is dropped, a repeat is accumulated by `.at[].add`)
+    and the NumPy branch must handle explicitly.
+    """
+    pytest.importorskip("jax")
+
+    import jax.numpy as jnp
+
+    mask = aa.Mask2D.circular(shape_native=(12, 12), pixel_scales=1.0, radius=4.0)
+
+    dataset, _ = _dataset_from(mask=mask, n_visibilities=64, seed=11)
+
+    operator = dataset.apply_sparse_operator(
+        nufft_precision_operator=dataset.psf_precision_operator_from(method="numpy"),
+        batch_size=4,
+    ).sparse_operator
+
+    rows, cols, vals, S = _delaunay_triplets_from(mask=mask, over_sample_size=2)
+
+    # The fixture only tests what it contains: a mapper whose stencils happened not to be
+    # padded, or whose sub-pixels happened not to collide, would leave both behaviours
+    # untested and the test would still pass.
+    assert (cols < 0).any()
+
+    pairs, counts = np.unique(
+        np.stack([rows[cols >= 0], cols[cols >= 0]], axis=1), axis=0, return_counts=True
+    )
+    assert (counts > 1).any()
+
+    assert S > operator.batch_size
+
+    _assert_numpy_matches_jax(
+        operator.curvature_matrix_diag_from(
+            rows=rows, cols=cols, vals=vals, S=S, xp=np
+        ),
+        operator.curvature_matrix_diag_from(
+            rows=rows, cols=cols, vals=vals, S=S, xp=jnp
+        ),
+    )
+
+
+def test__interferometer_sparse_operator__numpy_branch_runs_with_jax_unimportable():
+    """
+    The point of the `xp` branch: a CPU user must be able to build the operator and run every
+    NumPy body in an environment where JAX is not installed at all.
+
+    Deliberately carries no `importorskip("jax")`, so the `unittest-nojax` CI leg runs it.
+    """
+    import sys
+
+    monkeypatch = pytest.MonkeyPatch()
+
+    mask = _mask_7x7()
+
+    dataset, rng = _dataset_from(mask=mask, n_visibilities=5, seed=3)
+
+    try:
+        # `None` in `sys.modules` is the documented way to make an import fail: `import jax`
+        # then raises `ImportError` rather than finding the installed package.
+        monkeypatch.setitem(sys.modules, "jax", None)
+        monkeypatch.setitem(sys.modules, "jax.numpy", None)
+
+        # The brute-force NumPy builder, because the default `"nufft"` builder runs on JAX.
+        operator = dataset.apply_sparse_operator(
+            nufft_precision_operator=dataset.psf_precision_operator_from(
+                method="numpy"
+            ),
+            batch_size=4,
+        ).sparse_operator
+
+        M = operator.M
+        S = 11
+
+        extent_index_for_masked_pixel = np.array(mask.extent_index_for_masked_pixel)
+
+        rows, cols, vals = _triplets_with_duplicates(rng, M=M, S=S, nnz=40)
+        rows_1, cols_1, vals_1 = _triplets_with_duplicates(rng, M=M, S=5, nnz=20)
+
+        curvature_weights = rng.normal(size=(mask.pixels_in_mask, 3))
+
+        assert operator.apply_operator(rng.normal(size=(M, 3)), xp=np).shape == (M, 3)
+        assert operator.curvature_matrix_diag_from(
+            rows=rows, cols=cols, vals=vals, S=S, xp=np
+        ).shape == (S, S)
+        assert operator.curvature_matrix_off_diag_from(
+            rows0=rows,
+            cols0=cols,
+            vals0=vals,
+            rows1=rows_1,
+            cols1=cols_1,
+            vals1=vals_1,
+            S0=S,
+            S1=5,
+            xp=np,
+        ).shape == (S, 5)
+        assert operator.operated_matrix_slim_from(
+            matrix_slim=curvature_weights,
+            extent_index_for_masked_pixel=extent_index_for_masked_pixel,
+            xp=np,
+        ).shape == (mask.pixels_in_mask, 3)
+        assert operator.curvature_matrix_off_diag_func_list_from(
+            curvature_weights=curvature_weights,
+            extent_index_for_masked_pixel=extent_index_for_masked_pixel,
+            rows=rows,
+            cols=cols,
+            vals=vals,
+            S=S,
+            xp=np,
+        ).shape == (S, 3)
+        assert operator.curvature_matrix_func_list_from(
+            curvature_weights_0=curvature_weights,
+            curvature_weights_1=curvature_weights,
+            extent_index_for_masked_pixel=extent_index_for_masked_pixel,
+            xp=np,
+        ).shape == (3, 3)
+
+        # Without this the test would also pass in an environment where JAX imports fine,
+        # and would therefore stop testing anything the day the block above broke.
+        with pytest.raises(ImportError):
+            operator.Khat
+    finally:
+        monkeypatch.undo()
+
+
+def test__interferometer_sparse_operator__numpy_branch_imports_no_jax():
+    """
+    Stronger than the guard above, and the actual complaint the `xp` branch answers: JAX must
+    not merely be unnecessary, it must never be *imported*. Importing it costs seconds and
+    allocates a backend, and the operator's JAX state (`Khat`, `col_offsets`) is lazy purely
+    so that a NumPy fit never pays for it.
+
+    Run in a subprocess because `jax` is in `sys.modules` for the rest of this session as
+    soon as any other test imports it.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    script = textwrap.dedent(
+        """
+        import os
+        import sys
+
+        import numpy as np
+
+        import autoarray as aa
+
+        mask = aa.Mask2D.circular(shape_native=(8, 8), pixel_scales=1.0, radius=3.0)
+
+        rng = np.random.default_rng(seed=1)
+
+        dataset = aa.Interferometer(
+            data=aa.Visibilities(visibilities=rng.normal(size=(5, 2))),
+            noise_map=aa.VisibilitiesNoiseMap(visibilities=np.ones((5, 2))),
+            uv_wavelengths=rng.normal(size=(5, 2)),
+            real_space_mask=mask,
+            transformer_class=aa.TransformerDFT,
+        )
+
+        operator = dataset.apply_sparse_operator(
+            method="numpy", batch_size=4
+        ).sparse_operator
+
+        M = operator.M
+
+        operator.apply_operator(rng.normal(size=(M, 3)), xp=np)
+        operator.curvature_matrix_diag_from(
+            rows=rng.integers(0, M, 20),
+            cols=rng.integers(0, 6, 20),
+            vals=rng.normal(size=20),
+            S=6,
+            xp=np,
+        )
+
+        assert "jax" not in sys.modules, sorted(
+            name for name in sys.modules if name.startswith("jax")
+        )
+        """
+    )
+
+    environment = dict(os.environ)
+    environment["PYAUTO_DISABLE_JAX"] = "1"
+
+    subprocess.run(
+        [sys.executable, "-c", script], check=True, env=environment, timeout=600
+    )

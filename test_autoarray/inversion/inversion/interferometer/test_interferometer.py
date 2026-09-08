@@ -708,3 +708,161 @@ def test__interferometer_sparse_operator__no_regularization_value_added_to_diag(
     assert curvature_matrix[0, 0] == pytest.approx(curvature_func[0, 0] + value, 1.0e-8)
     assert curvature_matrix[1, 1] == pytest.approx(curvature_func[1, 1] + value, 1.0e-8)
     assert curvature_matrix[0, 1] == pytest.approx(curvature_func[0, 1], 1.0e-8)
+
+
+def _sparse_np_vs_jax_setup(mask, n_visibilities, seed, pixels, shape):
+    """
+    Returns the dense dataset, the sparse-operator dataset and a regularized Delaunay mapper
+    for the end-to-end NumPy/JAX parity test below.
+
+    The operator is built with `batch_size=4` so the block sweep runs more than one block
+    and ends on a partial one, and with the NumPy brute-force preload builder so the two
+    inversions are handed a byte-identical operator to start from.
+    """
+    rng = np.random.default_rng(seed=seed)
+
+    dataset = aa.Interferometer(
+        data=aa.Visibilities(
+            visibilities=rng.normal(size=(n_visibilities, 2)).astype(np.float64)
+        ),
+        noise_map=aa.VisibilitiesNoiseMap(
+            visibilities=np.ones((n_visibilities, 2), dtype=np.float64)
+        ),
+        uv_wavelengths=rng.normal(size=(n_visibilities, 2)).astype(np.float64),
+        real_space_mask=mask,
+        transformer_class=aa.TransformerDFT,
+    )
+
+    dataset_sparse = dataset.apply_sparse_operator(
+        nufft_precision_operator=dataset.psf_precision_operator_from(method="numpy"),
+        batch_size=4,
+    )
+
+    mapper = _mapper_from(
+        mask=mask,
+        pixels=pixels,
+        shape=shape,
+        regularization=aa.reg.Constant(coefficient=1.0),
+    )
+
+    return dataset, dataset_sparse, mapper
+
+
+def test__interferometer_sparse_operator__numpy_inversion_matches_jax_inversion():
+    """
+    End-to-end: `InversionInterferometerSparse(xp=np)` — which now assembles every curvature
+    block with scipy rather than JAX — must reproduce the `xp=jnp` inversion.
+
+    `curvature_matrix` and `data_vector` come straight off the operator and are pinned
+    exactly. `reconstruction` and the log-determinant terms come out of a linear solve, whose
+    NumPy and JAX implementations differ by more than the matrices they are handed do; the
+    control at the end shows that spread is the solver pair's, by measuring the identical
+    difference on the *dense* mapping inversion, which this change does not touch.
+    """
+    pytest.importorskip("jax")
+
+    import jax.numpy as jnp
+
+    cases = [
+        (
+            aa.Mask2D(
+                mask=[
+                    [True, True, True, True, True, True, True],
+                    [True, True, True, True, True, True, True],
+                    [True, True, True, False, True, True, True],
+                    [True, True, False, False, False, True, True],
+                    [True, True, True, False, True, True, True],
+                    [True, True, True, True, True, True, True],
+                    [True, True, True, True, True, True, True],
+                ],
+                pixel_scales=2.0,
+            ),
+            5,
+            0,
+            9,
+            (3, 3),
+        ),
+        (
+            aa.Mask2D.circular(shape_native=(12, 12), pixel_scales=1.0, radius=4.0),
+            64,
+            11,
+            16,
+            (4, 4),
+        ),
+    ]
+
+    for mask, n_visibilities, seed, pixels, shape in cases:
+        dataset, dataset_sparse, mapper = _sparse_np_vs_jax_setup(
+            mask=mask,
+            n_visibilities=n_visibilities,
+            seed=seed,
+            pixels=pixels,
+            shape=shape,
+        )
+
+        inversion_np = aa.Inversion(
+            dataset=dataset_sparse, linear_obj_list=[mapper], xp=np
+        )
+        inversion_jax = aa.Inversion(
+            dataset=dataset_sparse, linear_obj_list=[mapper], xp=jnp
+        )
+
+        assert isinstance(inversion_np, aa.InversionInterferometerSparse)
+        assert isinstance(inversion_jax, aa.InversionInterferometerSparse)
+
+        for name in ("curvature_matrix", "data_vector"):
+            reference = np.asarray(getattr(inversion_jax, name))
+
+            np.testing.assert_allclose(
+                np.asarray(getattr(inversion_np, name)),
+                reference,
+                rtol=1.0e-10,
+                atol=1.0e-10 * np.abs(reference).max(),
+                err_msg=name,
+            )
+
+        reconstruction = np.asarray(inversion_jax.reconstruction)
+
+        np.testing.assert_allclose(
+            np.asarray(inversion_np.reconstruction),
+            reconstruction,
+            rtol=1.0e-7,
+            atol=1.0e-7 * np.abs(reconstruction).max(),
+        )
+
+        for name in (
+            "log_det_curvature_reg_matrix_term",
+            "log_det_regularization_matrix_term",
+        ):
+            reference = float(getattr(inversion_jax, name))
+
+            np.testing.assert_allclose(
+                float(getattr(inversion_np, name)),
+                reference,
+                rtol=1.0e-10,
+                atol=1.0e-10 * abs(reference),
+                err_msg=name,
+            )
+
+        # The control: the dense mapping inversion runs no operator code at all, so whatever
+        # `xp=np` and `xp=jnp` disagree by there is the linear solver's, not the sparse
+        # operator's. The sparse path must not be worse.
+        reconstruction_dense_np = np.asarray(
+            aa.Inversion(
+                dataset=dataset, linear_obj_list=[mapper], xp=np
+            ).reconstruction
+        )
+        reconstruction_dense_jax = np.asarray(
+            aa.Inversion(
+                dataset=dataset, linear_obj_list=[mapper], xp=jnp
+            ).reconstruction
+        )
+
+        difference_dense = np.abs(
+            reconstruction_dense_np - reconstruction_dense_jax
+        ).max()
+        difference_sparse = np.abs(
+            np.asarray(inversion_np.reconstruction) - reconstruction
+        ).max()
+
+        assert difference_sparse <= max(10.0 * difference_dense, 1.0e-14)

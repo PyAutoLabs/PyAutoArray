@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from functools import cached_property
 import logging
 import numpy as np
 import time
@@ -875,14 +876,13 @@ class InterferometerSparseOperator:
     `DatasetException` when it is violated.
     """
 
+    nufft_precision_operator: np.ndarray  # (2y, 2x) real preload
     dirty_image: np.ndarray
     y_shape: int
     x_shape: int
     M: int
     batch_size: int
-    w_dtype: "jax.numpy.dtype"
-    Khat: "jax.Array"  # (2y, x+1), rfft2 of the real preload
-    col_offsets: "jax.Array"  # (batch_size,) int32
+    w_dtype: np.dtype
     """
     Cached FFT operator state for fast interferometer curvature-matrix assembly.
 
@@ -917,8 +917,24 @@ class InterferometerSparseOperator:
     - dtype / precision (float32 vs float64)
     - `batch_size`
 
+    Backends
+    --------
+    Every public method takes an `xp` array module and branches on it: `xp=jnp` runs the
+    JAX bodies (`lax.fori_loop`, `segment_sum`, `dynamic_update_slice`), `xp=np` (the
+    default) runs NumPy/scipy bodies (`scipy.fft`, `scipy.sparse`, a Python block loop).
+    The two agree to floating-point round-off, and the backend follows the *inversion's*
+    `xp` — the dataset's `use_jax` kwarg only selects a brute-force builder for the
+    preload, never the application path.
+
+    The JAX-only state (`Khat`, `col_offsets`) is therefore built lazily, so an operator
+    constructed and applied under `xp=np` never imports JAX.
+
     Parameters stored
     -----------------
+    nufft_precision_operator
+        The raw real-valued (2y_shape, 2x_shape) preload the operator is built from, kept
+        (rather than discarded after the FFT) because the NumPy and numba CPU paths index
+        it directly and it is small.
     dirty_image
         Convenience field for associated dirty image data (not used directly in
         curvature assembly in this method). Stored as a NumPy array to match
@@ -932,10 +948,70 @@ class InterferometerSparseOperator:
         Larger batch sizes improve throughput on GPU but increase memory usage.
     w_dtype
         Floating-point dtype for weights and accumulations (e.g. float64).
+
+    Cached properties
+    -----------------
     Khat
-        Real FFT of the curvature preload, shape (2y_shape, x_shape + 1), complex.
-        This is the frequency-domain representation of the W~ operator kernel.
+        Real FFT of the curvature preload, shape (2y_shape, x_shape + 1), complex, as a
+        JAX array. The frequency-domain representation of the W~ operator kernel used by
+        the JAX branch. Computed on first access, so it never imports JAX for a NumPy run.
+    khat_np
+        The same transform via `scipy.fft.rfft2`, used by the NumPy branch.
+    col_offsets
+        `(batch_size,)` int32 JAX column indices used to mask the final partial block of
+        the JAX branch's `fori_loop`.
     """
+
+    @cached_property
+    def Khat(self):
+        """
+        The `rfft2` of the preload as a JAX array, of shape (2y_shape, x_shape + 1).
+
+        Lazy so that constructing the operator, and applying it with `xp=np`, never
+        imports JAX. `functools.cached_property` writes straight into the instance
+        `__dict__`, so it is compatible with `frozen=True` (which only blocks
+        `__setattr__`) and does not participate in the dataclass's fields, `__eq__` or
+        `__hash__`.
+
+        `jax.ensure_compile_time_eval()` is what makes the laziness safe. Under a trace
+        (`jit`, and the `lax.fori_loop` the JAX curvature bodies run this transform
+        inside) **every** `jax.numpy` call is staged into the jaxpr, even one whose
+        operands are all concrete -- so a first access from inside the loop body would
+        cache a `DynamicJaxprTracer` here and every later call would fail with
+        `UnexpectedTracerError`. Inside the context the transform is evaluated eagerly
+        and comes out a concrete `jax.Array`, which is both correct to cache and a
+        compile-time constant for the trace that asked for it.
+        """
+        import jax
+        import jax.numpy as jnp
+
+        with jax.ensure_compile_time_eval():
+            return jnp.fft.rfft2(self.nufft_precision_operator)
+
+    @cached_property
+    def khat_np(self) -> np.ndarray:
+        """
+        The `rfft2` of the preload as a NumPy array, of shape (2y_shape, x_shape + 1).
+
+        `scipy.fft` rather than `numpy.fft`: it is the transform the prototype measured
+        (autolens_profiling #226) and scipy is already a hard dependency.
+        """
+        import scipy.fft
+
+        return scipy.fft.rfft2(self.nufft_precision_operator)
+
+    @cached_property
+    def col_offsets(self):
+        """
+        `(batch_size,)` int32 JAX column indices, used by the JAX branch to zero the
+        columns of the final partial block. Lazy, and evaluated eagerly, for the same
+        reason as `Khat`.
+        """
+        import jax
+        import jax.numpy as jnp
+
+        with jax.ensure_compile_time_eval():
+            return jnp.arange(int(self.batch_size), dtype=jnp.int32)
 
     @classmethod
     def from_nufft_precision_operator(
@@ -952,9 +1028,11 @@ class InterferometerSparseOperator:
 
         The curvature preload is assumed to be defined on a (2y, 2x) rectangular
         grid of pixel offsets, where y and x correspond to the *unmasked extent*
-        of the real-space grid. The preload is real, so it is transformed once with
-        a real FFT (`rfft2`) to obtain `Khat` of shape (2y, x + 1), which is then
-        reused for every subsequent curvature matrix build.
+        of the real-space grid. The preload is real, so it is transformed with a real
+        FFT (`rfft2`) to obtain a kernel of shape (2y, x + 1), which is then reused for
+        every subsequent curvature matrix build. That transform is a cached property
+        (`Khat` on JAX, `khat_np` on NumPy), computed on first use rather than here, so
+        constructing the operator imports no backend it is not asked for.
 
         Parameters
         ----------
@@ -974,16 +1052,14 @@ class InterferometerSparseOperator:
         Returns
         -------
         InterferometerSparseOperator
-            Immutable cached state object containing shapes and FFT kernel `Khat`,
-            of shape (2y, x + 1) and complex dtype.
+            Immutable cached state object containing the preload, the grid shapes and the
+            lazily built FFT kernels of shape (2y, x + 1) and complex dtype.
 
         Raises
         ------
         ValueError
             If `nufft_precision_operator` does not have even shape in both dimensions.
         """
-        import jax.numpy as jnp
-
         H2, W2 = nufft_precision_operator.shape
         if (H2 % 2) != 0 or (W2 % 2) != 0:
             raise ValueError(
@@ -994,20 +1070,33 @@ class InterferometerSparseOperator:
         x_shape = W2 // 2
         M = y_shape * x_shape
 
-        Khat = jnp.fft.rfft2(nufft_precision_operator)
+        # C-contiguous NumPy, so the NumPy and numba CPU paths can index the preload
+        # directly. This is a no-op (the same object) for an array that is already a
+        # C-contiguous NumPy array, and materialises a JAX-built preload onto the host.
+        nufft_precision_operator = np.ascontiguousarray(nufft_precision_operator)
 
         return InterferometerSparseOperator(
+            nufft_precision_operator=nufft_precision_operator,
             dirty_image=dirty_image,
             y_shape=y_shape,
             x_shape=x_shape,
             M=M,
             batch_size=int(batch_size),
             w_dtype=nufft_precision_operator.dtype,
-            Khat=Khat,
-            col_offsets=jnp.arange(int(batch_size), dtype=jnp.int32),
         )
 
-    def apply_operator(self, Fbatch_flat):
+    @staticmethod
+    def _is_jax(xp) -> bool:
+        """
+        Returns `True` if `xp` is the JAX array module.
+
+        Every public method branches on this rather than on `xp is np`, so that any
+        NumPy-API-compatible module (`numpy`, and the `numpy` re-exports the library
+        passes around) takes the NumPy branch, while `jax.numpy` takes the JAX branch.
+        """
+        return xp.__name__.startswith("jax")
+
+    def apply_operator(self, Fbatch_flat, xp=np):
         """
         Apply the interferometer W~ operator to a batch of vectors.
 
@@ -1035,28 +1124,51 @@ class InterferometerSparseOperator:
         ----------
         Fbatch_flat
             Array of shape (M, B) representing B vectors on the rectangular grid.
+        xp
+            The array module the operator is applied with: `numpy` (default) uses
+            `scipy.fft`, `jax.numpy` uses `jax.numpy.fft`.
 
         Returns
         -------
         ndarray
             Array of shape (M, B) equal to W~ applied to the batch.
         """
-        import jax.numpy as jnp
-
         y_shape, x_shape = self.y_shape, self.x_shape
         M = y_shape * x_shape
-        Khat = self.Khat
+
+        if self._is_jax(xp):
+            import jax.numpy as jnp
+
+            Khat = self.Khat
+
+            B = Fbatch_flat.shape[1]
+            F_img = Fbatch_flat.T.reshape((B, y_shape, x_shape))
+            F_pad = jnp.pad(F_img, ((0, 0), (0, y_shape), (0, x_shape)))
+            Fhat = jnp.fft.rfft2(F_pad)
+            Ghat = Fhat * Khat[None, :, :]
+            G_pad = jnp.fft.irfft2(Ghat, s=(2 * y_shape, 2 * x_shape))
+            G = G_pad[:, :y_shape, :x_shape]
+            return G.reshape((B, M)).T
+
+        import scipy.fft
+
+        Fbatch_flat = np.asarray(Fbatch_flat, dtype=np.float64)
 
         B = Fbatch_flat.shape[1]
-        F_img = Fbatch_flat.T.reshape((B, y_shape, x_shape))
-        F_pad = jnp.pad(F_img, ((0, 0), (0, y_shape), (0, x_shape)))
-        Fhat = jnp.fft.rfft2(F_pad)
-        Ghat = Fhat * Khat[None, :, :]
-        G_pad = jnp.fft.irfft2(Ghat, s=(2 * y_shape, 2 * x_shape))
+
+        # The pad is written as a zeroed buffer with the block copied into its top-left
+        # corner rather than as `np.pad`, so only one (B, 2y, 2x) array is allocated.
+        F_pad = np.zeros((B, 2 * y_shape, 2 * x_shape), dtype=np.float64)
+        F_pad[:, :y_shape, :x_shape] = Fbatch_flat.T.reshape((B, y_shape, x_shape))
+
+        Fhat = scipy.fft.rfft2(F_pad, axes=(-2, -1))
+        Fhat *= self.khat_np[None, :, :]
+        G_pad = scipy.fft.irfft2(Fhat, s=(2 * y_shape, 2 * x_shape), axes=(-2, -1))
+
         G = G_pad[:, :y_shape, :x_shape]
         return G.reshape((B, M)).T
 
-    def curvature_matrix_diag_from(self, rows, cols, vals, *, S: int):
+    def curvature_matrix_diag_from(self, rows, cols, vals, *, S: int, xp=np):
         """
         Compute the diagonal (mapper-mapper) curvature matrix block F = Aᵀ W~ A.
 
@@ -1085,12 +1197,21 @@ class InterferometerSparseOperator:
             These should already be produced by `mapper.sparse_triplets_curvature`.
         S
             Number of source pixels / parameters for this mapper.
+        xp
+            The array module the block assembly runs on: `numpy` (default) assembles `A`
+            as a `scipy.sparse` CSC matrix and loops the blocks in Python, `jax.numpy`
+            runs the `fori_loop` / `segment_sum` route.
 
         Returns
         -------
         ndarray
             Curvature matrix of shape (S, S), symmetric.
         """
+        if not self._is_jax(xp):
+            return self._curvature_matrix_diag_from_np(
+                rows=rows, cols=cols, vals=vals, S=S
+            )
+
         import jax.numpy as jnp
         from jax import lax
         from jax.ops import segment_sum
@@ -1117,7 +1238,7 @@ class InterferometerSparseOperator:
             F = jnp.zeros((M, B), dtype=jnp.float64)
             F = F.at[rows, bc].add(v)
 
-            G = self.apply_operator(F)  # (M, B)
+            G = self.apply_operator(F, xp=jnp)  # (M, B)
 
             contrib = vals[:, None] * G[rows, :]
             Cblock = segment_sum(contrib, cols, num_segments=S)  # (S, B)
@@ -1131,8 +1252,84 @@ class InterferometerSparseOperator:
         C = C_pad[:, :S]
         return 0.5 * (C + C.T)
 
+    def _sparse_matrix_from(self, rows, cols, vals, *, S: int):
+        """
+        Returns the mapping operator `A` of shape (M, S) as a `scipy.sparse` CSC matrix,
+        built from its COO triplets.
+
+        `csc_matrix((vals, (rows, cols)))` *sums* duplicate `(row, col)` entries, which is
+        required: a Delaunay mapper produces one triplet per (sub-pixel, vertex) pair, so
+        several triplets can share a cell, exactly as the JAX branch's `.at[].add` scatter
+        accumulates them.
+
+        Out-of-range columns are dropped. `mapper_util.sparse_triplets_from` pads every
+        sub-pixel's interpolation stencil to the longest one, so an unused slot arrives as
+        `col = -1` with `val = 0.0`. The JAX branch drops those implicitly (its `in_block`
+        mask is false for a negative column, and `segment_sum` drops out-of-bound segment
+        ids), whereas `csc_matrix` raises on a negative index — so the same entries are
+        dropped explicitly here. They carry zero weight, so dropping them changes nothing
+        but the error.
+
+        Parameters
+        ----------
+        rows, cols, vals
+            COO triplets encoding `A`: extent-grid flat row indices, source pixel column
+            indices, and mapping weights.
+        S
+            Number of source pixels / parameters, i.e. the column count of `A`.
+        """
+        from scipy.sparse import csc_matrix
+
+        S = int(S)
+
+        rows = np.asarray(rows, dtype=np.int64)
+        cols = np.asarray(cols, dtype=np.int64)
+        vals = np.asarray(vals, dtype=np.float64)
+
+        in_range = (cols >= 0) & (cols < S)
+
+        if not in_range.all():
+            rows = rows[in_range]
+            cols = cols[in_range]
+            vals = vals[in_range]
+
+        return csc_matrix((vals, (rows, cols)), shape=(self.M, S))
+
+    def _curvature_matrix_diag_from_np(self, rows, cols, vals, *, S: int) -> np.ndarray:
+        """
+        The NumPy/scipy body of `curvature_matrix_diag_from`: `F = Aᵀ W~ A`.
+
+        `A` is assembled once as a CSC matrix, then swept in column blocks of
+        `batch_size`: each block is densified, operated on with `apply_operator`, and
+        projected back with `Aᵀ` as a sparse-dense product (the NumPy counterpart of the
+        JAX branch's `segment_sum`).
+
+        The block loop is a plain Python `for` rather than the JAX branch's `fori_loop`,
+        so no padding, masking or `dynamic_update_slice` is needed: those exist purely to
+        keep the traced shapes static.
+        """
+        A = self._sparse_matrix_from(rows=rows, cols=cols, vals=vals, S=S)
+        AT = A.T.tocsr()
+
+        S = int(S)
+        B = int(self.batch_size)
+
+        C = np.zeros((S, S), dtype=np.float64)
+
+        for start in range(0, S, B):
+            stop = min(start + B, S)
+
+            F = A[:, start:stop].toarray()
+            G = self.apply_operator(F, xp=np)
+
+            C[:, start:stop] = AT @ G
+
+        # The JAX branch symmetrises its result, so this one must too or the two disagree
+        # at round-off in the last digits rather than to the pin the tests hold.
+        return 0.5 * (C + C.T)
+
     def curvature_matrix_off_diag_from(
-        self, rows0, cols0, vals0, rows1, cols1, vals1, *, S0: int, S1: int
+        self, rows0, cols0, vals0, rows1, cols1, vals1, *, S0: int, S1: int, xp=np
     ):
         """
         Compute the off-diagonal (mapper-mapper) curvature block F01 = A0ᵀ W~ A1.
@@ -1165,6 +1362,8 @@ class InterferometerSparseOperator:
             Number of source pixels / parameters for mapper 0.
         S1
             Number of source pixels / parameters for mapper 1.
+        xp
+            The array module the block assembly runs on: `numpy` (default) or `jax.numpy`.
 
         Returns
         -------
@@ -1175,8 +1374,21 @@ class InterferometerSparseOperator:
         -----
         - The result is *not* symmetrized here because it is not square in general. The symmetric
           counterpart is F10 = F01ᵀ, because A0 and A1 share the same W~.
-        - Padding to `S1_pad = ceil(S1/B)*B` ensures `dynamic_update_slice` is always legal.
+        - Padding to `S1_pad = ceil(S1/B)*B` ensures `dynamic_update_slice` is always legal
+          on the JAX branch; the NumPy branch's Python block loop needs no padding.
         """
+        if not self._is_jax(xp):
+            return self._curvature_matrix_off_diag_from_np(
+                rows0=rows0,
+                cols0=cols0,
+                vals0=vals0,
+                rows1=rows1,
+                cols1=cols1,
+                vals1=vals1,
+                S0=S0,
+                S1=S1,
+            )
+
         import jax.numpy as jnp
         from jax import lax
         from jax.ops import segment_sum
@@ -1207,7 +1419,7 @@ class InterferometerSparseOperator:
             F = jnp.zeros((M, B), dtype=jnp.float64)
             F = F.at[rows1, bc].add(v)
 
-            G = self.apply_operator(F)  # (M, B)
+            G = self.apply_operator(F, xp=jnp)  # (M, B)
 
             contrib = vals0[:, None] * G[rows0, :]
             block = segment_sum(contrib, cols0, num_segments=S0)
@@ -1220,7 +1432,40 @@ class InterferometerSparseOperator:
         F01_pad = lax.fori_loop(0, n_blocks, body, F01_0)
         return F01_pad[:, :S1]
 
-    def operated_matrix_slim_from(self, matrix_slim, extent_index_for_masked_pixel):
+    def _curvature_matrix_off_diag_from_np(
+        self, rows0, cols0, vals0, rows1, cols1, vals1, *, S0: int, S1: int
+    ) -> np.ndarray:
+        """
+        The NumPy/scipy body of `curvature_matrix_off_diag_from`: `F01 = A0ᵀ W~ A1`.
+
+        The same block sweep as `_curvature_matrix_diag_from_np`, but over the columns of
+        `A1` and projected back with `A0ᵀ`. The result is rectangular in general, so —
+        unlike the diagonal block — it is not symmetrised.
+        """
+        A0 = self._sparse_matrix_from(rows=rows0, cols=cols0, vals=vals0, S=S0)
+        A1 = self._sparse_matrix_from(rows=rows1, cols=cols1, vals=vals1, S=S1)
+
+        A0T = A0.T.tocsr()
+
+        S0 = int(S0)
+        S1 = int(S1)
+        B = int(self.batch_size)
+
+        F01 = np.zeros((S0, S1), dtype=np.float64)
+
+        for start in range(0, S1, B):
+            stop = min(start + B, S1)
+
+            F = A1[:, start:stop].toarray()
+            G = self.apply_operator(F, xp=np)
+
+            F01[:, start:stop] = A0T @ G
+
+        return F01
+
+    def operated_matrix_slim_from(
+        self, matrix_slim, extent_index_for_masked_pixel, xp=np
+    ):
         """
         Apply the interferometer W~ operator to columns defined on the *slim masked* grid.
 
@@ -1235,12 +1480,30 @@ class InterferometerSparseOperator:
             `mapping_matrix` of an `AbstractLinearObjFuncList`).
         extent_index_for_masked_pixel
             Array of shape (M_pix,) mapping slim masked pixel indices to extent-grid flat indices.
+        xp
+            The array module the operator is applied with: `numpy` (default) or `jax.numpy`.
 
         Returns
         -------
         ndarray
             Array of shape (M_pix, n_cols) equal to W~ applied to each column.
         """
+        if not self._is_jax(xp):
+            matrix_slim = np.asarray(matrix_slim, dtype=np.float64)
+            extent_index_for_masked_pixel = np.asarray(
+                extent_index_for_masked_pixel, dtype=np.int64
+            )
+
+            # A scatter-*set*, not an add: `extent_index_for_masked_pixel` is one extent
+            # cell per masked pixel and therefore has no repeats, so NumPy fancy-index
+            # assignment matches the JAX branch's `.at[].set` exactly.
+            grid_flat = np.zeros((self.M, matrix_slim.shape[1]), dtype=np.float64)
+            grid_flat[extent_index_for_masked_pixel, :] = matrix_slim
+
+            return self.apply_operator(grid_flat, xp=np)[
+                extent_index_for_masked_pixel, :
+            ]
+
         import jax.numpy as jnp
 
         matrix_slim = jnp.asarray(matrix_slim, dtype=jnp.float64)
@@ -1251,7 +1514,7 @@ class InterferometerSparseOperator:
         grid_flat = jnp.zeros((self.M, matrix_slim.shape[1]), dtype=jnp.float64)
         grid_flat = grid_flat.at[extent_index_for_masked_pixel, :].set(matrix_slim)
 
-        return self.apply_operator(grid_flat)[extent_index_for_masked_pixel, :]
+        return self.apply_operator(grid_flat, xp=jnp)[extent_index_for_masked_pixel, :]
 
     def curvature_matrix_off_diag_func_list_from(
         self,
@@ -1262,6 +1525,7 @@ class InterferometerSparseOperator:
         vals,  # triplets where rows are EXTENT indices
         *,
         S: int,
+        xp=np,
     ):
         """
         Compute the mapper–linear-function off-diagonal block Aᵀ W~ B.
@@ -1300,6 +1564,8 @@ class InterferometerSparseOperator:
             - `vals` are mapping weights, shape (nnz,)
         S
             Number of source pixels / parameters in the mapper.
+        xp
+            The array module the operator is applied with: `numpy` (default) or `jax.numpy`.
 
         Returns
         -------
@@ -1311,6 +1577,27 @@ class InterferometerSparseOperator:
         - No `batch_size` sweep is required because the operator is applied to `n_funcs` columns
           (typically a handful) rather than to all S source pixels.
         """
+        if not self._is_jax(xp):
+            curvature_weights = np.asarray(curvature_weights, dtype=np.float64)
+            extent_index_for_masked_pixel = np.asarray(
+                extent_index_for_masked_pixel, dtype=np.int64
+            )
+
+            n_funcs = curvature_weights.shape[1]
+
+            # 1) scatter slim -> extent(flat) (a set, the indices are unique)
+            grid_flat = np.zeros((self.M, n_funcs), dtype=np.float64)
+            grid_flat[extent_index_for_masked_pixel, :] = curvature_weights
+
+            # 2) apply W~ on the extent grid
+            operated = self.apply_operator(grid_flat, xp=np)  # (M, n_funcs)
+
+            # 3) project onto the mapper's source pixels with `Aᵀ`, the sparse-matrix
+            #    counterpart of the JAX branch's `segment_sum` over `cols`.
+            A = self._sparse_matrix_from(rows=rows, cols=cols, vals=vals, S=S)
+
+            return A.T.tocsr() @ operated  # (S, n_funcs)
+
         import jax.numpy as jnp
         from jax.ops import segment_sum
 
@@ -1332,7 +1619,7 @@ class InterferometerSparseOperator:
         )
 
         # 2) apply W~ on the extent grid
-        operated = self.apply_operator(grid_flat)  # (M, n_funcs)
+        operated = self.apply_operator(grid_flat, xp=jnp)  # (M, n_funcs)
 
         # 3) gather at the mapper's rows (extent coords) and accumulate to source pixels
         contrib = vals[:, None] * operated[rows, :]
@@ -1343,6 +1630,7 @@ class InterferometerSparseOperator:
         curvature_weights_0,  # (M_pix, n_funcs_0)
         curvature_weights_1,  # (M_pix, n_funcs_1)
         extent_index_for_masked_pixel,  # (M_pix,) slim -> extent(flat)
+        xp=np,
     ):
         """
         Compute a linear-function–linear-function curvature block B0ᵀ W~ B1.
@@ -1362,12 +1650,25 @@ class InterferometerSparseOperator:
             on the slim masked grid, of shape (M_pix, n_funcs).
         extent_index_for_masked_pixel
             Array of shape (M_pix,) mapping slim masked pixel indices to extent-grid flat indices.
+        xp
+            The array module the operator is applied with: `numpy` (default) or `jax.numpy`.
 
         Returns
         -------
         ndarray
             Curvature block of shape (n_funcs_0, n_funcs_1).
         """
+        if not self._is_jax(xp):
+            curvature_weights_0 = np.asarray(curvature_weights_0, dtype=np.float64)
+
+            operated = self.operated_matrix_slim_from(
+                matrix_slim=curvature_weights_1,
+                extent_index_for_masked_pixel=extent_index_for_masked_pixel,
+                xp=np,
+            )
+
+            return curvature_weights_0.T @ operated
+
         import jax.numpy as jnp
 
         curvature_weights_0 = jnp.asarray(curvature_weights_0, dtype=jnp.float64)
@@ -1375,6 +1676,7 @@ class InterferometerSparseOperator:
         operated = self.operated_matrix_slim_from(
             matrix_slim=curvature_weights_1,
             extent_index_for_masked_pixel=extent_index_for_masked_pixel,
+            xp=jnp,
         )
 
         return curvature_weights_0.T @ operated
