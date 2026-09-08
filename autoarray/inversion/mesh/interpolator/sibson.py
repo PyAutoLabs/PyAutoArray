@@ -73,9 +73,39 @@ def _bool_env(name, raw):
 # the launch count of the pass (issue #532).  Raise it as far as device memory
 # allows for the mesh and vmap batch in use.
 #
+# The default is the A100 sweep of issue #532 (2026-09-08, RAL
+# ``euclid-ral-gpu-2``, NVIDIA A100 80GB PCIe, fp64, jobs 342321/342322 and the
+# array 342323_[0-3]; autolens_profiling
+# ``results/notes/delaunay_nn_launch_latency.md``).  Cell: the HST imaging
+# DelaunayNN likelihood breakdown, Hilbert-1500 mesh, MGE-60 lens light,
+# ConstantSplit regularization, 17,980 over-sampled data queries + 6,000 split
+# points, ``--split-setup --vmap-batch 16``.  Measured params->H prefix and the
+# peak ``nvidia-smi`` memory sampled through the whole run at vmap 16:
+#
+#   chunk | params->H unbatched | params->H per call @vmap 16 | peak VRAM
+#     256 |            88.29 ms |                    23.07 ms | 41,495 MiB
+#     512 |            52.21 ms |                    18.24 ms | 41,503 MiB
+#    1024 |            35.32 ms |                    19.57 ms | 41,503 MiB
+#    2048 |            27.22 ms |                    19.13 ms | 41,503 MiB
+#    4096 |            24.66 ms |                    16.45 ms | 41,503 MiB
+#
+# (control, ``main`` at ``d7c96762``, chunk 256: 143.90 ms / 24.32 ms /
+# 41,495 MiB.  The eager ``EXPECTED_LOG_EVIDENCE_HST = 29144.581944`` pin held
+# on every row, so the chunk is bit-neutral as designed.)
+#
+# 4096 is fastest on both readings and the VRAM clause of the sweep's decision
+# rule turned out uninformative: the ~41.5 GiB plateau is identical at every
+# chunk *and* on the control, because it is the vmap-16 dense inversion block,
+# not the cavity intermediates.  The guard arithmetic says why there is room --
+# ``(C, 3, 2)`` fp64 intermediates at ~25 kB per query per lane over 4096
+# queries x 16 lanes is ~1.6 GB, ~2 % of an 80 GB card.
+#
 # Set ``PYAUTO_SIBSON_QUERY_CHUNK`` (a positive integer) to override the
-# default at import time, so the value can be swept without editing source.
-SIBSON_QUERY_CHUNK = 256
+# default at import time.  That is both how the sweep above was run without
+# editing source and the escape hatch for a smaller GPU or a much larger cell:
+# lower it until the ``(C, 3, 2)`` intermediates fit, at a proportional cost in
+# sequential ``lax.map`` trips.
+SIBSON_QUERY_CHUNK = 4096
 
 _QUERY_CHUNK_OVERRIDE = _positive_int_env(
     "PYAUTO_SIBSON_QUERY_CHUNK", os.environ.get("PYAUTO_SIBSON_QUERY_CHUNK")
