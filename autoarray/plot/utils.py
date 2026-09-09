@@ -1106,7 +1106,7 @@ def _round_ticks(values: np.ndarray, sig: int = 2) -> np.ndarray:
     return rounded
 
 
-def _arcsec_labels(ticks) -> List[str]:
+def _arcsec_labels(ticks, symbol_over_decimal: Optional[bool] = None) -> List[str]:
     """Format tick values as arcsecond coordinate strings.
 
     Whole-number tick sets render without a decimal point, so
@@ -1117,6 +1117,16 @@ def _arcsec_labels(ticks) -> List[str]:
     decimal labels keep the suffix form ``3.8"``.  When
     ``ticks.symbol_over_decimal`` is true, labels use the double-prime arcsecond
     symbol and decimal labels place it over the decimal point, e.g. ``3.″8``.
+
+    Parameters
+    ----------
+    ticks
+        The tick values to label.
+    symbol_over_decimal
+        Per-call override of the ``ticks.symbol_over_decimal`` config flag.
+        ``True`` forces the symbol-over-decimal form and ``False`` forces the
+        suffix form, whatever the config says.  ``None`` (the default) reads
+        the config, so callers that do not pass it behave exactly as before.
     """
     minus_in_math = _conf_ticks_flag("minus_in_math", False)
 
@@ -1132,7 +1142,9 @@ def _arcsec_labels(ticks) -> List[str]:
             label if "." in label else f"{float(v):.1f}"
             for label, v in zip(labels, ticks)
         ]
-    if _conf_ticks_flag("symbol_over_decimal", False):
+    if symbol_over_decimal is None:
+        symbol_over_decimal = _conf_ticks_flag("symbol_over_decimal", False)
+    if symbol_over_decimal:
         symbol_labels = []
         for label in labels:
             if "." in label:
@@ -1147,6 +1159,7 @@ def _arcsec_labels(ticks) -> List[str]:
 def apply_extent(
     ax,
     extent: Tuple[float, float, float, float],
+    symbol_over_decimal: Optional[bool] = None,
 ) -> None:
     """
     Apply axis limits and inward-pulled, rounded, arcsecond-labelled ticks to *ax*.
@@ -1154,6 +1167,10 @@ def apply_extent(
     Tick count and inward factor are read from ``visualize/general.yaml``
     (``ticks.number_of_ticks_2d`` and ``ticks.extent_factor_2d``), defaulting
     to 3 ticks and factor 0.75.
+
+    ``symbol_over_decimal`` is a per-call override of the
+    ``ticks.symbol_over_decimal`` config flag, forwarded to
+    :func:`_arcsec_labels`; ``None`` (the default) reads the config.
     """
     factor = _conf_ticks("extent_factor_2d", 0.75)
     n = int(_conf_ticks("number_of_ticks_2d", 3))
@@ -1166,8 +1183,8 @@ def apply_extent(
     yticks = _round_ticks(_inward_ticks(ymin, ymax, factor, n))
     ax.set_xticks(xticks)
     ax.set_yticks(yticks)
-    ax.set_xticklabels(_arcsec_labels(xticks))
-    ax.set_yticklabels(_arcsec_labels(yticks))
+    ax.set_xticklabels(_arcsec_labels(xticks, symbol_over_decimal=symbol_over_decimal))
+    ax.set_yticklabels(_arcsec_labels(yticks, symbol_over_decimal=symbol_over_decimal))
 
     # The y-tick labels are rotated 90 degrees elsewhere; without an explicit
     # centre alignment a rotated label anchors at its right edge and visually

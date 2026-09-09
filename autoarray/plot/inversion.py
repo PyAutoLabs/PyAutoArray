@@ -34,6 +34,7 @@ def plot_inversion_reconstruction(
     use_log10: bool = False,
     zoom_to_brightest: bool = True,
     zoom_extent_scale: float = 1.0,
+    arcsec_after_decimal: Optional[bool] = None,
     # --- overlays ---------------------------------------------------------------
     lines: Optional[List[np.ndarray]] = None,
     line_colors: Optional[List] = None,
@@ -73,6 +74,11 @@ def plot_inversion_reconstruction(
         Apply ``LogNorm``.
     zoom_to_brightest
         Pass through to ``mapper.extent_from``.
+    arcsec_after_decimal
+        Per-call override of the ``ticks.symbol_over_decimal`` config flag.
+        When ``True`` the arcsecond tick labels place the ``″`` symbol over the
+        decimal point (``3.″8``) instead of suffixing it (``3.8"``); when ``False``
+        the suffix form is forced.  ``None`` (the default) reads the config.
     lines
         Line overlays (e.g. critical curves).
     grid
@@ -163,7 +169,7 @@ def plot_inversion_reconstruction(
     if grid is not None:
         ax.scatter(grid[:, 1], grid[:, 0], s=1, c="w", alpha=0.5)
 
-    apply_extent(ax, extent)
+    apply_extent(ax, extent, symbol_over_decimal=arcsec_after_decimal)
 
     apply_labels(
         ax,

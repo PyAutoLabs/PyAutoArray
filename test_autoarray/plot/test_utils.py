@@ -91,6 +91,65 @@ def test_arcsec_labels_minus_in_math():
         ticks["minus_in_math"] = original_minus
 
 
+def test_arcsec_labels_symbol_over_decimal_argument_overrides_config():
+    # The per-call argument alone switches the format on, with the config flag
+    # left at its default (false) and `conf.instance` never mutated.
+    assert _arcsec_labels([-2.1, -0.044, 2.0], symbol_over_decimal=True) == [
+        "-2.″1",
+        "-0.″044",
+        "2.″0",
+    ]
+    assert _arcsec_labels([3.8], symbol_over_decimal=True) == ["3.″8"]
+    assert _arcsec_labels([-1.0, 0.0, 1.0], symbol_over_decimal=True) == [
+        "-1″",
+        "0″",
+        "1″",
+    ]
+
+
+def test_arcsec_labels_symbol_over_decimal_argument_false_beats_config():
+    # The override wins in both directions: an explicit False forces the suffix
+    # form even when the config flag is on.
+    ticks = conf.instance["visualize"]["general"]["ticks"]
+    original = ticks.get("symbol_over_decimal", False)
+    try:
+        ticks["symbol_over_decimal"] = True
+
+        assert _arcsec_labels([-2.1, -0.044, 2.0], symbol_over_decimal=False) == [
+            '-2.1"',
+            '-0.044"',
+            '2.0"',
+        ]
+        assert _arcsec_labels([3.8], symbol_over_decimal=False) == ['3.8"']
+    finally:
+        ticks["symbol_over_decimal"] = original
+
+
+def test_arcsec_labels_symbol_over_decimal_none_reads_config():
+    # None (the default) leaves the config in charge, so every existing caller
+    # is unchanged.
+    ticks = conf.instance["visualize"]["general"]["ticks"]
+    original = ticks.get("symbol_over_decimal", False)
+    try:
+        ticks["symbol_over_decimal"] = True
+
+        assert _arcsec_labels([-2.1, -0.044, 2.0], symbol_over_decimal=None) == [
+            "-2.″1",
+            "-0.″044",
+            "2.″0",
+        ]
+
+        ticks["symbol_over_decimal"] = False
+
+        assert _arcsec_labels([-2.1, -0.044, 2.0], symbol_over_decimal=None) == [
+            '-2.1"',
+            '-0.044"',
+            '2.0"',
+        ]
+    finally:
+        ticks["symbol_over_decimal"] = original
+
+
 class TestNormFrom:
     """The one colour-norm helper `plot_array`, `plot_inversion_reconstruction`
     and `autogalaxy.util.plot_utils.norm_from` all build their norms with.
