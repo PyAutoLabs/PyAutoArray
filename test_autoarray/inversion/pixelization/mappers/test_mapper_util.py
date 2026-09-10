@@ -1,3 +1,6 @@
+import importlib.util
+import warnings
+
 import numpy as np
 import pytest
 
@@ -438,3 +441,129 @@ def test_mapped_to_source_via_mapping_matrix_from():
 
 
 #    assert (mapped_to_source == np.array([3.5, 8.0, 3.5])).all()
+
+
+# ----------------------------------------------------------------------------
+# Zero-signal adapt image: NumPy/JAX parity (PyAutoArray bug, 2026-09-06)
+#
+# `adaptive_pixel_signals_from` normalises by the maximum pixel signal. When the
+# adapt image carries no signal where the pixels are -- e.g. an adapt image
+# built from the *unlensed* source profile, a compact blob sitting where the
+# Einstein ring is not -- every pixel signal is zero and so is the maximum.
+#
+# The normalisation used to read `xp.where(max_sig > 0, pixel_signals / max_sig,
+# pixel_signals)`, which guards the *selection* but still evaluates the 0/0
+# division. NumPy discarded the resulting NaN along with the unselected branch
+# (emitting only a `RuntimeWarning`) while JAX propagated it, so the two
+# backends returned different answers for the same input: a finite likelihood
+# on NumPy, NaN on JAX, with `fitness._vmap` collapsing to the resample
+# figure-of-merit.
+# ----------------------------------------------------------------------------
+
+# jax is an `[optional]` extra and is absent on the NumPy-only matrix env, so
+# the JAX parity test skips rather than fails there (same convention as
+# test_delaunay.py).
+requires_jax = pytest.mark.skipif(
+    importlib.util.find_spec("jax") is None,
+    reason="requires jax (installed via the [optional] extras; absent on the NumPy-only matrix env)",
+)
+
+
+def _zero_signal_kwargs():
+    """Three pixels, each mapped by one sub-pixel, over an all-zero adapt image."""
+    return dict(
+        pixels=3,
+        signal_scale=1.0,
+        pix_indexes_for_sub_slim_index=np.array([[0], [1], [2]]),
+        pix_size_for_sub_slim_index=np.ones(3, dtype="int"),
+        pixel_weights=np.ones((3, 1), dtype="int"),
+        slim_index_for_sub_slim_index=np.array([0, 1, 2]),
+        adapt_data=np.zeros(3),
+    )
+
+
+def test__adaptive_pixel_signals_from__zero_signal_adapt_data__is_finite():
+    pixel_signals = aa.util.mapper.adaptive_pixel_signals_from(**_zero_signal_kwargs())
+
+    assert np.isfinite(np.asarray(pixel_signals)).all()
+    assert np.asarray(pixel_signals) == pytest.approx(np.zeros(3), abs=1.0e-10)
+
+
+def test__adaptive_pixel_signals_from__zero_signal_adapt_data__no_divide_warning():
+    # The 0/0 that used to raise this warning is the same one that became a NaN
+    # on the JAX path, so the clean-warning assertion pins the fix at its source.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+
+        aa.util.mapper.adaptive_pixel_signals_from(**_zero_signal_kwargs())
+
+
+@pytest.mark.parametrize("signal_scale", [0.5, 1.0, 2.0])
+def test__adaptive_pixel_signals_from__zero_signal__finite_for_any_signal_scale(
+    signal_scale,
+):
+    # `0.0 ** signal_scale` is finite forwards for every positive exponent, but
+    # a fractional one made the *derivative* infinite; the guard has to hold for
+    # all three without changing the value.
+    kwargs = _zero_signal_kwargs()
+    kwargs["signal_scale"] = signal_scale
+
+    pixel_signals = aa.util.mapper.adaptive_pixel_signals_from(**kwargs)
+
+    assert np.isfinite(np.asarray(pixel_signals)).all()
+    assert np.asarray(pixel_signals) == pytest.approx(np.zeros(3), abs=1.0e-10)
+
+
+@requires_jax
+def test__adaptive_pixel_signals_from__zero_signal__jax_matches_numpy():
+    import jax.numpy as jnp
+
+    kwargs = _zero_signal_kwargs()
+
+    numpy_signals = np.asarray(aa.util.mapper.adaptive_pixel_signals_from(**kwargs))
+    jax_signals = np.asarray(
+        aa.util.mapper.adaptive_pixel_signals_from(**kwargs, xp=jnp)
+    )
+
+    assert np.isfinite(jax_signals).all()
+    assert jax_signals == pytest.approx(numpy_signals, abs=1.0e-10)
+
+
+@requires_jax
+def test__adaptive_pixel_signals_from__signal_present__jax_matches_numpy():
+    # The parity has to hold where the function was already well-defined too,
+    # otherwise the zero-signal guard could pass by breaking the ordinary path.
+    import jax.numpy as jnp
+
+    kwargs = _zero_signal_kwargs()
+    kwargs["adapt_data"] = np.array([2.0, 1.0, 1.0])
+
+    numpy_signals = np.asarray(aa.util.mapper.adaptive_pixel_signals_from(**kwargs))
+    jax_signals = np.asarray(
+        aa.util.mapper.adaptive_pixel_signals_from(**kwargs, xp=jnp)
+    )
+
+    assert numpy_signals == pytest.approx(np.array([1.0, 0.5, 0.5]), abs=1.0e-10)
+    assert jax_signals == pytest.approx(numpy_signals, abs=1.0e-10)
+
+
+@requires_jax
+def test__adaptive_pixel_signals_from__zero_signal__grad_is_finite():
+    # The NaN this task exists for reached the likelihood through `grad`/`vmap`,
+    # not through the forward pass alone, so the guard is pinned there as well.
+    import jax
+    import jax.numpy as jnp
+
+    kwargs = _zero_signal_kwargs()
+    adapt_data = kwargs.pop("adapt_data")
+
+    def total_signal(data):
+        return jnp.sum(
+            aa.util.mapper.adaptive_pixel_signals_from(
+                **kwargs, adapt_data=data, xp=jnp
+            )
+        )
+
+    gradient = jax.grad(total_signal)(jnp.asarray(adapt_data))
+
+    assert np.isfinite(np.asarray(gradient)).all()
