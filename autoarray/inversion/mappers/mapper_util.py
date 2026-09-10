@@ -78,13 +78,39 @@ def adaptive_pixel_signals_from(
     pixel_counts = pixel_counts[:pixels]
 
     # 7) Normalize
+    #
+    # Both divisions here use a *safe denominator* rather than a `where` around
+    # the quotient. `xp.where(cond, a / b, a)` guards only the selection: the
+    # division is still evaluated for every element, so a zero denominator
+    # produces a NaN that NumPy discards along with the unselected branch but
+    # that JAX propagates (the standard `where`-inside-`grad` trap). A
+    # zero-signal adapt image — one whose emission lands nowhere near the
+    # pixels being adapted — makes `max_sig` exactly 0, and the two backends
+    # then disagree on the same input: NumPy returns a finite likelihood with a
+    # `RuntimeWarning`, JAX returns NaN.
     pixel_counts = xp.where(pixel_counts > 0, pixel_counts, 1.0)
     pixel_signals = pixel_signals / pixel_counts
     max_sig = xp.max(pixel_signals)
-    pixel_signals = xp.where(max_sig > 0, pixel_signals / max_sig, pixel_signals)
+    max_sig = xp.where(max_sig > 0, max_sig, 1.0)
+    pixel_signals = pixel_signals / max_sig
 
     # 8) Exponentiate
-    return pixel_signals**signal_scale
+    #
+    # Same trap, one step further on. `0.0 ** signal_scale` is finite forwards
+    # but its derivative, `signal_scale * 0.0 ** (signal_scale - 1)`, is
+    # infinite for `signal_scale < 1` and NaN under `jax.grad`; and a negative
+    # signal raised to a fractional power is NaN on both backends. Zero-signal
+    # pixels are the common case (a pixel the adapt image does not reach), so
+    # exponentiate a safe base and select the result for those pixels
+    # afterwards, keeping the whole line finite and differentiable.
+    #
+    # The signals are documented above as varying between 0 and 1, so a
+    # non-positive signal contributes nothing: it is given 0, not the NaN (or,
+    # for an even integer `signal_scale`, the spurious positive weight) that a
+    # direct exponentiation would return.
+    zero_signal = pixel_signals <= 0.0
+    safe_signals = xp.where(zero_signal, 1.0, pixel_signals)
+    return xp.where(zero_signal, 0.0, safe_signals**signal_scale)
 
 
 def sparse_triplets_from(
