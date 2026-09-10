@@ -37,6 +37,7 @@ def plot_grid(
     buffer: float = 0.1,
     extent: Optional[Tuple[float, float, float, float]] = None,
     force_symmetric_extent: bool = True,
+    arcsec_after_decimal: Optional[bool] = None,
     # --- figure control (used only when ax is None) -----------------------------
     figsize: Optional[Tuple[int, int]] = None,
     output_path: Optional[str] = None,
@@ -77,6 +78,11 @@ def plot_grid(
     force_symmetric_extent
         When ``True`` (and *extent* is auto-computed) the limits are made
         symmetric about the origin so the plot is centred.
+    arcsec_after_decimal
+        Per-call override of the ``ticks.symbol_over_decimal`` config flag.
+        When ``True`` the arcsecond tick labels place the ``″`` symbol over the
+        decimal point (``3.″8``) instead of suffixing it (``3.8"``); when ``False``
+        the suffix form is forced.  ``None`` (the default) reads the config.
     figsize
         Figure size in inches ``(width, height)``.
     output_path
@@ -178,7 +184,7 @@ def plot_grid(
         y_abs = max(abs(extent[2]), abs(extent[3]))
         extent = [-x_abs, x_abs, -y_abs, y_abs]
 
-    apply_extent(ax, extent)
+    apply_extent(ax, extent, symbol_over_decimal=arcsec_after_decimal)
 
     # --- output ----------------------------------------------------------------
     if owns_figure:
