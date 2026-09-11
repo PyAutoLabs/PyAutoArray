@@ -8,6 +8,13 @@ from autoarray import exc
 
 
 class Pixelization:
+    # The source reconstruction is solved for by the inversion, not sampled by
+    # the non-linear search, so it has no prior and never appears in
+    # `model.info`. PyAutoFit's `graph_spec` reads this class attribute (the
+    # `__solved_parameters__` protocol) to draw `reconstruction` as a `solved`
+    # row in model figures.
+    __solved_parameters__ = ("reconstruction",)
+
     def __init__(
         self,
         mesh: AbstractMesh,
