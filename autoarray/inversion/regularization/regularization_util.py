@@ -2,6 +2,7 @@ import numpy as np
 from typing import Tuple
 
 from autoarray import exc
+from autoarray import numba_util
 
 from autoarray.inversion.regularization.adapt import (
     adapt_regularization_weights_from,
@@ -112,6 +113,82 @@ def split_points_from(points, area_weights, xp=np):
     return out.reshape((N * 4, 2))
 
 
+def _reg_split_reference(
+    splitted_mappings: np.ndarray,
+    splitted_sizes: np.ndarray,
+    splitted_weights: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Pure-Python reference for the split-point stencil completion, retained verbatim as the
+    bit-identity ground truth for `_reg_split_kernel`.
+
+    This mutates `splitted_mappings` and `splitted_sizes` in place (it does not mutate
+    `splitted_weights`, because `-1.0 * w` rebinds a fresh array), so callers must hand it copies.
+    It also carries the `size == 0` index leak the kernel deliberately fixes: `j` retains its value
+    from the previous row when a row is empty, so the flag-zero branch writes at a stale `j + 1`.
+    """
+    splitted_weights = -1.0 * splitted_weights
+
+    for i in range(len(splitted_mappings)):
+
+        pixel_index = i // 4
+
+        flag = 0
+
+        for j in range(splitted_sizes[i]):
+            if splitted_mappings[i][j] == pixel_index:
+                splitted_weights[i][j] += 1.0
+                flag = 1
+
+        if flag == 0:
+            splitted_mappings[i][j + 1] = pixel_index
+            splitted_sizes[i] += 1
+            splitted_weights[i][j + 1] = 1.0
+
+    return splitted_mappings, splitted_sizes, splitted_weights
+
+
+@numba_util.jit()
+def _reg_split_kernel(splitted_mappings, splitted_sizes, splitted_weights):
+    """
+    Completes each split-point stencil in place. The weights arrive already sign-flipped, so this
+    adds `1.0` back wherever a row's own pixel is in its mappings, and otherwise inserts that pixel
+    into the reserved pad column at `splitted_sizes[i]`, growing the size.
+
+    Returns the index of the first row whose insertion would run past the table width, or `-1` when
+    every row fits; numba does no bounds checking, so the caller raises on the overflow rather than
+    writing out of bounds. `_reg_split_reference` is the bit-identity ground truth.
+    """
+    width = splitted_mappings.shape[1]
+
+    overflow_row = -1
+
+    for i in range(splitted_mappings.shape[0]):
+
+        pixel_index = i // 4
+
+        flag = 0
+
+        for j in range(splitted_sizes[i]):
+            if splitted_mappings[i, j] == pixel_index:
+                splitted_weights[i, j] += 1.0
+                flag = 1
+
+        if flag == 0:
+
+            insert = splitted_sizes[i]
+
+            if insert >= width:
+                if overflow_row == -1:
+                    overflow_row = i
+            else:
+                splitted_mappings[i, insert] = pixel_index
+                splitted_sizes[i] += 1
+                splitted_weights[i, insert] = 1.0
+
+    return overflow_row
+
+
 def reg_split_np_from(
     splitted_mappings: np.ndarray,
     splitted_sizes: np.ndarray,
@@ -134,8 +211,12 @@ def reg_split_np_from(
     geometry. By having a fixed number of neighbors this removes stochasticty in the regularization that is applied
     to a solution.
 
-    There are cases where a grid has over 100 neighbors, corresponding to very coordinate transformations. In such
-    extreme cases, we raise a `exc.FitException`.
+    The mappings, sizes and weights are copied on entry and the completed tables returned, so the caller's (often
+    `cached_property`) stencil tables are left untouched. The returned mappings keep their full width, including the
+    reserved pad column the interpolators append for the centre-pixel insertion.
+
+    If a row's stencil already fills the table and does not contain its own pixel there is nowhere to insert it, and
+    an `exc.InversionException` is raised rather than writing out of bounds.
 
     Parameters
     ----------
@@ -147,23 +228,21 @@ def reg_split_np_from(
     -------
 
     """
+    splitted_mappings = np.array(splitted_mappings)
+    splitted_sizes = np.array(splitted_sizes)
     splitted_weights = -1.0 * splitted_weights
 
-    for i in range(len(splitted_mappings)):
+    overflow_row = _reg_split_kernel(
+        splitted_mappings,
+        splitted_sizes,
+        splitted_weights,
+    )
 
-        pixel_index = i // 4
-
-        flag = 0
-
-        for j in range(splitted_sizes[i]):
-            if splitted_mappings[i][j] == pixel_index:
-                splitted_weights[i][j] += 1.0
-                flag = 1
-
-        if flag == 0:
-            splitted_mappings[i][j + 1] = pixel_index
-            splitted_sizes[i] += 1
-            splitted_weights[i][j + 1] = 1.0
+    if overflow_row != -1:
+        raise exc.InversionException(
+            f"Split regularization row {overflow_row} has no spare column for its own pixel: its "
+            f"size already equals the stencil table width {splitted_mappings.shape[1]}."
+        )
 
     return splitted_mappings, splitted_sizes, splitted_weights
 
@@ -271,12 +350,17 @@ def reg_split_from(
     return mappings, sizes_new, weights
 
 
-def pixel_splitted_regularization_matrix_np_from(
+def _pixel_splitted_regularization_matrix_reference(
     regularization_weights: np.ndarray,
     splitted_mappings: np.ndarray,
     splitted_sizes: np.ndarray,
     splitted_weights: np.ndarray,
 ) -> np.ndarray:
+    """
+    Pure-Python reference for the split-pixel regularization matrix, retained verbatim as the
+    ground truth both for the JAX path's compacted scatter and for the bit-identity of
+    `_pixel_splitted_regularization_matrix_kernel`.
+    """
     # I'm not sure what is the best way to add surface brightness weight to the regularization scheme here.
     # Currently, I simply mulitply the i-th weight to the i-th source pixel, but there should be different ways.
     # Need to keep an eye here.
@@ -310,6 +394,69 @@ def pixel_splitted_regularization_matrix_np_from(
         regularization_matrix[i, i] /= 2.0
 
     return regularization_matrix
+
+
+@numba_util.jit()
+def _pixel_splitted_regularization_matrix_kernel(
+    regularization_weight, splitted_mappings, splitted_sizes, splitted_weights
+):
+    """
+    Scatters every split-point stencil's outer product into the dense `(P, P)` regularization
+    matrix: the `2e-8` diagonal jitter first, then both triangles of each row's
+    `weight[l] * weight[l + m] * regularization_weight[i]` product, then the diagonal halving.
+
+    `regularization_weight` arrives already squared. The accumulation order matches
+    `_pixel_splitted_regularization_matrix_reference`, which is the bit-identity ground truth.
+    """
+    parameters = splitted_mappings.shape[0] // 4
+
+    regularization_matrix = np.zeros((parameters, parameters))
+
+    for i in range(parameters):
+        regularization_matrix[i, i] += 2e-8
+
+        for j in range(4):
+            k = i * 4 + j
+
+            size = splitted_sizes[k]
+
+            for l in range(size):
+                for m in range(size - l):
+                    value = (
+                        splitted_weights[k, l]
+                        * splitted_weights[k, l + m]
+                        * regularization_weight[i]
+                    )
+
+                    regularization_matrix[
+                        splitted_mappings[k, l], splitted_mappings[k, l + m]
+                    ] += value
+                    regularization_matrix[
+                        splitted_mappings[k, l + m], splitted_mappings[k, l]
+                    ] += value
+
+    for i in range(parameters):
+        regularization_matrix[i, i] /= 2.0
+
+    return regularization_matrix
+
+
+def pixel_splitted_regularization_matrix_np_from(
+    regularization_weights: np.ndarray,
+    splitted_mappings: np.ndarray,
+    splitted_sizes: np.ndarray,
+    splitted_weights: np.ndarray,
+) -> np.ndarray:
+    """
+    Returns the split-pixel regularization matrix on the numpy path, via a numba kernel which is
+    bit-identical to `_pixel_splitted_regularization_matrix_reference`.
+    """
+    return _pixel_splitted_regularization_matrix_kernel(
+        regularization_weights**2.0,
+        splitted_mappings,
+        splitted_sizes,
+        splitted_weights,
+    )
 
 
 def pixel_splitted_regularization_matrix_from(
