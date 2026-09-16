@@ -29,6 +29,7 @@ def fnnls_cholesky(
     ZTx,
     P_initial=np.zeros(0, dtype=int),
     stats: Optional[dict] = None,
+    factor: Optional[dict] = None,
 ):
     """
     Similar to fnnls, but use solving the lstsq problem by updating Cholesky factorisation.
@@ -44,6 +45,26 @@ def fnnls_cholesky(
         indices, in the order they were added), `n_passive` and
         `warm_start_errors` (how many entries the warm start got wrong). Purely
         observational -- the returned solution is unaffected.
+    factor
+        If a dict is passed it is filled on return with the Cholesky factor this solve
+        already built, so a caller that needs `log det(ZTZ)` does not have to factorise
+        the same matrix a second time (see
+        `inversion_util.log_det_from_passive_cholesky_from`):
+
+        - `U_buffer` -- the buffer itself (NOT a copy; it is local to this call and is
+          not referenced again after the return, so handing it over is free). Its
+          leading `k_active x k_active` upper triangle is the factor `U` with
+          `ZTZ[P][:, P] == U.T @ U`, where `P` is `passive_set`. Everything outside that
+          corner, and the whole lower triangle, is zero and meaningless.
+        - `k_active` -- the size of that valid leading block.
+        - `passive_set` -- the passive indices in the order the factor's rows and
+          columns are in (the same array as `stats["passive_set"]`, but published
+          independently of `stats`).
+        - `matrix_shape` -- `ZTZ.shape`, so a caller can check the factor it reads
+          belongs to the system it is asking about.
+
+        Like `stats` this is purely observational: nothing in the solve reads `factor`
+        and the returned solution is byte-identical whether or not it is passed.
     """
     from scipy import linalg as slg
 
@@ -236,6 +257,17 @@ def fnnls_cholesky(
         stats["passive_set"] = P_inorder.copy()
         stats["n_passive"] = int(P_inorder.size)
         stats["warm_start_errors"] = int(np.count_nonzero(P_initial_mask != P))
+
+    if factor is not None:
+        # Hand the factor this solve already built to the caller. `U_buffer` is passed
+        # by reference deliberately: it is allocated inside this call and nothing here
+        # touches it after the return, so there is no copy to make (an (n, n) copy at
+        # n ~ 1500 would be 18 MB and ~5 ms, which is the whole saving the caller is
+        # after). Only `U_buffer[:k_active, :k_active]` is a valid factor.
+        factor["U_buffer"] = U_buffer
+        factor["k_active"] = int(k_active)
+        factor["passive_set"] = P_inorder.copy()
+        factor["matrix_shape"] = tuple(np.shape(ZTZ))
 
     return d
 

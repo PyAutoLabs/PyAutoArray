@@ -226,9 +226,12 @@ def _solve_capturing_stats(monkeypatch, settings, fingerprint="mesh"):
     original = fnnls_mod.fnnls_cholesky
     captured = []
 
-    def _wrapped(ZTZ, ZTx, P_initial=np.zeros(0, dtype=int), stats=None):
+    def _wrapped(ZTZ, ZTx, P_initial=np.zeros(0, dtype=int), stats=None, factor=None):
+        # `factor` is forwarded rather than swallowed: this double stands in for
+        # `fnnls_cholesky` and must publish everything the real one publishes, or the
+        # caller's log-determinant fast path silently loses its factor under the patch.
         captured.append(stats)
-        return original(ZTZ, ZTx, P_initial, stats=stats)
+        return original(ZTZ, ZTx, P_initial, stats=stats, factor=factor)
 
     monkeypatch.setattr(fnnls_mod, "fnnls_cholesky", _wrapped)
 

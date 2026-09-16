@@ -88,6 +88,15 @@ class AbstractInversion:
 
         self._preloads = preloads
 
+        # The Cholesky factor of the passive submatrix that the positive-only solve builds, and
+        # the global indices it was built on (`None` when the solve took the full system).
+        # Published by `reconstruction` and read by `log_det_curvature_reg_matrix_term`, which
+        # reads `log det(F + lambda*H)` off it instead of factorising that matrix a second time.
+        # Per-instance and never a module global: one inversion's factor must never be able to
+        # answer another inversion's log determinant.
+        self._nnls_factor = None
+        self._nnls_factor_ids = None
+
     @property
     def _xp(self):
         if self.use_jax:
@@ -355,15 +364,23 @@ class AbstractInversion:
         # Zero rows and columns in the matrix we want to ignore
         return self.regularization_matrix[ids_to_keep][:, ids_to_keep]
 
-    @property
+    @cached_property
     def curvature_reg_matrix(self) -> np.ndarray:
         """
         The linear system of equations solves for F + regularization_coefficient*H, which is computed below.
 
-        For a single mapper, this function overwrites the cached `curvature_matrix`, because for large matrices this
-        avoids overheads in memory allocation. The `curvature_matrix` is removed as a cached property as a result,
-        to ensure if we access it after computing the `curvature_reg_matrix` it is correctly recalculated in a new
-        array of memory.
+        The addition is **out-of-place**: `curvature_matrix` is left intact and a new `[params, params]` array is
+        returned. An earlier version of this property added `H` into `F` in place and then deleted the cached
+        `curvature_matrix` to force its recomputation, and this docstring described that; the in-place form was
+        removed in `0766edd4` (2025-06-26), so nothing here invalidates anything (and on the imaging inversions,
+        where the matrix is large, `curvature_matrix` is itself a `cached_property`).
+
+        Cached because the likelihood reaches it more than once per evaluation (`reconstruction` and
+        `curvature_reg_matrix_reduced`, and previously `log_det_curvature_reg_matrix_term` through the latter),
+        and each access re-ran the add -- ~2 ms per access of an (n, n) sum at n = 1500. It was a
+        `cached_property` until the blanket `e819fa12` (2025-11-05) sweep turned it into a plain `property` along
+        with a dozen others. The cost of the cache is one extra (n, n) array (18 MB at n = 1500, on top of `F`
+        and `H`) held for the inversion's lifetime.
         """
         if not self.has(cls=AbstractRegularization):
             return self.curvature_matrix
@@ -606,6 +623,13 @@ class AbstractInversion:
             # so it is safe to consult here and nowhere higher up.
             ids_to_keep = self.solve_ids_to_keep
 
+            # The solve's Cholesky factor of its passive submatrix, published through this
+            # out-dict and stored on the instance below so that
+            # `log_det_curvature_reg_matrix_term` can read `log det(F + lambda*H)` off it.
+            # `reconstruction_positive_only_from` clears it on entry, so it is empty whenever
+            # no solve completed.
+            factor = {}
+
             if ids_to_keep is not None:
 
                 # Use advanced indexing to select rows/columns
@@ -624,8 +648,12 @@ class AbstractInversion:
                         fingerprint=self._nnls_warm_start_fingerprint(
                             ids_to_keep=ids_to_keep
                         ),
+                        factor=factor,
                     )
                 )
+
+                self._nnls_factor = factor
+                self._nnls_factor_ids = ids_to_keep
 
                 # Allocate full solution array
                 reconstruction = self._xp.zeros(self.data_vector.shape[0])
@@ -642,13 +670,19 @@ class AbstractInversion:
 
             else:
 
-                return inversion_util.reconstruction_positive_only_from(
+                reconstruction = inversion_util.reconstruction_positive_only_from(
                     data_vector=self.data_vector,
                     curvature_reg_matrix=self.curvature_reg_matrix,
                     settings=self.settings,
                     xp=self._xp,
                     fingerprint=self._nnls_warm_start_fingerprint(),
+                    factor=factor,
                 )
+
+                self._nnls_factor = factor
+                self._nnls_factor_ids = None
+
+                return reconstruction
 
         return inversion_util.reconstruction_positive_negative_from(
             data_vector=self.data_vector,
@@ -898,13 +932,101 @@ class AbstractInversion:
         """
         The log determinant of [F + reg_coeff*H] is used to determine the Bayesian evidence of the solution.
 
-        This uses the Cholesky decomposition which is already computed before solving the reconstruction
-        (or ``slogdet`` when ``Settings.log_det_method == "slogdet"`` — see :meth:`_log_det_symmetric_from`).
+        On the NumPy path with the positive-only solver and the default ``"cholesky"`` method this term is read
+        off the Cholesky factor the reconstruction's non-negative least squares solve has already built, rather
+        than factorizing ``F + reg_coeff*H`` a second time.
+
+        ``fnnls_cholesky`` finishes holding a factor ``U`` of ``M[P][:, P]``, where ``M`` is
+        ``curvature_reg_matrix_reduced`` and ``P`` is the solve's final passive set -- 1485 of the 1500 columns
+        on the production HST Delaunay ``AdaptSplit`` system. The block-determinant identity then gives the
+        full log determinant from that factor plus a Schur complement over the ~15 remaining columns (see
+        :func:`inversion_util.log_det_from_passive_cholesky_from`): ~5 ms in place of a ~40 ms dense
+        factorization of the same matrix, agreeing with it to <= 2e-12 nats.
+
+        Because the factor comes from the solve, **this property evaluates** :attr:`reconstruction` (a
+        ``cached_property``) before reading it. The likelihood is unaffected -- it already evaluates
+        ``regularization_term``, and through it the reconstruction, before this term -- but a diagnostic that
+        asks for this term alone now pays for the reconstruction solve, where before it paid only for one
+        Cholesky.
+
+        The fast path is taken only when every one of these holds; anything else, and any
+        ``np.linalg.LinAlgError`` raised while reading the factor, takes the dense route below unchanged (which
+        carries the test-mode guard in :meth:`_log_det_symmetric_from`):
+
+        - the NumPy backend (the factor is a NumPy buffer built by a numba solver);
+        - ``Settings.log_det_method == "cholesky"`` (``"slogdet"`` is a different value by construction, and is
+          reached through the dense route);
+        - ``Settings.use_positive_only_solver`` (nothing else builds a factor, and this also keeps the
+          positive-negative route from evaluating the reconstruction it would not otherwise need);
+        - every linear object is regularized, so ``curvature_reg_matrix_reduced`` is the whole
+          ``curvature_reg_matrix`` the solve was handed rather than a ``mapper_indices`` subset of it;
+        - a factor is present with a non-empty passive block, and its matrix shape matches;
+        - the solve covered the whole reduced system. Note this is "no subset **or** the identity subset", not
+          "no subset": with ``use_edge_zeroed_pixels`` on but no edge pixels to zero, ``solve_ids_to_keep``
+          returns ``arange(n)`` rather than ``None``, which is the production configuration of the system
+          above.
         """
         if not self.has(cls=AbstractRegularization):
             return 0.0
 
+        if (
+            self._xp is np
+            and self.settings.log_det_method == "cholesky"
+            and self.settings.use_positive_only_solver
+            and self.all_linear_obj_have_regularization
+        ):
+            matrix = self.curvature_reg_matrix_reduced
+
+            # Evaluates the solve (a `cached_property`), which is what publishes the factor
+            # read below. Bound to `_` because the value is not what is wanted here -- the
+            # side effect of the solve having run is.
+            _ = self.reconstruction
+
+            factor = self._nnls_factor
+            ids = self._nnls_factor_ids
+
+            if (
+                factor
+                and factor.get("U_buffer") is not None
+                and factor.get("k_active", 0) > 0
+                and factor.get("matrix_shape") == tuple(matrix.shape)
+                and self._nnls_factor_ids_cover(ids=ids, total=matrix.shape[0])
+            ):
+                try:
+                    return inversion_util.log_det_from_passive_cholesky_from(
+                        matrix=matrix,
+                        U_buffer=factor["U_buffer"],
+                        k_active=factor["k_active"],
+                        passive_set=factor["passive_set"],
+                    )
+                except np.linalg.LinAlgError:
+                    # The Schur complement of the passive block was not positive-definite. That
+                    # means this matrix is at the edge of what fp64 resolves as positive-definite,
+                    # and the dense factorization below is the authority on it: it either returns
+                    # its own value or raises the same error, where the test-mode guard and the
+                    # likelihood's `FitException` resampling handle it as they always have. It must
+                    # not be answered with a fabricated 0.0 here.
+                    pass
+
         return self._log_det_symmetric_from(self.curvature_reg_matrix_reduced)
+
+    @staticmethod
+    def _nnls_factor_ids_cover(ids: Optional[np.ndarray], total: int) -> bool:
+        """
+        Did the solve whose factor was published cover every parameter of the reduced system?
+
+        `None` means the solve took the full system. An explicit index array covers it only if it is the
+        identity `arange(total)`, which `solve_ids_to_keep` does return: `use_edge_zeroed_pixels` with no edge
+        pixels to zero yields `arange(n)`, not `None`, and that is the production configuration of the HST
+        Delaunay system this fast path was measured on. Any other index array is a proper subset, whose factor
+        says nothing about the full matrix's determinant.
+        """
+        if ids is None:
+            return True
+
+        ids = np.asarray(ids)
+
+        return ids.shape == (total,) and np.array_equal(ids, np.arange(total))
 
     @property
     def log_det_regularization_matrix_term(self) -> float:
