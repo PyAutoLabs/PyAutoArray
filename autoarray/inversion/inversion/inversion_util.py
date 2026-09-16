@@ -558,3 +558,127 @@ def param_range_list_from(cls: Type, linear_obj_list) -> List[List[int]]:
         pixel_count += linear_obj.params
 
     return index_list
+
+
+#: The mean non-zeros per row up to which :func:`log_det_sparse_spd_from` factorizes a matrix
+#: sparsely rather than returning `None` and leaving it to the dense Cholesky.
+#:
+#: This is a **regime switch, not a tolerance**. Two regimes of regularization matrix are
+#: produced by this library and nothing in between:
+#:
+#: - a **geometric stencil** `H` (the neighbour schemes and the split family), whose non-zeros
+#:   follow the planar graph of a mesh -- ~5-30 non-zeros per row independent of `pixels`, and
+#:   low fill-in under a minimum-degree ordering. The production HST Delaunay `pixels=1500`
+#:   `AdaptSplit` matrix measures 8.45 non-zeros per row and factorizes 6.1x faster sparsely
+#:   than densely (36.9 ms -> 6.1 ms at 1 thread).
+#: - a **kernel** `H` (`MaternKernel` and its siblings), which is `coefficient * C^-1` and so
+#:   fully dense -- `pixels` non-zeros per row, where a sparse factorization is ~7x *slower*
+#:   than the dense Cholesky at `pixels=1500`.
+#:
+#: 32 sits far above the first regime and far below the second. Random sparse patterns of this
+#: density would fill in catastrophically and lose to the dense Cholesky, but no scheme in this
+#: library produces one: every sparse `H` here is a mesh's adjacency.
+SPARSE_LOG_DET_MAX_NNZ_PER_ROW = 32
+
+#: The smallest `pixels` at which :func:`log_det_sparse_spd_from` factorizes a matrix sparsely
+#: rather than returning `None` and leaving it to the dense Cholesky.
+#:
+#: A sparse factorization carries a fixed ~0.14 ms of Python and SuperLU setup which a small
+#: dense Cholesky beats outright. Measured on a split-stencil pattern at 1 thread, sparse/dense
+#: is 0.07x at `pixels=9`, 0.13x at 64, 0.38x at 128, **1.8x at 256**, 5.0x at 512 and 10.8x at
+#: 1500 -- so 256 is the first measured size where the sparse route pays for itself. Below it
+#: the term costs under 0.1 ms either way and the dense Cholesky runs, which also keeps the
+#: small unit-test and NumPy/JAX parity fixtures on the historical value exactly.
+SPARSE_LOG_DET_MIN_PIXELS = 256
+
+
+def log_det_sparse_spd_from(matrix: np.ndarray) -> Optional[float]:
+    """
+    Returns `log det M` of a sparse, symmetric positive-definite `matrix` via a sparse LU
+    factorization, or `None` if the matrix is too dense for that to be the faster route.
+
+    The two Bayesian-evidence log-determinant terms historically factorized their matrices
+    densely. For `log_det_regularization_matrix_term` on the split regularization family that
+    is the wrong algorithm: `H` has `O(1)` non-zeros per row (8.45 on the production HST
+    Delaunay `pixels=1500` `AdaptSplit` matrix), so a `O(pixels^3)` dense Cholesky spends
+    almost all of its work on structural zeros -- ~37 ms of a ~300 ms NumPy likelihood call.
+
+    The factorization is SuperLU in symmetric mode (`permc_spec="MMD_AT_PLUS_A"`,
+    `diag_pivot_thresh=0.0`), which orders for the symmetric pattern and pivots on the
+    diagonal, so `diag(U)` are the factorization's pivots and `log det M = sum(log(diag(U)))`
+    (`L` has a unit diagonal). Because row pivoting is off, those pivots are positive if and
+    only if the matrix is positive-definite, which is checked: a non-positive pivot raises
+    `np.linalg.LinAlgError` exactly as `np.linalg.cholesky` does, and an exactly singular
+    matrix's `RuntimeError` from SuperLU is converted to the same error. The caller's
+    test-mode guard therefore applies unchanged.
+
+    The `[pixels, pixels]` dense `matrix` still has to be scanned to find its non-zeros, and
+    that scan is a meaningful share of the sparse route's cost (2.9 ms of the 6.1 ms at
+    `pixels=1500`), so it is done once: the boolean mask and its per-row counts give both the
+    density regime check and, directly, the CSC `data`/`indices`/`indptr` triple, with no
+    second pass and no `scipy.sparse.csc_matrix(dense)` conversion (which costs 13 ms).
+
+    The row-major scan builds the CSR triple, which is passed to `csc_matrix` as if it were
+    CSC. For the symmetric matrices this is called on the two are identical; more generally it
+    factorizes `M.T`, whose determinant is the same, so the returned value is correct either
+    way.
+
+    Parameters
+    ----------
+    matrix
+        The `[pixels, pixels]` symmetric positive-definite matrix whose log determinant is
+        computed, e.g. an inversion's `regularization_matrix_reduced`.
+
+    Returns
+    -------
+    The log determinant of the matrix, or `None` where the dense Cholesky is the faster route
+    and the caller should use it: matrices smaller than `SPARSE_LOG_DET_MIN_PIXELS`, and
+    matrices with more than `SPARSE_LOG_DET_MAX_NNZ_PER_ROW` non-zeros per row on average.
+    """
+    from scipy.sparse import csc_matrix
+    from scipy.sparse.linalg import splu
+
+    pixels = matrix.shape[0]
+
+    if pixels < SPARSE_LOG_DET_MIN_PIXELS:
+        return None
+
+    non_zeros = matrix != 0.0
+    non_zeros_per_row = np.count_nonzero(non_zeros, axis=1)
+
+    if non_zeros_per_row.sum() > SPARSE_LOG_DET_MAX_NNZ_PER_ROW * pixels:
+        return None
+
+    flat_indices = np.flatnonzero(non_zeros)
+
+    indptr = np.empty(pixels + 1, dtype=np.int32)
+    indptr[0] = 0
+    np.cumsum(non_zeros_per_row, out=indptr[1:])
+
+    matrix_sparse = csc_matrix(
+        (
+            matrix.ravel()[flat_indices],
+            (flat_indices % matrix.shape[1]).astype(np.int32),
+            indptr,
+        ),
+        shape=matrix.shape,
+    )
+
+    try:
+        lu = splu(
+            matrix_sparse,
+            permc_spec="MMD_AT_PLUS_A",
+            diag_pivot_thresh=0.0,
+            options=dict(SymmetricMode=True),
+        )
+    except RuntimeError as e:
+        # SuperLU raises `RuntimeError("Factor is exactly singular")`; the dense Cholesky
+        # raises `LinAlgError` on the same matrix and the caller guards on that.
+        raise np.linalg.LinAlgError(str(e)) from e
+
+    pivots = lu.U.diagonal()
+
+    if not np.all(pivots > 0.0):
+        raise np.linalg.LinAlgError("Matrix is not positive definite")
+
+    return float(np.sum(np.log(pivots)))

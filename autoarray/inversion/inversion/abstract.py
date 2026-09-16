@@ -847,7 +847,7 @@ class AbstractInversion:
             ),
         )
 
-    def _log_det_symmetric_from(self, matrix) -> float:
+    def _log_det_symmetric_from(self, matrix, sparse: bool = False) -> float:
         """
         Log determinant of a symmetric positive-(semi)definite ``matrix``, used by the two evidence log-det terms.
 
@@ -863,11 +863,24 @@ class AbstractInversion:
           would NaN it returns a finite, differentiable value instead, so it never stalls a gradient search.
           It is **opt-in and non-default** — intended for gradient-based work and for comparison against the
           Cholesky evidence, not as a replacement for it. See PyAutoArray#391.
+
+        ``sparse=True`` (NumPy backend only, under ``"cholesky"``) offers the matrix to
+        :func:`inversion_util.log_det_sparse_spd_from` first, which factorizes it sparsely when it is both
+        large enough and sparse enough for that to be the faster route and returns ``None`` otherwise, in
+        which case the same dense Cholesky below runs. Either way the failure semantics are identical: both routes raise
+        ``np.linalg.LinAlgError`` on a matrix that is not positive-definite, so the test-mode guard applies
+        unchanged.
         """
         if self.settings.log_det_method == "slogdet":
             return self._xp.linalg.slogdet(matrix)[1]
 
         try:
+            if sparse:
+                log_det = inversion_util.log_det_sparse_spd_from(matrix=matrix)
+
+                if log_det is not None:
+                    return log_det
+
             return 2.0 * self._xp.sum(
                 self._xp.log(self._xp.diag(self._xp.linalg.cholesky(matrix)))
             )
@@ -899,9 +912,23 @@ class AbstractInversion:
         The Bayesian evidence of an inversion which quantifies its overall goodness-of-fit uses the log determinant
         of regularization matrix, Log[Det[Lambda*H]].
 
-        Unlike the determinant of the curvature reg matrix, which uses an existing preloading Cholesky decomposition
-        used for the source reconstruction, this uses scipy sparse linear algebra to solve the determinant efficiently
-        (or ``slogdet`` when ``Settings.log_det_method == "slogdet"`` — see :meth:`_log_det_symmetric_from`).
+        Unlike the determinant of the curvature reg matrix, which reuses the Cholesky decomposition already
+        computed for the source reconstruction, this term factorizes ``H`` itself, and how it does so depends on
+        the backend:
+
+        - **NumPy** — ``H`` is offered to :func:`inversion_util.log_det_sparse_spd_from`, a sparse SuperLU
+          factorization. The neighbour and split regularization schemes build ``H`` from a mesh's adjacency, so
+          it carries ``O(1)`` non-zeros per row whatever ``pixels`` is (8.6 on the HST Delaunay ``pixels=1500``
+          ``AdaptSplit`` matrix) and a dense ``O(pixels^3)`` Cholesky spends nearly all its work on structural
+          zeros. Matrices which the sparse factorization cannot speed up are returned untouched by that
+          function and take the dense Cholesky below: the kernel schemes' fully dense
+          ``coefficient * C^-1``, and any matrix below a few hundred pixels, where SuperLU's fixed setup
+          costs more than the whole dense factorization.
+        - **JAX** — the dense Cholesky, unchanged: the sparse factorization is a NumPy/SciPy routine and is
+          neither traceable nor differentiable.
+
+        (Or ``slogdet`` on either backend when ``Settings.log_det_method == "slogdet"`` — see
+        :meth:`_log_det_symmetric_from`.)
 
         Under ``log_det_method == "slogdet"`` (opt-in, default off — PyAutoArray#391), regularization schemes
         which know a factorization of their own matrix may additionally supply the term directly via
@@ -938,7 +965,9 @@ class AbstractInversion:
             if all(term is not None for term in term_list):
                 return sum(term_list)
 
-        return self._log_det_symmetric_from(self.regularization_matrix_reduced)
+        return self._log_det_symmetric_from(
+            self.regularization_matrix_reduced, sparse=self._xp is np
+        )
 
     @property
     def reconstruction_covariance_matrix(self) -> np.ndarray:
