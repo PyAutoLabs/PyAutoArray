@@ -83,10 +83,11 @@ class InversionImagingMapping(AbstractInversionImaging):
         concatenated ensuring their `curvature_matrix` values are solved for simultaneously. This includes all
         diagonal and off-diagonal terms describing the covariances between linear objects.
 
-        The `curvature_matrix` computed here is overwritten in memory when the regularization matrix is added to it,
-        because for large matrices this avoids overhead. For this reason, `curvature_matrix` is not a cached property
-        to ensure if we access it after computing the `curvature_reg_matrix` it is correctly recalculated in a new
-        array of memory.
+        This `curvature_matrix` is a `cached_property` and is NOT overwritten in memory:
+        `curvature_reg_matrix` adds the regularization matrix to it out-of-place and leaves it intact. An earlier
+        version of that property added `H` into `F` in place and deleted this cached value to force its
+        recomputation, which is what this docstring described; the in-place form was removed in `0766edd4`
+        (2025-06-26).
         """
 
         return inversion_util.curvature_matrix_via_mapping_matrix_from(
