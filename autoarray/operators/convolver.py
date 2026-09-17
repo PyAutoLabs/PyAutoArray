@@ -900,7 +900,13 @@ class Convolver:
             Contains contributions from both the main mapping matrix and, if provided,
             the blurring mapping matrix.
         """
-        dtype_native = xp.float32 if use_mixed_precision else xp.float64
+        # fp32 is a JAX-only choice; the NumPy backend always builds the cube in
+        # fp64 (see `Settings.use_mixed_precision`, PyAutoArray#552).
+        dtype_native = (
+            xp.float32
+            if (use_mixed_precision and xp.__name__.startswith("jax"))
+            else xp.float64
+        )
 
         n_src = mapping_matrix.shape[1]
 

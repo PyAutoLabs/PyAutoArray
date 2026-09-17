@@ -123,20 +123,15 @@ def curvature_matrix_via_mapping_matrix_from(
     xp
         The array module to use (`numpy` by default; pass `jax.numpy` for JAX support).
     """
-    # NumPy path: keep it simple + stable
-    if xp is np:
-        A = mapping_matrix / noise_map[:, None]
-        curvature_matrix = xp.dot(A.T, A)
-    else:
-        # Choose compute dtype
-
-        compute_dtype = xp.float32 if settings.use_mixed_precision else xp.float64
-        out_dtype = xp.float64  # always return float64 for downstream stability
-
-        A = mapping_matrix
-        w = (1.0 / noise_map).astype(compute_dtype)
-        A = A * w[:, None]
-        curvature_matrix = xp.dot(A.T, A).astype(out_dtype)
+    # The noise weighting is fp64 on every backend, whatever
+    # `settings.use_mixed_precision` says. The mapping matrix arrives fp64 from
+    # every operated path (the mixed-precision FFT upcasts at the kernel
+    # multiply), so the former fp32 `1 / noise_map` on the JAX branch never
+    # bought an fp32 accumulation -- it only rounded the weights of F
+    # inconsistently with the fp64 `1 / noise_map**2` of the data vector
+    # (PyAutoArray#552).
+    A = xp.asarray(mapping_matrix, dtype=xp.float64) / noise_map[:, None]
+    curvature_matrix = xp.dot(A.T, A)
 
     if (
         add_to_curvature_diag
