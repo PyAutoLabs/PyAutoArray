@@ -1,3 +1,5 @@
+import importlib.util
+
 from astropy import units
 from astropy.modeling import functional_models
 from astropy.coordinates import Angle
@@ -680,3 +682,132 @@ def test__convolved_mapping_matrix_via_real_space_np__matches_image_convolution_
         assert convolved[:, index] == pytest.approx(
             np.array(convolved_image), abs=1.0e-12
         )
+
+
+# ----------------------------------------------------------------------------
+# Mixed precision is a JAX-only allocation choice (PyAutoArray#552).
+#
+# The native mapping-matrix cube is the big allocation the fp32 path exists
+# for, and it only buys anything on a GPU. Downcasting it under `xp=np` as
+# well removed the fp64 reference the workspace smoke scripts compare a
+# mixed-precision JAX fit against.
+# ----------------------------------------------------------------------------
+
+# jax is an `[optional]` extra and is absent on the NumPy-only matrix env, so
+# the JAX parity tests skip rather than fail there.
+requires_jax = pytest.mark.skipif(
+    importlib.util.find_spec("jax") is None,
+    reason="requires jax (installed via the [optional] extras; absent on the NumPy-only matrix env)",
+)
+
+
+def _mixed_precision_convolver_inputs():
+    """
+    The single-source-pixel example of
+    `test__convolved_mapping_matrix_from__single_source_pixel__...`: a 4x4
+    unmasked region inside a 6x6 mask, an asymmetric 3x3 kernel, and three
+    source pixels each reached by one image pixel.
+    """
+    mask = aa.Mask2D(
+        mask=np.array(
+            [
+                [True, True, True, True, True, True],
+                [True, False, False, False, False, True],
+                [True, False, False, False, False, True],
+                [True, False, False, False, False, True],
+                [True, False, False, False, False, True],
+                [True, True, True, True, True, True],
+            ]
+        ),
+        pixel_scales=1.0,
+    )
+
+    kernel = aa.Array2D.no_mask(
+        values=[[0, 0.0, 0], [0.4, 0.2, 0.3], [0, 0.1, 0]],
+        pixel_scales=mask.pixel_scales,
+    )
+
+    mapping_matrix = np.zeros((16, 3))
+    mapping_matrix[7, 1] = 1.0
+    mapping_matrix[9, 0] = 1.0
+    mapping_matrix[10, 2] = 1.0
+
+    return mask, kernel, mapping_matrix
+
+
+def test__mapping_matrix_native_from__mixed_precision__numpy_stays_float64():
+    mask, kernel, mapping_matrix = _mixed_precision_convolver_inputs()
+
+    convolver = aa.Convolver(kernel=kernel)
+
+    for use_mixed_precision in (True, False):
+        native = convolver.mapping_matrix_native_from(
+            mapping_matrix=mapping_matrix,
+            mask=mask,
+            use_mixed_precision=use_mixed_precision,
+        )
+
+        assert native.dtype == np.float64
+
+
+@requires_jax
+def test__mapping_matrix_native_from__mixed_precision__jax_is_float32():
+    import jax
+
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
+
+    mask, kernel, mapping_matrix = _mixed_precision_convolver_inputs()
+
+    convolver = aa.Convolver(kernel=kernel)
+
+    native_mixed = convolver.mapping_matrix_native_from(
+        mapping_matrix=jnp.asarray(mapping_matrix),
+        mask=mask,
+        use_mixed_precision=True,
+        xp=jnp,
+    )
+    native_fp64 = convolver.mapping_matrix_native_from(
+        mapping_matrix=jnp.asarray(mapping_matrix),
+        mask=mask,
+        use_mixed_precision=False,
+        xp=jnp,
+    )
+
+    assert native_mixed.dtype == jnp.float32
+    assert native_fp64.dtype == jnp.float64
+
+    assert np.asarray(native_mixed) == pytest.approx(
+        np.asarray(native_fp64), abs=1.0e-6
+    )
+
+
+@requires_jax
+def test__convolved_mapping_matrix_from__mixed_precision__jax_fft_matches_numpy_fp64():
+    # The fp32 cube feeds a complex64 forward FFT, but the kernel multiply is
+    # deliberately complex128, so the convolved matrix comes back fp64 and
+    # within fp32 round-off of the fp64 NumPy reference.
+    import jax
+
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
+
+    mask, kernel, mapping_matrix = _mixed_precision_convolver_inputs()
+
+    reference = aa.Convolver(kernel=kernel).convolved_mapping_matrix_from(
+        mapping_matrix, mask
+    )
+
+    assert reference.dtype == np.float64
+
+    convolver_fft = aa.Convolver(kernel=kernel, use_fft=True)
+
+    blurred = convolver_fft.convolved_mapping_matrix_from(
+        jnp.asarray(mapping_matrix),
+        mask,
+        use_mixed_precision=True,
+        xp=jnp,
+    )
+
+    assert blurred.dtype == jnp.float64
+    assert np.asarray(blurred) == pytest.approx(reference, abs=1.0e-5)

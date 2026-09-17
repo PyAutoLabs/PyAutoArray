@@ -47,11 +47,11 @@ class Settings:
               algebra stay fp64. Pixelization meshes with K ≫ 40 source pixels accumulate enough fp32
               round-off through NNLS / log-determinant to shift ``figure_of_merit`` by O(1) units; the upcast
               preserves precision while the cheaper fp32 scatter and forward FFT are kept.
-            - The mapping matrix native cube allocation in
-              :func:`autoarray.inversion.mappers.mapper_util.mapping_matrix_from` — output dtype becomes fp32.
-            - The internal compute dtype of the curvature matrix accumulation in
-              :func:`autoarray.inversion.inversion.inversion_util.curvature_matrix_via_mapping_matrix_from` —
-              the noise-weighted ``A.T @ A`` is formed in fp32 then cast to fp64 for downstream stability.
+            - The mapping matrix allocation in
+              :func:`autoarray.inversion.mappers.mapper_util.mapping_matrix_from` and the native cube in
+              :meth:`Convolver.mapping_matrix_native_from` — output dtype becomes fp32 on the JAX backend
+              only; under ``xp=np`` both stay fp64, so a NumPy fit is a true fp64 reference for a
+              mixed-precision JAX fit (PyAutoArray#552).
 
             Empirical platform notes:
 
@@ -64,6 +64,12 @@ class Settings:
 
             Paths that intentionally stay in fp64:
 
+            - The noise weighting of the curvature matrix in
+              :func:`autoarray.inversion.inversion.inversion_util.curvature_matrix_via_mapping_matrix_from`:
+              ``F`` and the data vector ``D`` are both formed with fp64 ``1 / noise_map`` on every backend,
+              so the linear system is weighted consistently (an earlier fp32 ``1 / noise_map`` on the JAX
+              branch never produced an fp32 accumulation, because the blurred mapping matrix is already
+              fp64 — it only biased ``F`` against ``D``; PyAutoArray#552).
             - The NNLS reconstruction (jaxnnls / Cholesky factor + cho_solve) in
               :func:`autoarray.inversion.inversion.inversion_util.reconstruction_positive_only_from`. Active-set
               and PDIP solvers are sensitive to fp32 noise on ill-conditioned source meshes.
@@ -73,8 +79,11 @@ class Settings:
 
             Empirical numerical impact on the MGE imaging regression (HST-shaped, 15k masked pixels, 40 linear
             Gaussians): Δlog-likelihood ≈ 1e-4 absolute at log-likelihood ≈ 27,400. Well below the natural χ²
-            sampling noise floor (σ ≈ √(2N) ≈ 175). Pixelization paths with K ≫ 40 source pixels are more
-            sensitive — verify on representative integration tests before turning on for production fits.
+            sampling noise floor (σ ≈ √(2N) ≈ 175). On a 316-pixel ``RectangularBilinearAdaptImage`` +
+            ``Adapt`` inversion (17×17 mesh) the whole mixed-precision effect on the JAX path is
+            Δlog-likelihood ≈ 1e-4 nats against the fp64 path (PyAutoArray#552); pixelization paths with
+            K ≫ 40 source pixels are more sensitive — verify on representative integration tests before
+            turning on for production fits.
 
             If `False` (default), all paths run in fp64.
         use_positive_only_solver

@@ -1,3 +1,5 @@
+import importlib.util
+
 import autoarray as aa
 import numpy as np
 import pytest
@@ -281,3 +283,104 @@ def test__reconstruction_positive_only_from__singular_matrix_test_mode_returns_d
     assert reconstruction.shape == data_vector.shape
     assert np.all(np.isfinite(reconstruction))
     assert (reconstruction == 1.0).all()
+
+
+# ----------------------------------------------------------------------------
+# The curvature matrix's noise weighting is fp64 on every backend
+# (PyAutoArray#552).
+#
+# The JAX branch used to round `1 / noise_map` to fp32 when mixed precision was
+# on. That never bought an fp32 accumulation — the blurred mapping matrix
+# arrives fp64 from every operated path — it only weighted `F` with fp32
+# reciprocals while the data vector `D` kept fp64 `1 / noise_map ** 2`, so the
+# linear system was inconsistently weighted.
+# ----------------------------------------------------------------------------
+
+# jax is an `[optional]` extra and is absent on the NumPy-only matrix env, so
+# the JAX parity tests skip rather than fail there.
+requires_jax = pytest.mark.skipif(
+    importlib.util.find_spec("jax") is None,
+    reason="requires jax (installed via the [optional] extras; absent on the NumPy-only matrix env)",
+)
+
+
+def _curvature_mixed_precision_inputs():
+    """
+    A mapping matrix with fp32-visible entries over a noise-map whose
+    reciprocal is *not* representable in fp32 (1 / 3 and 1 / 7), so an fp32
+    rounding of the weights shows up in `F` at the 1e-8 relative level.
+    """
+    mapping_matrix = np.array(
+        [
+            [1.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 1.0, 1.0],
+            [0.3, 0.0, 0.7],
+            [0.0, 0.2, 0.8],
+        ]
+    )
+
+    noise_map = np.array([3.0, 3.0, 7.0, 3.0, 7.0, 3.0])
+
+    return mapping_matrix, noise_map
+
+
+@requires_jax
+def test__curvature_matrix_via_mapping_matrix_from__mixed_precision__jax_matches_numpy():
+    import jax
+
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
+
+    mapping_matrix, noise_map = _curvature_mixed_precision_inputs()
+
+    settings = aa.Settings(use_mixed_precision=True)
+
+    numpy_curvature = aa.util.inversion.curvature_matrix_via_mapping_matrix_from(
+        mapping_matrix=mapping_matrix, noise_map=noise_map, settings=settings
+    )
+    jax_curvature = aa.util.inversion.curvature_matrix_via_mapping_matrix_from(
+        mapping_matrix=jnp.asarray(mapping_matrix),
+        noise_map=jnp.asarray(noise_map),
+        settings=settings,
+        xp=jnp,
+    )
+
+    assert numpy_curvature.dtype == np.float64
+    assert jax_curvature.dtype == jnp.float64
+
+    assert np.asarray(jax_curvature) == pytest.approx(numpy_curvature, rel=1.0e-12)
+
+
+@requires_jax
+def test__curvature_matrix_via_mapping_matrix_from__mixed_precision__weights_are_fp64():
+    # The parity test above would also pass if *both* backends rounded the
+    # weights to fp32, so pin the absolute value: `F` must be the fp64
+    # `(A / sigma).T @ (A / sigma)`, and must NOT be the fp32-weighted one.
+    import jax
+
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
+
+    mapping_matrix, noise_map = _curvature_mixed_precision_inputs()
+
+    weighted = mapping_matrix / noise_map[:, None]
+    expected = np.dot(weighted.T, weighted)
+
+    weighted_fp32 = mapping_matrix * (1.0 / noise_map).astype(np.float32)[:, None]
+    expected_fp32_weights = np.dot(weighted_fp32.T, weighted_fp32)
+
+    # The fixture has to be able to tell the two apart in the first place.
+    assert not np.allclose(expected, expected_fp32_weights, rtol=1.0e-14, atol=0.0)
+
+    jax_curvature = np.asarray(
+        aa.util.inversion.curvature_matrix_via_mapping_matrix_from(
+            mapping_matrix=jnp.asarray(mapping_matrix),
+            noise_map=jnp.asarray(noise_map),
+            settings=aa.Settings(use_mixed_precision=True),
+            xp=jnp,
+        )
+    )
+
+    assert jax_curvature == pytest.approx(expected, rel=1.0e-14)

@@ -1,10 +1,15 @@
 """Unit tests for the adaptive rectangular interpolator (rank and
 kernel-density CDF transforms).
 
-Pure numpy — no JAX imports here. Cross-xp / gradient certification lives in
+Numpy by default — cross-xp / gradient certification lives in
 autolens_workspace_test/scripts/jax_grad per the project's "no JAX in unit
-tests" rule.
+tests" rule. The one exception is the tie-block section at the bottom of this
+module: the defect it pins (PyAutoArray#552) *was* a NumPy-vs-JAX divergence,
+so a NumPy-only test cannot express it. Those tests import jax inside the test
+body, behind `requires_jax`, exactly as test_mapper_util.py does.
 """
+
+import importlib.util
 
 import numpy as np
 import pytest
@@ -559,3 +564,145 @@ def test__forward_transform__windowed_numba_matches_dense_reference(weighted):
     )
 
     np.testing.assert_allclose(fwd(q), reference, rtol=0.0, atol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Tied coordinates in the weighted rank-CDF transform (PyAutoArray#552)
+#
+# On an unlensed image grid every column and every row of the traced points is
+# a tie block (316 points over 38 distinct coordinates per axis, up to 18-fold
+# ties). The weighted branch used to accumulate the adapt weights in `argsort`
+# order, and `np.argsort` (quicksort, unstable) and `jnp.argsort` (stable)
+# order tied entries differently — moving sub-pixels between mesh cells and
+# opening a 15.47-nat NumPy-vs-JAX log-likelihood gap. Giving every point of a
+# tie block the block's final cumulative weight (the right-continuous
+# empirical CDF) makes the transform a function of the point multiset alone.
+# ---------------------------------------------------------------------------
+
+# jax is an `[optional]` extra and is absent on the NumPy-only matrix env, so
+# the JAX parity tests skip rather than fail there (same convention as
+# test_mapper_util.py).
+requires_jax = pytest.mark.skipif(
+    importlib.util.find_spec("jax") is None,
+    reason="requires jax (installed via the [optional] extras; absent on the NumPy-only matrix env)",
+)
+
+
+def _tied_lattice(n=7, seed=0):
+    """
+    An n x n lattice — n distinct coordinates per axis, n-fold ties on every
+    one of them — with random positive weights normalised to 1, and a set of
+    off-lattice queries.
+    """
+    rng = np.random.default_rng(seed)
+
+    axis = np.linspace(-1.0, 1.0, n)
+    points = np.array([[y, x] for y in axis for x in axis])
+
+    weights = rng.uniform(0.1, 1.0, size=points.shape[0])
+    weights = weights / weights.sum()
+
+    queries = rng.uniform(-1.2, 1.2, size=(23, 2))
+
+    return points, weights, queries
+
+
+@requires_jax
+def test__create_transforms_rank__weighted__tied_points__numpy_matches_jax():
+    import jax
+
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
+
+    points, weights, queries = _tied_lattice()
+
+    # The fixture must actually tie, or the test proves nothing.
+    assert np.unique(points[:, 0]).size == 7
+    assert points.shape[0] == 49
+
+    fwd_np, rev_np = create_transforms_rank(points, mesh_weight_map=weights, xp=np)
+    fwd_jax, rev_jax = create_transforms_rank(
+        jnp.asarray(points), mesh_weight_map=jnp.asarray(weights), xp=jnp
+    )
+
+    forward_np = fwd_np(queries)
+    forward_jax = np.asarray(fwd_jax(jnp.asarray(queries)))
+
+    assert forward_jax == pytest.approx(forward_np, abs=1.0e-12)
+
+    # Interior unit-square probes for the inverse.
+    probes = np.random.default_rng(5).uniform(0.05, 0.95, size=(23, 2))
+
+    inverse_np = rev_np(probes)
+    inverse_jax = np.asarray(rev_jax(jnp.asarray(probes)))
+
+    assert inverse_jax == pytest.approx(inverse_np, abs=1.0e-12)
+
+
+def test__create_transforms_rank__weighted__tied_points__permutation_invariant():
+    # The transform is a function of the (point, weight) multiset: permuting
+    # the inputs is the same perturbation the backends' argsort tie-breaks
+    # apply, without needing a second backend to express it.
+    points, weights, queries = _tied_lattice(seed=1)
+
+    fwd, rev = create_transforms_rank(points, mesh_weight_map=weights, xp=np)
+
+    order = np.random.default_rng(7).permutation(points.shape[0])
+    fwd_permuted, rev_permuted = create_transforms_rank(
+        points[order], mesh_weight_map=weights[order], xp=np
+    )
+
+    probes = np.random.default_rng(9).uniform(0.05, 0.95, size=(23, 2))
+
+    assert fwd_permuted(queries) == pytest.approx(fwd(queries), abs=1.0e-12)
+    assert rev_permuted(probes) == pytest.approx(rev(probes), abs=1.0e-12)
+
+
+def test__create_transforms_rank__weighted__untied_points__matches_plain_cumsum_interp():
+    # Regression guard on the other side of the fix: with no ties the
+    # right-continuous CDF must reduce, bit-for-bit, to the pre-fix formula
+    # (interpolate cumsum(w[argsort]) at the sorted coordinates).
+    points, weights, queries = _tied_lattice(seed=2)
+
+    jitter = np.random.default_rng(11).uniform(-0.01, 0.01, size=points.shape)
+    points = points + jitter
+
+    assert np.unique(points[:, 0]).size == points.shape[0]
+    assert np.unique(points[:, 1]).size == points.shape[0]
+
+    fwd, _ = create_transforms_rank(points, mesh_weight_map=weights, xp=np)
+
+    expected = np.empty((queries.shape[0], 2))
+    for d in range(2):
+        order = np.argsort(points[:, d], kind="stable")
+        expected[:, d] = np.interp(
+            queries[:, d],
+            points[order, d],
+            np.cumsum(weights[order]),
+            left=0,
+            right=1,
+        )
+
+    assert fwd(queries) == pytest.approx(expected, abs=0.0)
+
+
+def test__create_transforms_rank__weighted__cdf_at_a_tie_is_the_whole_block():
+    # Right-continuity: F(v) is the total weight of every point <= v, for
+    # every tied coordinate v — not a partial sum through the block.
+    points, weights, _ = _tied_lattice(seed=3)
+
+    fwd, _ = create_transforms_rank(points, mesh_weight_map=weights, xp=np)
+
+    for d in range(2):
+        for value in np.unique(points[:, d]):
+            query = np.zeros((1, 2))
+            query[0, d] = value
+
+            expected = weights[points[:, d] <= value].sum()
+
+            assert fwd(query)[0, d] == pytest.approx(expected, abs=1.0e-12)
+
+    # ... and the transform stays monotone non-decreasing along each axis.
+    dense = np.linspace(points.min(axis=0) - 0.3, points.max(axis=0) + 0.3, 500)
+
+    assert np.all(np.diff(fwd(dense), axis=0) >= 0.0)

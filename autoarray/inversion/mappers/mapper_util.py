@@ -307,8 +307,15 @@ def mapping_matrix_from(
     w64 = xp.asarray(pix_weights_for_sub_slim_index, dtype=xp.float64)
     frac64 = xp.asarray(sub_fraction, dtype=xp.float64)
 
-    # Output dtype only (big allocation)
-    out_dtype = xp.float32 if use_mixed_precision else xp.float64
+    # Output dtype only (big allocation). fp32 is a JAX-only (GPU throughput)
+    # choice: the NumPy backend is the fp64 parity oracle of the workspace smoke
+    # scripts and always allocates float64, as the `Settings` docstring promises
+    # (PyAutoArray#552).
+    out_dtype = (
+        xp.float32
+        if (use_mixed_precision and xp.__name__.startswith("jax"))
+        else xp.float64
+    )
 
     # 1) Flatten
     flat_pixidx = pix_idx.reshape(-1)  # (M_sub*B,)

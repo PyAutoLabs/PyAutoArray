@@ -567,3 +567,92 @@ def test__adaptive_pixel_signals_from__zero_signal__grad_is_finite():
     gradient = jax.grad(total_signal)(jnp.asarray(adapt_data))
 
     assert np.isfinite(np.asarray(gradient)).all()
+
+
+# ----------------------------------------------------------------------------
+# Mixed precision is a JAX-only allocation choice (PyAutoArray#552).
+#
+# `use_mixed_precision` buys GPU throughput on the JAX path. Applying it on the
+# NumPy path as well silently removed the fp64 reference a NumPy fit is
+# supposed to be: the workspace smoke scripts compare a NumPy fit against a
+# mixed-precision JAX fit and call the difference the mixed-precision error.
+# ----------------------------------------------------------------------------
+
+
+def _mixed_precision_mapping_kwargs():
+    """
+    Three image pixels, each mapped by two weighted sub-pixels, with weights
+    that are not representable in fp32 so a downcast is visible in the values
+    as well as in the dtype.
+    """
+    return dict(
+        pix_indexes_for_sub_slim_index=np.array([[0, 1], [1, 2], [2, 0]]),
+        pix_size_for_sub_slim_index=np.array([2, 2, 2]),
+        pix_weights_for_sub_slim_index=np.array(
+            [[1.0 / 3.0, 2.0 / 3.0], [0.7, 0.3], [0.1, 0.9]]
+        ),
+        pixels=3,
+        total_mask_pixels=3,
+        slim_index_for_sub_slim_index=np.array([0, 1, 2]),
+        sub_fraction=np.array([1.0, 1.0, 1.0]),
+    )
+
+
+def test__mapping_matrix_from__mixed_precision__numpy_stays_float64():
+    kwargs = _mixed_precision_mapping_kwargs()
+
+    mapping_matrix = aa.util.mapper.mapping_matrix_from(
+        **kwargs, use_mixed_precision=True
+    )
+
+    assert mapping_matrix.dtype == np.float64
+
+    mapping_matrix = aa.util.mapper.mapping_matrix_from(
+        **kwargs, use_mixed_precision=False
+    )
+
+    assert mapping_matrix.dtype == np.float64
+
+
+@requires_jax
+def test__mapping_matrix_from__mixed_precision__jax_is_float32_and_matches_numpy():
+    import jax
+
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
+
+    kwargs = _mixed_precision_mapping_kwargs()
+
+    numpy_matrix = aa.util.mapper.mapping_matrix_from(
+        **kwargs, use_mixed_precision=True
+    )
+    jax_matrix = aa.util.mapper.mapping_matrix_from(
+        **kwargs, use_mixed_precision=True, xp=jnp
+    )
+
+    assert numpy_matrix.dtype == np.float64
+    assert jax_matrix.dtype == jnp.float32
+
+    assert np.asarray(jax_matrix) == pytest.approx(numpy_matrix, abs=1.0e-6)
+
+
+@requires_jax
+def test__mapping_matrix_from__no_mixed_precision__float64_on_both_backends():
+    import jax
+
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
+
+    kwargs = _mixed_precision_mapping_kwargs()
+
+    numpy_matrix = aa.util.mapper.mapping_matrix_from(
+        **kwargs, use_mixed_precision=False
+    )
+    jax_matrix = aa.util.mapper.mapping_matrix_from(
+        **kwargs, use_mixed_precision=False, xp=jnp
+    )
+
+    assert numpy_matrix.dtype == np.float64
+    assert jax_matrix.dtype == jnp.float64
+
+    assert np.asarray(jax_matrix) == pytest.approx(numpy_matrix, abs=1.0e-14)

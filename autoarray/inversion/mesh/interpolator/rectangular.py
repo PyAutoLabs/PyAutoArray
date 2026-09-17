@@ -191,6 +191,14 @@ def create_transforms_rank(traced_points, mesh_weight_map=None, xp=np):
     The CDF is the empirical (weighted) rank CDF of the traced points — a
     sort plus a cumulative sum, linearly interpolated between points — so a
     likelihood evaluation costs O(N log N) with no kernel hyperparameters.
+
+    Tied coordinates (an unlensed image grid ties every column and every row)
+    are handled in the weighted branch by giving all points of a tie block
+    the block's final cumulative weight, i.e. the right-continuous empirical
+    CDF, which makes the transform independent of the backend's ``argsort``
+    tie-break and of the input ordering (PyAutoArray#552). The unweighted
+    branch keeps its historical rank staircase (ranks are the same whichever
+    tied point is picked, so it was never backend-dependent).
     Recovered from the pre-consolidation implementation (PR #402 deleted it
     when the kernel CDF took the plain class names); see the module
     docstring for the gradient trade-off versus the kernel CDF.
@@ -221,6 +229,27 @@ def create_transforms_rank(traced_points, mesh_weight_map=None, xp=np):
         t = xp.stack([mesh_weight_map, mesh_weight_map], axis=1)
         t = xp.take_along_axis(t, sdx, axis=0)
         t = xp.cumsum(t, axis=0)
+
+        # Tied coordinates: every point of a tie block takes the block's final
+        # cumulative weight -- the right-continuous empirical CDF -- so the
+        # transform is a function of the point multiset only. Without this the
+        # partial sums inside a block follow whatever order ``argsort`` gave the
+        # tied entries, and ``np.argsort`` (quicksort, unstable) and
+        # ``jnp.argsort`` (stable) give different ones: on an unlensed image grid
+        # (up to 18 points tied per coordinate) that moved sub-pixels between
+        # mesh cells and opened a 15-nat NumPy-vs-JAX log-likelihood gap
+        # (PyAutoArray#552). Untied points are unchanged bit-for-bit.
+        t = xp.stack(
+            [
+                t[
+                    xp.searchsorted(sort_points[:, d], sort_points[:, d], side="right")
+                    - 1,
+                    d,
+                ]
+                for d in range(2)
+            ],
+            axis=1,
+        )
 
     if xp.__name__.startswith("jax"):
         transform = partial(forward_interp, sort_points, t)
