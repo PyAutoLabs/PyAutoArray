@@ -774,11 +774,20 @@ def curvature_matrix_via_sparse_operator_two_stage_from(
     The trade is `sum_pairs u0 * u1` scattered RMWs for
     `sum_pairs u1` L1 scatters plus `(sum_data u0 + data_pixels) * pix_pixels`
     dense ops. It is therefore *not* unconditionally faster: it wins when the
-    source space is small relative to the PSF overlap and the mappings are wide
-    (bilinear, u0 = 4), and loses when the source space is large and the mappings
-    narrow (barycentric Delaunay, u0 ~ 1.55). `curvature_matrix_via_sparse_operator_from`
-    chooses between the two from the measured geometry -- see
-    `CURVATURE_TWO_STAGE_COST_RATIO_THRESHOLD`.
+    source space is small enough for the accumulator and a row of `F` to stay
+    cache-resident and the mappings are wide (bilinear, u0 = 4: 2.9x at the HST
+    rectangular fiducial), and it was expected to lose for narrow barycentric
+    mappings on a large source space (Delaunay, u0 ~ 1.55). Measured, it does
+    not lose there either: on the HST Delaunay N=1500 fixed-light cell (u0 =
+    1.60, one thread, autolens_profiling#274, RAL job 343394) the two-stage
+    kernel is 1.20x faster than the direct loop at the site (85.0 vs 102.1 ms)
+    and the direct loop costs 6.4 % more on the whole likelihood call; a
+    touched-index variant of stage 2, which scatters over and re-zeroes only the
+    indices stage 1 touched, is slower than the plain two-stage form as well
+    (97.0 ms), because a 1500-long fp64 AXPY is 12 KB and L1-resident while the
+    index bookkeeping is not free. `curvature_matrix_via_sparse_operator_from`
+    therefore selects on the source pixel count alone -- two-stage at or below
+    `CURVATURE_TWO_STAGE_MAX_PIX_PIXELS` (4096), the direct loop above it.
 
     Parameters and return value are exactly those of
     `curvature_matrix_via_sparse_operator_direct_from`.
