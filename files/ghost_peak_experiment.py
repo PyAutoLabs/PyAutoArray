@@ -34,9 +34,10 @@ Outputs
   and the warped mesh edges, for K = 1, 2, 3 peaks side by side.
 - console log: per-zone pixel-density ratios and ghost-to-real ratio.
 
-Run inside the worktree with ``activate.sh`` sourced::
+Run from the workspace root (or a task-bundle root) with its ``activate.sh``
+sourced::
 
-    source ~/Code/PyAutoLabs-wt/rectangular-adapt-cdf/activate.sh
+    source ./activate.sh
     python PyAutoArray/files/ghost_peak_experiment.py
 """
 import os
