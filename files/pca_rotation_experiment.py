@@ -23,9 +23,10 @@ Method
 5. Visualise rotated-frame warped mesh AND source-frame warped mesh
    (rotated back).
 
-Run with::
+Run from the workspace root (or a task-bundle root) with its ``activate.sh``
+sourced::
 
-    source ~/Code/PyAutoLabs-wt/rectangular-adapt-cdf/activate.sh
+    source ./activate.sh
     python PyAutoArray/files/pca_rotation_experiment.py
 """
 import os
