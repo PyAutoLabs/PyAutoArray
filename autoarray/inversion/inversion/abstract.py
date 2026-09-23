@@ -10,6 +10,7 @@ from autonerves import cached_property, is_test_mode
 from autoarray.dataset.imaging.dataset import Imaging
 from autoarray.dataset.interferometer.dataset import Interferometer
 from autoarray.inversion.inversion.dataset_interface import DatasetInterface
+from autoarray.inversion.linear_obj.func_list import AbstractLinearObjFuncList
 from autoarray.inversion.linear_obj.linear_obj import LinearObj
 from autoarray.inversion.mappers.abstract import Mapper
 from autoarray.inversion.regularization.abstract import AbstractRegularization
@@ -565,6 +566,40 @@ class AbstractInversion:
 
         return self.zeroed_ids_to_keep
 
+    @property
+    def positive_only_solver_used(self) -> str:
+        """
+        The positive-only solver `reconstruction` passes to `reconstruction_positive_only_from`:
+        ``"certified"`` or ``"pdip"``.
+
+        ``"certified"`` (the certified active-set solve, :mod:`autoarray.util.jax_active_set`) is selected
+        only when all of the following hold, and ``"pdip"`` (today's solver) otherwise:
+
+        - `Settings.positive_only_solver` is ``"certified"`` (opt-in; the packaged default is ``"pdip"``);
+        - the inversion runs on the JAX backend -- the NumPy path always runs fnnls (a NumPy certified
+          scheme measured slower than fnnls with its warm-start memo);
+        - it contains a `Mapper` and **no** `AbstractLinearObjFuncList` (linear light profiles / MGE).
+          Dense MGE coefficient blocks make the active-set scheme converge poorly (a 60-MGE +
+          Delaunay-1500 system failed to certify in 40 passes where PDIP took 22 iterations), so those
+          inversions keep PDIP.
+
+        On the NumPy backend the returned name has no effect (`reconstruction_positive_only_from` ignores
+        it there); it is still ``"pdip"`` so the property reports the solver family that ran on JAX.
+        """
+        if self.settings.positive_only_solver != "certified":
+            return "pdip"
+
+        if not self.use_jax:
+            return "pdip"
+
+        if not self.has(cls=Mapper):
+            return "pdip"
+
+        if self.has(cls=AbstractLinearObjFuncList):
+            return "pdip"
+
+        return "certified"
+
     def _nnls_warm_start_fingerprint(self, ids_to_keep=None) -> Optional[str]:
         """
         Identify the index space this inversion's positive-only solve works in, so the
@@ -630,6 +665,9 @@ class AbstractInversion:
             # no solve completed.
             factor = {}
 
+            # "certified" only for mapper-only JAX inversions -- see `positive_only_solver_used`.
+            solver = self.positive_only_solver_used
+
             if ids_to_keep is not None:
 
                 # Use advanced indexing to select rows/columns
@@ -649,6 +687,7 @@ class AbstractInversion:
                             ids_to_keep=ids_to_keep
                         ),
                         factor=factor,
+                        solver=solver,
                     )
                 )
 
@@ -677,6 +716,7 @@ class AbstractInversion:
                     xp=self._xp,
                     fingerprint=self._nnls_warm_start_fingerprint(),
                     factor=factor,
+                    solver=solver,
                 )
 
                 self._nnls_factor = factor
