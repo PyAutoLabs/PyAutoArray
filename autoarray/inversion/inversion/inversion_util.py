@@ -248,6 +248,46 @@ def reconstruction_positive_negative_from(
         raise
 
 
+def _certified_positive_only_from(
+    Q, q, settings, target_kappa, solver_tol, max_iter, stats=None
+):
+    """
+    The JAX certified active-set positive-only solve of ``(Q, q)`` with the PDIP solve as its fallback.
+
+    Called by `reconstruction_positive_only_from` on its (usually Jacobi-scaled) system; see
+    :mod:`autoarray.util.jax_active_set` for the algorithm, budgets, gradient contract and vmap caveat.
+    """
+    from autoarray.util.jax_active_set import solve_certified_with_fallback
+    from autoarray.util.jax_nnls import solve_nnls_primal
+
+    settings = settings or Settings()
+
+    def pdip_fn():
+        return solve_nnls_primal(
+            Q,
+            q,
+            target_kappa=target_kappa,
+            solver_tol=solver_tol,
+            max_iter=max_iter,
+        )
+
+    x, certified, passes = solve_certified_with_fallback(
+        Q,
+        q,
+        pdip_fn=pdip_fn,
+        fallback=settings.certified_fallback == "pdip",
+        pass_budget=int(settings.certified_pass_budget),
+        tau_rel=float(settings.certified_tau_rel),
+    )
+
+    if stats is not None:
+        stats["solver"] = "certified"
+        stats["certified"] = certified
+        stats["passes"] = passes
+
+    return x
+
+
 def reconstruction_positive_only_from(
     data_vector: np.ndarray,
     curvature_reg_matrix: np.ndarray,
@@ -255,6 +295,8 @@ def reconstruction_positive_only_from(
     xp=np,
     fingerprint=None,
     factor: Optional[dict] = None,
+    solver: str = "pdip",
+    stats: Optional[dict] = None,
 ):
     """
     Solve the linear system Eq.(2) (in terms of minimizing the quadratic value) of
@@ -303,6 +345,20 @@ def reconstruction_positive_only_from(
         `fnnls_cholesky` calls below, so a memo-seeded attempt that raises cannot leave the factor of a solve
         whose result was discarded behind for the retry's caller to read. Purely observational: the returned
         reconstruction is byte-identical whether or not it is passed.
+    solver
+        Which positive-only solver the JAX (`xp=jnp`) path uses: ``"pdip"`` (default, the jaxnnls primal-dual
+        interior-point solve, byte-identical to before this option existed) or ``"certified"`` (the certified
+        active-set solve of :mod:`autoarray.util.jax_active_set`, applied to the same Jacobi-scaled system, with
+        the PDIP solve as its fallback when ``settings.certified_fallback == "pdip"`` and the pass budget
+        ``settings.certified_pass_budget`` is exhausted). The caller (`AbstractInversion.reconstruction`) passes
+        ``"certified"`` only for mapper-only inversions on the JAX backend -- see
+        `AbstractInversion.positive_only_solver_used`. The NumPy path ignores it and always runs fnnls.
+    stats
+        Optional out-dict for solver observability on the JAX path. With ``solver="certified"`` it receives
+        ``certified`` (whether the active-set search certified within budget; ``False`` means the fallback or an
+        uncertified iterate was returned) and ``passes`` (restricted passes run) as *traced* JAX scalars, so it is
+        safe under ``jax.jit`` / ``vmap`` -- read them as outputs of the traced function or through
+        ``jax.debug.callback``. Every call also records ``solver``. It never changes the returned reconstruction.
 
     Notes
     -----
@@ -324,6 +380,11 @@ def reconstruction_positive_only_from(
         # dummy -- leaves the caller reading "no factor" rather than a factor belonging to some
         # other matrix. `fnnls_cholesky` publishes only on a successful return.
         factor.clear()
+
+    if solver not in ("pdip", "certified"):
+        raise ValueError(
+            f"solver={solver!r} is not a valid positive-only solver; expected 'pdip' or 'certified'."
+        )
 
     if xp.__name__.startswith("jax"):
 
@@ -373,6 +434,24 @@ def reconstruction_positive_only_from(
             D = 1.0 / d
             Q_pc = (curvature_reg_matrix * D[:, None]) * D[None, :]
             q_pc = data_vector * D
+
+            if solver == "certified":
+                return (
+                    _certified_positive_only_from(
+                        Q=Q_pc,
+                        q=q_pc,
+                        settings=settings,
+                        target_kappa=target_kappa,
+                        solver_tol=solver_tol,
+                        max_iter=max_iter,
+                        stats=stats,
+                    )
+                    * D
+                )
+
+            if stats is not None:
+                stats["solver"] = "pdip"
+
             return (
                 solve_nnls_primal(
                     Q_pc,
@@ -384,6 +463,20 @@ def reconstruction_positive_only_from(
                 * D
             )
 
+        if solver == "certified":
+            return _certified_positive_only_from(
+                Q=curvature_reg_matrix,
+                q=data_vector,
+                settings=settings,
+                target_kappa=target_kappa,
+                solver_tol=solver_tol,
+                max_iter=max_iter,
+                stats=stats,
+            )
+
+        if stats is not None:
+            stats["solver"] = "pdip"
+
         return solve_nnls_primal(
             curvature_reg_matrix,
             data_vector,
@@ -392,6 +485,8 @@ def reconstruction_positive_only_from(
             max_iter=max_iter,
         )
 
+    # `solver` is deliberately ignored on the NumPy path: a NumPy port of the certified active-set scheme
+    # measured 3-7 % slower than fnnls and lost to its warm-start memo (PyAutoArray#566), so fnnls stays.
     try:
 
         from autoarray.util.fnnls import fnnls_cholesky

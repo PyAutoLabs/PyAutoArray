@@ -63,3 +63,49 @@ def test_settings_nnls_warm_start_error_tolerance_round_trips():
     settings = from_dict(to_dict(aa.Settings(nnls_warm_start_error_tolerance=2.5)))
 
     assert settings.nnls_warm_start_error_tolerance == 2.5
+
+
+def test_settings_positive_only_solver_keys_default_from_config():
+    # The test config does not ship the keys, so these resolve through the KeyError fallbacks -- the
+    # production path whenever a workspace shadows autoarray's general.yaml -- which must equal the
+    # packaged values.
+    settings = aa.Settings()
+
+    assert settings.positive_only_solver == "pdip"
+    assert settings.certified_pass_budget == 16
+    assert settings.certified_fallback == "pdip"
+    assert settings.certified_tau_rel == 1.0e-9
+
+    import yaml
+
+    packaged = Path(aa.__file__).parent / "config" / "general.yaml"
+    inversion = yaml.safe_load(packaged.read_text())["inversion"]
+
+    assert inversion["positive_only_solver"] == "pdip"
+    assert inversion["certified_pass_budget"] == 16
+    assert inversion["certified_fallback"] == "pdip"
+    assert float(inversion["certified_tau_rel"]) == 1.0e-9
+
+
+def test_settings_positive_only_solver_keys_round_trip():
+    settings = aa.Settings(
+        positive_only_solver="certified",
+        certified_pass_budget=7,
+        certified_fallback="none",
+        certified_tau_rel=1.0e-8,
+    )
+
+    settings = from_dict(to_dict(settings))
+
+    assert settings.positive_only_solver == "certified"
+    assert settings.certified_pass_budget == 7
+    assert settings.certified_fallback == "none"
+    assert settings.certified_tau_rel == 1.0e-8
+
+
+def test_settings_positive_only_solver_keys_are_validated():
+    with pytest.raises(ValueError, match="positive_only_solver"):
+        aa.Settings(positive_only_solver="fnnls")
+
+    with pytest.raises(ValueError, match="certified_fallback"):
+        aa.Settings(certified_fallback="numpy")

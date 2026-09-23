@@ -384,3 +384,160 @@ def test__curvature_matrix_via_mapping_matrix_from__mixed_precision__weights_are
     )
 
     assert jax_curvature == pytest.approx(expected, rel=1.0e-14)
+
+
+# ----------------------------------------------------------------------------
+# The `solver` switch of `reconstruction_positive_only_from` (PyAutoArray#566).
+# ----------------------------------------------------------------------------
+
+
+def _positive_only_system(n=30, seed=7):
+    """An SPD system whose unconstrained solution has negative entries, so the constraint binds."""
+    rng = np.random.default_rng(seed)
+    A = rng.normal(size=(3 * n, n))
+    b = rng.normal(size=3 * n)
+    curvature_reg_matrix = A.T @ A
+    data_vector = A.T @ b
+    assert (np.linalg.solve(curvature_reg_matrix, data_vector) < 0.0).any()
+    return data_vector, curvature_reg_matrix
+
+
+@requires_jax
+@pytest.mark.parametrize("use_jacobi", [True, False])
+def test__reconstruction_positive_only_from__certified_matches_pdip_on_jax(
+    use_jacobi, monkeypatch
+):
+    import jax
+
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
+    from autonerves import conf
+
+    if not use_jacobi:
+        # Exercise the unpreconditioned branch too: the `solver` switch lives in both. The dict stands in for
+        # the config; the Settings' certified_* keys resolve through their KeyError defaults.
+        monkeypatch.setattr(
+            conf,
+            "instance",
+            {
+                "general": {
+                    "inversion": {
+                        "nnls_jacobi_preconditioning": False,
+                        "nnls_target_kappa": 1.0e-11,
+                    }
+                }
+            },
+        )
+
+    for data_vector, curvature_reg_matrix in [
+        (
+            np.array([1.0, 1.0, 2.0]),
+            np.array([[2.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 1.0]]),
+        ),
+        _positive_only_system(),
+    ]:
+        pdip = np.asarray(
+            aa.util.inversion.reconstruction_positive_only_from(
+                data_vector=jnp.asarray(data_vector),
+                curvature_reg_matrix=jnp.asarray(curvature_reg_matrix),
+                settings=aa.Settings(),
+                xp=jnp,
+            )
+        )
+
+        stats = {}
+        certified = np.asarray(
+            aa.util.inversion.reconstruction_positive_only_from(
+                data_vector=jnp.asarray(data_vector),
+                curvature_reg_matrix=jnp.asarray(curvature_reg_matrix),
+                settings=aa.Settings(),
+                xp=jnp,
+                solver="certified",
+                stats=stats,
+            )
+        )
+
+        assert stats["solver"] == "certified"
+        assert bool(stats["certified"])
+        assert int(stats["passes"]) >= 1
+
+        assert (certified >= 0.0).all()
+        assert certified == pytest.approx(
+            pdip, rel=1.0e-8, abs=1.0e-8 * np.max(np.abs(certified))
+        )
+
+
+@requires_jax
+def test__reconstruction_positive_only_from__certified_budget_exhausted_falls_back_to_pdip():
+    import jax
+
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
+
+    data_vector, curvature_reg_matrix = _positive_only_system()
+
+    kwargs = dict(
+        data_vector=jnp.asarray(data_vector),
+        curvature_reg_matrix=jnp.asarray(curvature_reg_matrix),
+        xp=jnp,
+    )
+
+    pdip = np.asarray(
+        aa.util.inversion.reconstruction_positive_only_from(
+            settings=aa.Settings(), **kwargs
+        )
+    )
+
+    stats = {}
+    fallback = np.asarray(
+        aa.util.inversion.reconstruction_positive_only_from(
+            settings=aa.Settings(certified_pass_budget=0),
+            solver="certified",
+            stats=stats,
+            **kwargs,
+        )
+    )
+
+    assert not bool(stats["certified"])
+    assert np.array_equal(fallback, pdip)
+
+
+def test__reconstruction_positive_only_from__numpy_path_ignores_solver(monkeypatch):
+    # The NumPy path must run fnnls whatever `solver` says: spy on it.
+    from autoarray.util import fnnls
+
+    calls = []
+    original = fnnls.fnnls_cholesky
+
+    def spy(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(fnnls, "fnnls_cholesky", spy)
+
+    data_vector = np.array([1.0, 1.0, 2.0])
+    curvature_reg_matrix = np.array([[2.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 1.0]])
+
+    results = []
+    for solver in ["pdip", "certified"]:
+        calls.clear()
+        results.append(
+            aa.util.inversion.reconstruction_positive_only_from(
+                data_vector=data_vector,
+                curvature_reg_matrix=curvature_reg_matrix,
+                solver=solver,
+            )
+        )
+        assert len(calls) == 1
+
+    assert np.array_equal(results[0], results[1])
+    assert results[0] == pytest.approx(np.array([0.5, 0.0, 2.0]), 1.0e-4)
+
+
+def test__reconstruction_positive_only_from__invalid_solver_raises():
+    with pytest.raises(ValueError, match="solver"):
+        aa.util.inversion.reconstruction_positive_only_from(
+            data_vector=np.array([1.0]),
+            curvature_reg_matrix=np.array([[1.0]]),
+            solver="bogus",
+        )

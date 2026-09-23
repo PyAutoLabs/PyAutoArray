@@ -22,6 +22,10 @@ class Settings:
         log_det_method: Optional[str] = None,
         regularization_term_method: Optional[str] = None,
         interferometer_numba_nnz_per_source_max: Optional[float] = None,
+        positive_only_solver: Optional[str] = None,
+        certified_pass_budget: Optional[int] = None,
+        certified_fallback: Optional[str] = None,
+        certified_tau_rel: Optional[float] = None,
     ):
         """
         The settings of an Inversion, customizing how a linear set of equations are solved for.
@@ -191,6 +195,34 @@ class Settings:
             (default) reads the packaged value (`60.0`); `0` disables the numba path. See
             the property of the same name for the measured crossovers and why the constant
             is machine-dependent.
+        positive_only_solver
+            Which solver the JAX (`xp=jnp`) positive-only reconstruction uses. `None` (default) reads the packaged
+            value ``"pdip"``.
+
+            - ``"pdip"`` (default) — the jaxnnls primal-dual interior-point solve, unchanged.
+            - ``"certified"`` — the certified active-set solve (:mod:`autoarray.util.jax_active_set`): a
+              budgeted ``lax.while_loop`` of masked Cholesky solves that stops once the iterate satisfies the
+              primal and dual (KKT) conditions, with the PDIP solve as a fallback when the budget is exhausted.
+              Its gradient is the exact implicit active-set derivative. Measured 1.2-2.6x faster than PDIP on
+              source-only inversions returning the same constrained optimum (PyAutoArray#566).
+
+            ``"certified"`` is applied **only** on the JAX backend to **mapper-only** inversions (no linear
+            light-profile / MGE coefficients, which converge poorly under the active-set scheme); every other
+            inversion, and the whole NumPy path, keeps its existing solver
+            (`AbstractInversion.positive_only_solver_used` records the decision). Opt-in until the batched
+            (``vmap``) policy is measured.
+        certified_pass_budget
+            Maximum number of restricted active-set passes of the ``"certified"`` solver. `None` (default) reads
+            the packaged value (`16`). Measured passes to certification: rectangular <= 11, Delaunay <= 7; the
+            loop exits at certification, so unused budget costs nothing.
+        certified_fallback
+            What the ``"certified"`` solver returns when it exhausts its budget uncertified. `None` (default)
+            reads the packaged value ``"pdip"`` (run the PDIP solve instead, via ``lax.cond``; under ``vmap`` that
+            ``cond`` executes both solvers for every lane). ``"none"`` returns the last, uncertified iterate.
+        certified_tau_rel
+            Relative KKT tolerance of the ``"certified"`` solver's certificate: primal violations are
+            ``x < -tau_rel * max|x|``, dual violations ``g < -tau_rel * max|q|``. `None` (default) reads the
+            packaged value (`1.0e-9`).
         """
         self.use_mixed_precision = use_mixed_precision
         self.nnls_solver_tol = nnls_solver_tol
@@ -208,6 +240,16 @@ class Settings:
         self._interferometer_numba_nnz_per_source_max = (
             interferometer_numba_nnz_per_source_max
         )
+        self._positive_only_solver = positive_only_solver
+        self._certified_pass_budget = certified_pass_budget
+        self._certified_fallback = certified_fallback
+        self._certified_tau_rel = certified_tau_rel
+
+        # Validate explicit values eagerly, so a typo fails at construction rather than deep inside a fit.
+        if positive_only_solver is not None:
+            self.positive_only_solver
+        if certified_fallback is not None:
+            self.certified_fallback
 
     @property
     def use_positive_only_solver(self):
@@ -343,3 +385,67 @@ class Settings:
                 return 60.0
 
         return self._interferometer_numba_nnz_per_source_max
+
+    def _inversion_config_value(self, key, default):
+        # A workspace `general.yaml` normally omits the newer keys, so autoconf's config-path
+        # list falls through to autoarray's packaged value. The fallback fires only when the
+        # workspace config is the sole config path (isolated test configs push one dir) and
+        # returns that same packaged value, so both routes resolve identically.
+        try:
+            return conf.instance["general"]["inversion"][key]
+        except KeyError:
+            return default
+
+    @property
+    def positive_only_solver(self) -> str:
+        """
+        Which solver the JAX positive-only reconstruction uses: ``"pdip"`` or ``"certified"``.
+
+        See the constructor docstring; ``"certified"`` is only applied to mapper-only JAX inversions.
+        """
+        value = self._positive_only_solver
+        if value is None:
+            value = self._inversion_config_value("positive_only_solver", "pdip")
+
+        if value not in ("pdip", "certified"):
+            raise ValueError(
+                f"positive_only_solver={value!r} is invalid; expected 'pdip' or 'certified'."
+            )
+
+        return value
+
+    @property
+    def certified_pass_budget(self) -> int:
+        """
+        Maximum number of restricted active-set passes of the ``"certified"`` solver.
+        """
+        if self._certified_pass_budget is None:
+            return self._inversion_config_value("certified_pass_budget", 16)
+
+        return self._certified_pass_budget
+
+    @property
+    def certified_fallback(self) -> str:
+        """
+        What an exhausted ``"certified"`` solve returns: ``"pdip"`` (the PDIP solve) or ``"none"``.
+        """
+        value = self._certified_fallback
+        if value is None:
+            value = self._inversion_config_value("certified_fallback", "pdip")
+
+        if value not in ("pdip", "none"):
+            raise ValueError(
+                f"certified_fallback={value!r} is invalid; expected 'pdip' or 'none'."
+            )
+
+        return value
+
+    @property
+    def certified_tau_rel(self) -> float:
+        """
+        Relative KKT tolerance of the ``"certified"`` solver's certificate.
+        """
+        if self._certified_tau_rel is None:
+            return self._inversion_config_value("certified_tau_rel", 1.0e-9)
+
+        return self._certified_tau_rel
