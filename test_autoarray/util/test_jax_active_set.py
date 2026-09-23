@@ -15,33 +15,13 @@ Tolerances were declared before the tests were first run (PyAutoArray#566):
 """
 
 import importlib
-import sys
 
 import numpy as np
 import pytest
 
 
-def test__jax_active_set_module_never_imports_jax_at_module_level(monkeypatch):
-    # Library unit tests are NumPy-only: importing the module must succeed even when jax is
-    # unimportable. A None entry in sys.modules makes any `import jax` raise ImportError, so a
-    # module-level import would fail this reload.
-    monkeypatch.setitem(sys.modules, "jax", None)
-    monkeypatch.setitem(sys.modules, "jaxnnls", None)
-
-    module = importlib.reload(importlib.import_module("autoarray.util.jax_active_set"))
-
-    for name in (
-        "masked_solve",
-        "certify",
-        "active_set_search",
-        "solve_certified",
-        "solve_certified_with_fallback",
-    ):
-        assert hasattr(module, name)
-
-
-# jax is an `[optional]` extra and is absent on the NumPy-only matrix env: every test below the import test
-# skips there, while the import test above still runs.
+# jax is an `[optional]` extra and is absent on the NumPy-only matrix env: every test in this module skips
+# there. The no-module-level-jax-import guard lives in `test_jax_active_set_import.py` so it still runs.
 if importlib.util.find_spec("jax") is None:
     pytestmark = pytest.mark.skip(reason="requires jax (the [optional] extras)")
 
