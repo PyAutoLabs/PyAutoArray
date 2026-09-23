@@ -283,23 +283,23 @@ class CoordinateArrayTriangles(AbstractTriangles, ABC):
 
     @property
     def _vertices_and_indices(self):
+        """
+        The flat ``(3N, 2)`` vertex table and the ``(N, 3)`` index map into it.
+
+        On this JAX path the table is deliberately *not* deduplicated: vertex ``3 * i + k`` is
+        vertex ``k`` of triangle ``i`` and ``indices`` is simply ``arange(3N).reshape(N, 3)``.
+        Under ``jit``, ``jnp.unique`` needs a static ``size``, so a deduplicated table was padded
+        back to 3N rows anyway (no deflection evaluations saved) while costing a lexicographic
+        sort of 3N fp64 rows, twice per solver refinement step (PyAutoArray#568,
+        autolens_profiling#297). NaN padding rows (from `for_indexes`) trace to NaN triangles,
+        which every `Shape.mask` rejects, so containment is unchanged. The NumPy sibling
+        `CoordinateArrayTrianglesNp` still deduplicates, because its shapes are dynamic.
+        """
         import jax.numpy as jnp
 
-        flat_triangles = self.triangles.reshape(-1, 2)
-        vertices, inverse_indices = jnp.unique(
-            flat_triangles,
-            axis=0,
-            return_inverse=True,
-            size=3 * self.coordinates.shape[0],
-            equal_nan=True,
-            fill_value=jnp.nan,
-        )
-
-        nan_mask = jnp.isnan(vertices).any(axis=1)
-        inverse_indices = jnp.where(nan_mask[inverse_indices], -1, inverse_indices)
-
-        indices = inverse_indices.reshape(-1, 3)
-        return vertices, indices
+        flat = self.triangles.reshape(-1, 2)
+        indices = jnp.arange(flat.shape[0]).reshape(-1, 3)
+        return flat, indices
 
     def with_vertices(self, vertices: np.ndarray) -> ArrayTriangles:
         """
@@ -350,14 +350,23 @@ class CoordinateArrayTriangles(AbstractTriangles, ABC):
     @property
     def vertices(self) -> np.ndarray:
         """
-        The unique vertices of the triangles.
+        The vertices of the triangles as a flat ``(3N, 2)`` table, row ``3 * i + k`` being vertex
+        ``k`` of triangle ``i``.
+
+        Not deduplicated on this JAX path (see `_vertices_and_indices`): a static-shape
+        ``jnp.unique`` returned 3N rows regardless and only added a sort. Rows of NaN padding
+        triangles are NaN. `CoordinateArrayTrianglesNp.vertices` is deduplicated.
         """
         return self._vertices_and_indices[0]
 
     @property
     def indices(self) -> np.ndarray:
         """
-        The indices of the vertices of the triangles.
+        The indices of the vertices of the triangles, an ``(N, 3)`` map into `vertices`.
+
+        On this JAX path it is ``arange(3N).reshape(N, 3)`` (no deduplication, see
+        `_vertices_and_indices`); padding triangles keep valid indices and are carried as NaN
+        vertices instead of ``-1`` entries.
         """
         return self._vertices_and_indices[1]
 
