@@ -297,6 +297,7 @@ def reconstruction_positive_only_from(
     factor: Optional[dict] = None,
     solver: str = "pdip",
     stats: Optional[dict] = None,
+    preconditioning: str = "jacobi",
 ):
     """
     Solve the linear system Eq.(2) (in terms of minimizing the quadratic value) of
@@ -358,7 +359,22 @@ def reconstruction_positive_only_from(
         ``certified`` (whether the active-set search certified within budget; ``False`` means the fallback or an
         uncertified iterate was returned) and ``passes`` (restricted passes run) as *traced* JAX scalars, so it is
         safe under ``jax.jit`` / ``vmap`` -- read them as outputs of the traced function or through
-        ``jax.debug.callback``. Every call also records ``solver``. It never changes the returned reconstruction.
+        ``jax.debug.callback``. With ``solver="pdip"`` it receives ``converged`` (``1`` if the PDIP KKT residual
+        met its tolerance within the iteration cap, ``0`` if the cap was hit and the returned reconstruction is
+        the unconverged iterate) and ``iterations`` (PDIP iterations run), also as traced JAX scalars, plus
+        ``preconditioning``. Every call also records ``solver``. It never changes the returned reconstruction.
+    preconditioning
+        How the JAX PDIP solve (``solver="pdip"``) scales the system (PyAutoArray#571). ``"jacobi"`` (default,
+        byte-identical to before this option existed): the Jacobi-preconditioned solve ``(D Q D) y = D q``
+        governed by the ``nnls_jacobi_preconditioning`` config key. ``"raw"``: the forward PDIP solve runs on
+        the un-preconditioned ``(Q, q)`` with the data-scaled tolerance
+        :func:`autoarray.util.jax_nnls.data_scaled_solver_tol` (or ``settings.nnls_solver_tol`` if set), and the
+        gradient is the Jacobi-space relaxed-KKT pass as in ``"jacobi"`` -- see
+        :func:`autoarray.util.jax_nnls.solve_nnls_primal_raw_forward`. Jacobi scaling makes the signal-free
+        columns of linear-object-only (MGE) inversions, whose diagonal is only the
+        ``no_regularization_add_to_curvature_diag_value`` floor, degenerate coordinates on which the PDIP dual
+        diverges; the caller (`AbstractInversion.reconstruction`) therefore passes ``"raw"`` for inversions with
+        no `Mapper` -- see `AbstractInversion.positive_only_preconditioning_used`. Ignored on the NumPy path.
 
     Notes
     -----
@@ -386,11 +402,25 @@ def reconstruction_positive_only_from(
             f"solver={solver!r} is not a valid positive-only solver; expected 'pdip' or 'certified'."
         )
 
+    if preconditioning not in ("jacobi", "raw"):
+        raise ValueError(
+            f"preconditioning={preconditioning!r} is invalid; expected 'jacobi' or 'raw'."
+        )
+
+    if preconditioning == "raw" and solver != "pdip":
+        raise ValueError(
+            "preconditioning='raw' applies only to solver='pdip'; the certified solver always runs on the "
+            "Jacobi-scaled system."
+        )
+
     if xp.__name__.startswith("jax"):
 
         from autonerves import conf
 
-        from autoarray.util.jax_nnls import solve_nnls_primal
+        from autoarray.util.jax_nnls import (
+            solve_nnls_primal_raw_forward,
+            solve_nnls_primal_with_status,
+        )
 
         try:
             use_jacobi = conf.instance["general"]["inversion"][
@@ -403,9 +433,7 @@ def reconstruction_positive_only_from(
             use_jacobi = True
 
         try:
-            target_kappa = conf.instance["general"]["inversion"][
-                "nnls_target_kappa"
-            ]
+            target_kappa = conf.instance["general"]["inversion"]["nnls_target_kappa"]
         except KeyError:
             # Workspaces ship their own general.yaml that shadows autoarray's;
             # fall back to the same value autoarray's general.yaml declares.
@@ -423,6 +451,34 @@ def reconstruction_positive_only_from(
         max_iter = settings.nnls_max_iter if settings is not None else None
         if max_iter is None:
             max_iter = 50
+
+        def _record_pdip(converged, iterations):
+            if stats is not None:
+                stats["solver"] = "pdip"
+                stats["preconditioning"] = preconditioning
+                stats["converged"] = converged
+                stats["iterations"] = iterations
+
+        if preconditioning == "raw":
+            # Same Jacobi quantities as below: the backward pass runs on the scaled system, the forward
+            # solve on the raw one (see `solve_nnls_primal_raw_forward`).
+            d = xp.sqrt(xp.diag(curvature_reg_matrix))
+            D = 1.0 / d
+            Q_pc = (curvature_reg_matrix * D[:, None]) * D[None, :]
+            q_pc = data_vector * D
+
+            y, converged, iterations = solve_nnls_primal_raw_forward(
+                Q_pc,
+                q_pc,
+                curvature_reg_matrix,
+                data_vector,
+                D,
+                target_kappa=target_kappa,
+                solver_tol=solver_tol,
+                max_iter=max_iter,
+            )
+            _record_pdip(converged, iterations)
+            return y * D
 
         if use_jacobi:
             # Ill-conditioned Q makes jaxnnls's relaxed-KKT backward pass
@@ -449,19 +505,15 @@ def reconstruction_positive_only_from(
                     * D
                 )
 
-            if stats is not None:
-                stats["solver"] = "pdip"
-
-            return (
-                solve_nnls_primal(
-                    Q_pc,
-                    q_pc,
-                    target_kappa=target_kappa,
-                    solver_tol=solver_tol,
-                    max_iter=max_iter,
-                )
-                * D
+            x, converged, iterations = solve_nnls_primal_with_status(
+                Q_pc,
+                q_pc,
+                target_kappa=target_kappa,
+                solver_tol=solver_tol,
+                max_iter=max_iter,
             )
+            _record_pdip(converged, iterations)
+            return x * D
 
         if solver == "certified":
             return _certified_positive_only_from(
@@ -474,16 +526,15 @@ def reconstruction_positive_only_from(
                 stats=stats,
             )
 
-        if stats is not None:
-            stats["solver"] = "pdip"
-
-        return solve_nnls_primal(
+        x, converged, iterations = solve_nnls_primal_with_status(
             curvature_reg_matrix,
             data_vector,
             target_kappa=target_kappa,
             solver_tol=solver_tol,
             max_iter=max_iter,
         )
+        _record_pdip(converged, iterations)
+        return x
 
     # `solver` is deliberately ignored on the NumPy path: a NumPy port of the certified active-set scheme
     # measured 3-7 % slower than fnnls and lost to its warm-start memo (PyAutoArray#566), so fnnls stays.

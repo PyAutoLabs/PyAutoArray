@@ -48,6 +48,7 @@ def _inversion(
     use_jax,
     positive_only_solver="certified",
     use_edge_zeroed_pixels=False,
+    nnls_preconditioning_no_mapper=None,
 ):
     if use_jax:
         import jax
@@ -66,6 +67,7 @@ def _inversion(
             use_positive_only_solver=True,
             use_edge_zeroed_pixels=use_edge_zeroed_pixels,
             positive_only_solver=positive_only_solver,
+            nnls_preconditioning_no_mapper=nnls_preconditioning_no_mapper,
             # Off so two NumPy solves of the same system are bit-comparable: with the memo on, the second
             # solve starts from the first's passive set and can differ in the last ulp.
             nnls_warm_start_memo=False,
@@ -209,3 +211,106 @@ def test__positive_only_solver_used__edge_zeroed_subset_is_preserved():
     assert x_certified == pytest.approx(
         x_pdip, rel=1.0e-8, abs=1.0e-8 * np.max(np.abs(x_certified))
     )
+
+
+def test__positive_only_preconditioning_used__mapper_inversions_keep_jacobi():
+    data_vector, curvature_reg_matrix = _system(17)
+    func_list = aa.m.MockLinearObjFuncList(parameters=1)
+
+    for linear_obj_list in ([_mapper()], [func_list, _mapper()]):
+        for solver in ("pdip", "certified"):
+            inversion = _inversion(
+                linear_obj_list,
+                data_vector[: 16 + len(linear_obj_list) - 1],
+                curvature_reg_matrix[
+                    : 16 + len(linear_obj_list) - 1, : 16 + len(linear_obj_list) - 1
+                ],
+                use_jax=False,
+                positive_only_solver=solver,
+            )
+            assert inversion.positive_only_preconditioning_used == "jacobi"
+
+
+def test__positive_only_preconditioning_used__no_mapper_uses_settings_default_raw():
+    data_vector, curvature_reg_matrix = _system(4)
+
+    default = _inversion(
+        [aa.m.MockLinearObjFuncList(parameters=4)],
+        data_vector,
+        curvature_reg_matrix,
+        use_jax=False,
+        positive_only_solver="pdip",
+    )
+    forced = _inversion(
+        [aa.m.MockLinearObjFuncList(parameters=4)],
+        data_vector,
+        curvature_reg_matrix,
+        use_jax=False,
+        positive_only_solver="pdip",
+        nnls_preconditioning_no_mapper="jacobi",
+    )
+
+    assert default.settings.nnls_preconditioning_no_mapper == "raw"
+    assert default.positive_only_preconditioning_used == "raw"
+    assert forced.positive_only_preconditioning_used == "jacobi"
+
+
+def test__settings__nnls_preconditioning_no_mapper_rejects_unknown_value():
+    with pytest.raises(ValueError):
+        aa.Settings(nnls_preconditioning_no_mapper="diag")
+
+
+@requires_jax
+def test__positive_only_preconditioning_used__no_mapper_jax_reconstruction_is_the_raw_solve():
+    import jax.numpy as jnp
+
+    from autoarray.inversion.inversion import inversion_util
+
+    data_vector, curvature_reg_matrix = _system(4)
+
+    inversion = _inversion(
+        [aa.m.MockLinearObjFuncList(parameters=4)],
+        data_vector,
+        curvature_reg_matrix,
+        use_jax=True,
+        positive_only_solver="pdip",
+    )
+
+    expected = inversion_util.reconstruction_positive_only_from(
+        data_vector=jnp.asarray(data_vector),
+        curvature_reg_matrix=jnp.asarray(curvature_reg_matrix),
+        settings=inversion.settings,
+        xp=jnp,
+        preconditioning="raw",
+    )
+
+    assert np.array_equal(np.asarray(inversion.reconstruction), np.asarray(expected))
+    assert np.asarray(expected) == pytest.approx(
+        np.asarray(
+            inversion_util.reconstruction_positive_only_from(
+                data_vector=data_vector,
+                curvature_reg_matrix=curvature_reg_matrix,
+                settings=inversion.settings,
+                xp=np,
+            )
+        ),
+        abs=1.0e-8,
+    )
+
+
+@requires_jax
+def test__reconstruction_positive_only_from__raw_rejects_certified():
+    import jax.numpy as jnp
+
+    from autoarray.inversion.inversion import inversion_util
+
+    data_vector, curvature_reg_matrix = _system(4)
+
+    with pytest.raises(ValueError):
+        inversion_util.reconstruction_positive_only_from(
+            data_vector=jnp.asarray(data_vector),
+            curvature_reg_matrix=jnp.asarray(curvature_reg_matrix),
+            xp=jnp,
+            solver="certified",
+            preconditioning="raw",
+        )
