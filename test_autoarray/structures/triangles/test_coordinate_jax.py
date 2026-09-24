@@ -22,6 +22,13 @@ import numpy as np
 import pytest
 
 
+# Plain data, defined outside the jax guard: the module-level @parametrize decorators read them
+# at collection time, including on the NumPy-only matrix env.
+LIMITS = dict(y_min=-1.0, y_max=1.0, x_min=-1.0, x_max=1.0, scale=0.5)
+
+# The PointSolver's default image-plane extent for a 100x100, 0.2" grid.
+SOLVER_LIMITS = dict(y_min=-9.9, y_max=9.9, x_min=-9.9, x_max=9.9, scale=0.2)
+
 # jax is an `[optional]` extra and is absent on the NumPy-only matrix env: every test in this module
 # skips there.
 if importlib.util.find_spec("jax") is None:
@@ -45,11 +52,6 @@ else:
         CoordinateArrayTrianglesNp,
     )
     from autoarray.structures.triangles.shape import Point
-
-    LIMITS = dict(y_min=-1.0, y_max=1.0, x_min=-1.0, x_max=1.0, scale=0.5)
-
-    # The PointSolver's default image-plane extent for a 100x100, 0.2" grid.
-    SOLVER_LIMITS = dict(y_min=-9.9, y_max=9.9, x_min=-9.9, x_max=9.9, scale=0.2)
 
     def _lattice():
         return CoordinateArrayTriangles.for_limits_and_scale(**LIMITS)
