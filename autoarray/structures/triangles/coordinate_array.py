@@ -1,10 +1,106 @@
 from abc import ABC
+from functools import lru_cache
+from typing import Optional, Tuple
 
 import numpy as np
 
 from autoarray.structures.triangles.abstract import HEIGHT_FACTOR
 from autoarray.structures.triangles.abstract import AbstractTriangles
 from autoarray.structures.triangles.array import ArrayTriangles
+
+
+def _lattice_coordinates(
+    y_min: float, y_max: float, x_min: float, x_max: float, scale: float
+) -> np.ndarray:
+    """
+    The integer ``(y, x)`` lattice coordinates `CoordinateArrayTriangles.for_limits_and_scale`
+    tiles the rectangle with, as an ``(N, 2)`` int array.
+    """
+    y_shift = int(2 * y_min / scale)
+    x_shift = int(x_min / (HEIGHT_FACTOR * scale))
+
+    coordinates = []
+
+    for y in range(y_shift, int(2 * y_max / scale) + 1):
+        for x in range(x_shift - 1, int(x_max / (HEIGHT_FACTOR * scale)) + 2):
+            coordinates.append([y, x])
+
+    return np.array(coordinates)
+
+
+@lru_cache(maxsize=32)
+def static_vertex_table(
+    y_min: float, y_max: float, x_min: float, x_max: float, scale: float
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    The geometrically unique vertices of the initial triangle lattice
+    `CoordinateArrayTriangles.for_limits_and_scale` builds, plus the index map from each
+    triangle's three vertices into them.
+
+    The lattice is fixed by its limits and scale, so it is known before any tracing: on the JAX
+    `PointSolver` path its vertices are a compile-time constant, and only the geometrically
+    distinct ones need deflecting. Of the ``3N`` vertex slots most are shared by up to six
+    triangles (for the ``+-9.9"`` / ``0.2"`` lattice: 69 849 slots, 11 859 distinct points). They
+    cannot be deduplicated on the floats -- the same point computed from two neighbouring
+    triangle centres can differ by one ulp (28 665 exact-float distinct rows) -- so they are keyed
+    on the integer lattice position instead. Vertex ``k`` of the triangle at integer coordinates
+    ``(cy, cx)`` with flip ``f = +-1`` sits at ``(0.5 * s * (cy + f * dy), 0.5 * h * s * (2 * cx +
+    f * dx))`` with ``(dy, dx)`` in ``((0, 1), (1, -1), (-1, -1))``, ``s`` the side length and ``h``
+    the height factor; ``(cy + f * dy, 2 * cx + f * dx)`` is therefore an exact integer key.
+
+    Each unique vertex takes the float value of its first occurrence, computed with the same
+    arithmetic as `CoordinateArrayTriangles.triangles`, so ``vertices[indices]`` equals
+    ``triangles`` to within an ulp per element and is bit-identical for every first occurrence.
+
+    Built in NumPy (never staged into a JAX trace) and cached per geometry; the arrays are
+    read-only because the cache hands the same objects to every caller.
+
+    Parameters
+    ----------
+    y_min, y_max, x_min, x_max
+        The limits of the rectangle the lattice tiles.
+    scale
+        The side length of the triangles.
+
+    Returns
+    -------
+    ``(vertices, indices)``: the ``(V, 2)`` float64 unique vertices and the ``(N, 3)`` int index map
+    such that ``vertices[indices]`` is the ``(N, 3, 2)`` triangle array.
+    """
+    coordinates = _lattice_coordinates(y_min, y_max, x_min, x_max, scale)
+
+    flip = np.where((coordinates[:, 0] + coordinates[:, 1]) % 2 != 0, -1, 1)[:, None]
+
+    # Same operation order as `CoordinateArrayTriangles.centres` / `.triangles` (zero offsets).
+    scaling_factors = np.array([0.5 * scale, HEIGHT_FACTOR * scale])
+    centres = scaling_factors * coordinates + np.array([0.0, 0.0])
+    triangles = np.stack(
+        (
+            centres + flip * np.array([0.0, 0.5 * scale * HEIGHT_FACTOR]),
+            centres + flip * np.array([0.5 * scale, -0.5 * scale * HEIGHT_FACTOR]),
+            centres + flip * np.array([-0.5 * scale, -0.5 * scale * HEIGHT_FACTOR]),
+        ),
+        axis=1,
+    )
+
+    offsets = np.array([[0, 1], [1, -1], [-1, -1]])
+    keys = np.stack(
+        (
+            coordinates[:, None, 0] + flip * offsets[None, :, 0],
+            2 * coordinates[:, None, 1] + flip * offsets[None, :, 1],
+        ),
+        axis=-1,
+    ).reshape(-1, 2)
+
+    _, first, inverse = np.unique(keys, axis=0, return_index=True, return_inverse=True)
+
+    vertices = np.ascontiguousarray(triangles.reshape(-1, 2)[first], dtype=np.float64)
+    indices = np.ascontiguousarray(inverse.reshape(-1, 3))
+
+    vertices.setflags(write=False)
+    indices.setflags(write=False)
+
+    return vertices, indices
 
 
 class CoordinateArrayTriangles(AbstractTriangles, ABC):
@@ -16,6 +112,7 @@ class CoordinateArrayTriangles(AbstractTriangles, ABC):
         x_offset: float = 0.0,
         y_offset: float = 0.0,
         flipped: bool = False,
+        vertex_table: Optional[Tuple[np.ndarray, np.ndarray]] = None,
     ):
         """
         Represents a set of triangles by integer coordinates.
@@ -30,10 +127,18 @@ class CoordinateArrayTriangles(AbstractTriangles, ABC):
             Whether the triangles are flipped upside down.
         y_offset
             An y_offset to apply to the y coordinates so that up-sampled triangles align.
+        vertex_table
+            An optional precomputed ``(vertices, indices)`` pair (see `static_vertex_table`) that
+            `vertices` and `indices` return instead of the flat per-triangle table. It must describe
+            exactly these ``coordinates``; only `for_limits_and_scale(..., static_vertices=True)`
+            sets it. Derived lattices (`for_indexes`, `up_sample`, `neighborhood`) do not inherit
+            it, and it is not part of the pytree (`tree_flatten`), so an unflattened copy falls
+            back to the flat table -- which is still correct, only unshared.
         """
         import jax.numpy as jnp
 
         self.coordinates = coordinates
+        self.vertex_table = vertex_table
         self.side_length = side_length
         self.flipped = flipped
 
@@ -51,6 +156,7 @@ class CoordinateArrayTriangles(AbstractTriangles, ABC):
         x_min: float,
         x_max: float,
         scale: float = 1.0,
+        static_vertices: bool = False,
         **_,
     ):
         """
@@ -75,21 +181,27 @@ class CoordinateArrayTriangles(AbstractTriangles, ABC):
             The limits of the rectangle to tile.
         scale
             The side length of the triangles.
+        static_vertices
+            If ``True``, attach the cached `static_vertex_table` for this geometry, so `vertices`
+            is the ``(V, 2)`` table of geometrically unique lattice vertices (11 859 rows rather
+            than 69 849 for the ``+-9.9"`` / ``0.2"`` lattice) and `indices` maps each triangle
+            into it. Consumers that deflect `vertices` then evaluate each lattice point once. The
+            limits and scale must be concrete Python / NumPy numbers (they are the cache key).
         """
         import jax.numpy as jnp
 
-        y_shift = int(2 * y_min / scale)
-        x_shift = int(x_min / (HEIGHT_FACTOR * scale))
-
-        coordinates = []
-
-        for y in range(y_shift, int(2 * y_max / scale) + 1):
-            for x in range(x_shift - 1, int(x_max / (HEIGHT_FACTOR * scale)) + 2):
-                coordinates.append([y, x])
+        vertex_table = None
+        if static_vertices:
+            vertex_table = static_vertex_table(
+                float(y_min), float(y_max), float(x_min), float(x_max), float(scale)
+            )
 
         return cls(
-            coordinates=jnp.array(coordinates),
+            coordinates=jnp.array(
+                _lattice_coordinates(y_min, y_max, x_min, x_max, scale)
+            ),
             side_length=scale,
+            vertex_table=vertex_table,
         )
 
     def tree_flatten(self):
@@ -294,8 +406,16 @@ class CoordinateArrayTriangles(AbstractTriangles, ABC):
         autolens_profiling#297). NaN padding rows (from `for_indexes`) trace to NaN triangles,
         which every `Shape.mask` rejects, so containment is unchanged. The NumPy sibling
         `CoordinateArrayTrianglesNp` still deduplicates, because its shapes are dynamic.
+
+        When a `vertex_table` is attached (the static initial lattice, see `static_vertex_table`)
+        it is returned instead: a compile-time-constant ``(V, 2)`` table of the geometrically
+        unique vertices and its ``(N, 3)`` index map.
         """
         import jax.numpy as jnp
+
+        if self.vertex_table is not None:
+            vertices, indices = self.vertex_table
+            return jnp.asarray(vertices), jnp.asarray(indices)
 
         flat = self.triangles.reshape(-1, 2)
         indices = jnp.arange(flat.shape[0]).reshape(-1, 3)
