@@ -26,6 +26,7 @@ class Settings:
         certified_pass_budget: Optional[int] = None,
         certified_fallback: Optional[str] = None,
         certified_tau_rel: Optional[float] = None,
+        nnls_preconditioning_no_mapper: Optional[str] = None,
     ):
         """
         The settings of an Inversion, customizing how a linear set of equations are solved for.
@@ -223,6 +224,23 @@ class Settings:
             Relative KKT tolerance of the ``"certified"`` solver's certificate: primal violations are
             ``x < -tau_rel * max|x|``, dual violations ``g < -tau_rel * max|q|``. `None` (default) reads the
             packaged value (`1.0e-9`).
+        nnls_preconditioning_no_mapper
+            How the JAX positive-only PDIP solve scales an inversion **with no `Mapper`** (linear light profiles /
+            MGE only). `None` (default) reads the packaged value ``"raw"``.
+
+            - ``"raw"`` (default) -- the forward PDIP solve runs on the un-preconditioned system with a
+              data-scaled KKT tolerance (``1e-2 * n * eps_pdip * max(1, max|data_vector|)``, or
+              `nnls_solver_tol` if set); the gradient is the same Jacobi-space relaxed-KKT pass as ``"jacobi"``.
+              On the SLaM `source_lp[1]` MGE model (2 x 20 lens + 20 source Gaussians) Jacobi scaling made 14/48
+              near-truth points hit the 50-iteration cap with wrong log-likelihoods (signal-free Gaussian columns,
+              whose diagonal is only `no_regularization_add_to_curvature_diag_value`, become degenerate
+              coordinates on which the PDIP dual diverges); the raw solve converges on all of them in 16-19
+              iterations (PyAutoArray#571).
+            - ``"jacobi"`` -- the Jacobi-preconditioned solve, as for mapper inversions.
+
+            Inversions containing a `Mapper` always use ``"jacobi"``
+            (`AbstractInversion.positive_only_preconditioning_used` records the decision). The NumPy path always
+            runs fnnls and ignores this.
         """
         self.use_mixed_precision = use_mixed_precision
         self.nnls_solver_tol = nnls_solver_tol
@@ -244,12 +262,15 @@ class Settings:
         self._certified_pass_budget = certified_pass_budget
         self._certified_fallback = certified_fallback
         self._certified_tau_rel = certified_tau_rel
+        self._nnls_preconditioning_no_mapper = nnls_preconditioning_no_mapper
 
         # Validate explicit values eagerly, so a typo fails at construction rather than deep inside a fit.
         if positive_only_solver is not None:
             self.positive_only_solver
         if certified_fallback is not None:
             self.certified_fallback
+        if nnls_preconditioning_no_mapper is not None:
+            self.nnls_preconditioning_no_mapper
 
     @property
     def use_positive_only_solver(self):
@@ -449,3 +470,23 @@ class Settings:
             return self._inversion_config_value("certified_tau_rel", 1.0e-9)
 
         return self._certified_tau_rel
+
+    @property
+    def nnls_preconditioning_no_mapper(self) -> str:
+        """
+        How the JAX PDIP solve scales an inversion with no `Mapper`: ``"raw"`` or ``"jacobi"``.
+
+        See the constructor docstring; inversions with a `Mapper` always use ``"jacobi"``.
+        """
+        value = self._nnls_preconditioning_no_mapper
+        if value is None:
+            value = self._inversion_config_value(
+                "nnls_preconditioning_no_mapper", "raw"
+            )
+
+        if value not in ("raw", "jacobi"):
+            raise ValueError(
+                f"nnls_preconditioning_no_mapper={value!r} is invalid; expected 'raw' or 'jacobi'."
+            )
+
+        return value

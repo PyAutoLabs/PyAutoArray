@@ -600,6 +600,31 @@ class AbstractInversion:
 
         return "certified"
 
+    @property
+    def positive_only_preconditioning_used(self) -> str:
+        """
+        How `reconstruction` asks `reconstruction_positive_only_from` to scale the JAX PDIP solve:
+        ``"jacobi"`` or ``"raw"`` (PyAutoArray#571).
+
+        - Inversions containing a `Mapper` always use ``"jacobi"`` (today's Jacobi-preconditioned solve).
+        - Inversions with **no** `Mapper` (linear light profiles / MGE only) use
+          `Settings.nnls_preconditioning_no_mapper` (packaged default ``"raw"``): Jacobi scaling turns their
+          signal-free Gaussian columns, whose diagonal is only the no-regularization floor, into degenerate
+          coordinates on which the PDIP dual diverges (14/48 near-truth SLaM `source_lp[1]` points hit the
+          iteration cap with wrong log-likelihoods), while the raw solve converges on all of them.
+        - Whenever the certified solver is used the answer is ``"jacobi"`` (it only runs on mapper-only
+          inversions anyway).
+
+        The NumPy path runs fnnls and ignores the value.
+        """
+        if self.has(cls=Mapper):
+            return "jacobi"
+
+        if self.positive_only_solver_used != "pdip":
+            return "jacobi"
+
+        return self.settings.nnls_preconditioning_no_mapper
+
     def _nnls_warm_start_fingerprint(self, ids_to_keep=None) -> Optional[str]:
         """
         Identify the index space this inversion's positive-only solve works in, so the
@@ -688,6 +713,7 @@ class AbstractInversion:
                         ),
                         factor=factor,
                         solver=solver,
+                        preconditioning=self.positive_only_preconditioning_used,
                     )
                 )
 
@@ -717,6 +743,7 @@ class AbstractInversion:
                     fingerprint=self._nnls_warm_start_fingerprint(),
                     factor=factor,
                     solver=solver,
+                    preconditioning=self.positive_only_preconditioning_used,
                 )
 
                 self._nnls_factor = factor
