@@ -364,7 +364,9 @@ def test__grad_nan_fixture_is_the_captured_jax_grad_mge_set():
 @pytest.mark.parametrize("jit", [False, True], ids=["eager", "jit"])
 @pytest.mark.parametrize("index", range(len(GRAD_NAN_SYSTEMS)), ids=GRAD_NAN_IDS)
 def test__raw_mode_gradient_is_finite_on_the_captured_grad_nan_systems(jnp, index, jit):
-    """Red on PyAutoArray 3de624b5 (#572): the gradient is NaN on all four systems, eager and jitted."""
+    """Red on PyAutoArray 3de624b5 (#572): the gradient is NaN on all four systems eagerly, and under jit on
+    prng10 / prng14 (the jitted NaN is rounding-sensitive; prng2 / prng12 happen to pass jitted on main).
+    """
     import jax
 
     Q, q = GRAD_NAN_SYSTEMS[index]
@@ -402,6 +404,7 @@ def _backward_status(jnp, Q, q):
 def test__raw_mode_backward_pass_converges(jnp, system):
     """The backward pass reports convergence: the tight polish of the mapped iterate converges (measured <= 6
     iterations) and the relaxed-KKT solve then converges well inside its 50-iteration cap (measured 1).
+    Not a red-on-main witness (``raw_forward_backward_status`` is new with #573); the gradient test is.
     """
     kind, index = system
     Q, q = (SYSTEMS if kind == "slam" else GRAD_NAN_SYSTEMS)[index]
