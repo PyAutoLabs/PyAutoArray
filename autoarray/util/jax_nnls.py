@@ -27,7 +27,11 @@ positive-only mode (:func:`solve_nnls_primal_raw_forward`) runs the forward
 solve on the un-preconditioned system with a data-scaled tolerance
 (:func:`data_scaled_solver_tol`) and keeps the Jacobi-space backward pass. It
 exists because Jacobi scaling of signal-free MGE columns (diagonal = the
-no-regularization floor) makes the PDIP dual diverge.
+no-regularization floor) makes the PDIP dual diverge. Its backward pass polishes
+the mapped forward iterate with a few tight, warm-started PDIP iterations on the
+Jacobi system before the relaxed-KKT solve, which otherwise diverges to NaN from
+the loose forward tolerance (PyAutoArray#573); :func:`raw_forward_backward_status`
+reports that pass's convergence.
 
 JAX is imported inside functions, never at module level (see
 ``docs/agents/jax_and_decorators.md``); this module must only be imported
@@ -39,7 +43,7 @@ the ``lru_cache`` returns the same function object for repeated settings so
 from functools import lru_cache
 
 
-def solve_nnls(Q, q, solver_tol=None, max_iter=50):
+def solve_nnls(Q, q, solver_tol=None, max_iter=50, init=None):
     """
     Solve the non-negative least squares problem with the jaxnnls PDIP
     algorithm, with configurable convergence tolerance and iteration cap.
@@ -59,6 +63,10 @@ def solve_nnls(Q, q, solver_tol=None, max_iter=50):
         ``min(n * eps * 5e3, 1e-2)``.
     max_iter
         Maximum number of PDIP iterations (jaxnnls hard-codes 50).
+    init
+        Optional ``(x, s, z)`` warm start (strictly positive ``s`` and ``z``)
+        replacing jaxnnls's ``initialize``. ``None`` (default) is the upstream
+        cold start.
 
     Returns
     -------
@@ -69,7 +77,7 @@ def solve_nnls(Q, q, solver_tol=None, max_iter=50):
     import jax.numpy as jnp
     from jaxnnls.pdip import EPSILON, initialize, pdip_pc_step
 
-    x, s, z = initialize(Q, q)
+    x, s, z = initialize(Q, q) if init is None else init
 
     if solver_tol is None:
         solver_tol = jax.lax.min(Q.shape[0] * EPSILON, 1e-2)
@@ -179,10 +187,57 @@ def solve_nnls_primal(Q, q, target_kappa=1e-3, solver_tol=None, max_iter=50):
     )[0]
 
 
+# The backward pass of the ``"raw"`` mode first polishes the mapped raw-forward iterate with at most this many
+# PDIP iterations on the Jacobi-scaled system at jaxnnls's own tight tolerance (PyAutoArray#573). Measured on the
+# SLaM MGE fixture, the 48 SLaM ``source_lp[1]`` systems and the jax_grad/mge.py points: 4-6 iterations.
+RAW_BACKWARD_POLISH_MAX_ITER = 10
+
+
+def _raw_forward_backward_point(
+    Q_pc, q_pc, Q, q, D, target_kappa, solver_tol, max_iter
+):
+    """
+    The forward solve and the relaxed-KKT point of the ``"raw"`` mode (shared by
+    the custom-vjp forward pass and :func:`raw_forward_backward_status`).
+
+    Returns ``(y, converged, pdip_iter)`` of the raw forward solve (mapped to the
+    Jacobi coordinates), the relaxed point ``(yr, sr, zr)`` the backward pass
+    differentiates at, and the status ``(relaxed_converged, relaxed_iter,
+    polish_converged, polish_iter)``.
+    """
+    import jax.numpy as jnp
+    from jaxnnls.pdip_relaxed import solve_relaxed_nnls
+
+    tol = data_scaled_solver_tol(q) if solver_tol is None else solver_tol
+    x, s, z, converged, pdip_iter = solve_nnls(Q, q, solver_tol=tol, max_iter=max_iter)
+    y, sy, zy = x / D, s / D, z * D
+
+    # Polish (PyAutoArray#573): the data-scaled tolerance leaves s * z ~ 1e-10 .. 1e-9, far above
+    # ``target_kappa``, so the relaxed solve below would have to push toward the boundary from z / s ~ 1e13
+    # and its fixed 50-iteration while_loop overshoots to NaN. A few tight PDIP iterations on the scaled
+    # system, warm-started from the mapped iterate, bring s * z down to the jaxnnls tolerance first. If the
+    # polish does not converge (the scaled dual is what diverges on #571's systems from a cold start), the
+    # mapped iterate is kept, i.e. the pre-polish behaviour.
+    yp, sp, zp, polish_converged, polish_iter = solve_nnls(
+        Q_pc, q_pc, max_iter=RAW_BACKWARD_POLISH_MAX_ITER, init=(y, sy, zy)
+    )
+    ok = jnp.logical_and(
+        polish_converged == 1,
+        jnp.all(jnp.isfinite(yp)) & jnp.all(sp > 0) & jnp.all(zp > 0),
+    )
+    yp, sp, zp = (jnp.where(ok, a, b) for a, b in ((yp, y), (sp, sy), (zp, zy)))
+
+    yr, sr, zr, relaxed_converged, relaxed_iter = solve_relaxed_nnls(
+        Q_pc, q_pc, yp, sp, zp, target_kappa=target_kappa
+    )
+    status = (relaxed_converged, relaxed_iter, ok.astype(int), polish_iter)
+    return (y, converged, pdip_iter), (yr, sr, zr), status
+
+
 @lru_cache(maxsize=None)
 def _solve_nnls_raw_forward_with(target_kappa, solver_tol, max_iter):
     """
-    Build (and cache) the ``"raw"``-mode solver (PyAutoArray#571).
+    Build (and cache) the ``"raw"``-mode solver (PyAutoArray#571, #573).
 
     The returned function takes the Jacobi-scaled system ``(Q_pc, q_pc)``
     (``Q_pc = D Q D``, ``q_pc = D q``) together with the raw system ``(Q, q)``
@@ -196,44 +251,67 @@ def _solve_nnls_raw_forward_with(target_kappa, solver_tol, max_iter):
       linear-object-only (MGE) systems, Jacobi scaling turns signal-free columns
       whose diagonal is only the no-regularization floor into degenerate
       coordinates that make the PDIP dual diverge; the raw solve does not.
-    - **Backward:** exactly today's Jacobi-mode pass, i.e. the relaxed-KKT implicit
-      derivative on ``Q_pc``, started from the mapped iterate. The relaxed-KKT
-      pass on the raw, ill-conditioned ``Q`` produces NaN gradients, which is why
-      Jacobi scaling was introduced. ``(Q, q, D)`` get zero cotangents: ``y``
-      depends only on ``(Q_pc, q_pc)``, and the caller's autodiff carries the
-      dependence of those, and of ``D``, on the raw inputs.
+    - **Backward:** the relaxed-KKT implicit derivative on ``Q_pc`` (as the
+      Jacobi mode), started from the mapped iterate after a *polish*: at most
+      :data:`RAW_BACKWARD_POLISH_MAX_ITER` PDIP iterations on ``(Q_pc, q_pc)``
+      at jaxnnls's tight tolerance, warm-started from the mapped iterate
+      (kept only if it converges). Without it the loose forward tolerance
+      leaves complementarity ``s * z`` orders of magnitude above
+      ``target_kappa`` and the relaxed solve diverges to NaN on a fraction of
+      points (PyAutoArray#573); with it the relaxed solve converges in about
+      one iteration. The primal ``y`` is the unpolished forward solution, so
+      the forward value is unchanged. The relaxed-KKT pass on the raw,
+      ill-conditioned ``Q`` produces NaN gradients, which is why Jacobi scaling
+      was introduced. ``(Q, q, D)`` get zero cotangents: ``y`` depends only on
+      ``(Q_pc, q_pc)``, and the caller's autodiff carries the dependence of
+      those, and of ``D``, on the raw inputs.
+
+    The backward-pass convergence is observable through
+    :func:`raw_forward_backward_status`.
     """
     import jax
     import jax.numpy as jnp
     from jaxnnls.diff_qp import diff_nnls
-    from jaxnnls.pdip_relaxed import solve_relaxed_nnls
-
-    def raw_solve(Q, q, D):
-        tol = data_scaled_solver_tol(q) if solver_tol is None else solver_tol
-        x, s, z, converged, pdip_iter = solve_nnls(
-            Q, q, solver_tol=tol, max_iter=max_iter
-        )
-        return x / D, s / D, z * D, converged, pdip_iter
 
     def primal(Q_pc, q_pc, Q, q, D):
-        y, _, _, converged, pdip_iter = raw_solve(Q, q, D)
-        return y, converged, pdip_iter
+        tol = data_scaled_solver_tol(q) if solver_tol is None else solver_tol
+        x, _, _, converged, pdip_iter = solve_nnls(
+            Q, q, solver_tol=tol, max_iter=max_iter
+        )
+        return x / D, converged, pdip_iter
 
     def forward(Q_pc, q_pc, Q, q, D):
-        y, sy, zy, converged, pdip_iter = raw_solve(Q, q, D)
-        yr, sr, zr, _, _ = solve_relaxed_nnls(
-            Q_pc, q_pc, y, sy, zy, target_kappa=target_kappa
+        out, (yr, sr, zr), status = _raw_forward_backward_point(
+            Q_pc, q_pc, Q, q, D, target_kappa, solver_tol, max_iter
         )
-        return (y, converged, pdip_iter), (Q_pc, yr, sr, zr, Q, q, D)
+        return out, (Q_pc, yr, sr, zr, status[0], Q, q, D)
 
     def backward(res, output_grad):
-        Q_pc, yr, sr, zr, Q, q, D = res
+        Q_pc, yr, sr, zr, _, Q, q, D = res
         dQ_pc, dq_pc = diff_nnls(Q_pc, yr, sr, zr, output_grad[0])
         return dQ_pc, dq_pc, jnp.zeros_like(Q), jnp.zeros_like(q), jnp.zeros_like(D)
 
     primal = jax.custom_vjp(primal)
     primal.defvjp(forward, backward)
     return primal
+
+
+def raw_forward_backward_status(
+    Q_pc, q_pc, Q, q, D, target_kappa=1e-3, solver_tol=None, max_iter=50
+):
+    """
+    Diagnostic (not differentiable): the convergence of the ``"raw"`` mode's
+    backward-pass preparation for one system, as the integer tuple
+    ``(relaxed_converged, relaxed_iter, polish_converged, polish_iter)``.
+
+    ``relaxed_*`` describe the relaxed-KKT solve whose point the gradient is
+    taken at; ``polish_*`` the tight warm-started PDIP polish before it
+    (``polish_converged == 0`` means the mapped iterate was used unpolished).
+    Arguments are those of :func:`solve_nnls_primal_raw_forward`.
+    """
+    return _raw_forward_backward_point(
+        Q_pc, q_pc, Q, q, D, target_kappa, solver_tol, max_iter
+    )[2]
 
 
 def solve_nnls_primal_raw_forward(
