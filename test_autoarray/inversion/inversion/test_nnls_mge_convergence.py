@@ -401,7 +401,8 @@ def _backward_status(jnp, Q, q):
 )
 def test__raw_mode_backward_pass_converges(jnp, system):
     """The backward pass reports convergence: the tight polish of the mapped iterate converges (measured <= 6
-    iterations) and the relaxed-KKT solve then converges well inside its 50-iteration cap (measured 1)."""
+    iterations) and the relaxed-KKT solve then converges well inside its 50-iteration cap (measured 1).
+    """
     kind, index = system
     Q, q = (SYSTEMS if kind == "slam" else GRAD_NAN_SYSTEMS)[index]
 
