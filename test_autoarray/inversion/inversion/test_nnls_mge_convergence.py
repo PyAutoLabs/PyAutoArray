@@ -323,3 +323,91 @@ def test__control__well_conditioned_pdip_unchanged(jnp, n, seed):
     np.testing.assert_allclose(
         x_raw, x_scipy, rtol=0, atol=1e-8 * np.abs(x_scipy).max()
     )
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# PyAutoArray#573: NaN gradients of the "raw" mode.
+#
+# `files/mge_grad_nan_systems.npz` holds 4 (20 x 20) systems captured from the autolens_workspace_test
+# `jax_grad/mge.py` model (MGE source, NFWSph + shear) at the PRNGKey perturbations 2, 10, 12 and 14 (see
+# `files/README.md`). The raw forward solve stops at the data-scaled tolerance with s * z ~ 1e-10 .. 2.5e-9, far
+# above `nnls_target_kappa = 1e-11`; the relaxed-KKT solve on the Jacobi system then has to push toward the
+# boundary from z / s ~ 1e13 and hits its 50-iteration cap with NaN (or "converges" with s < 0), so the gradient
+# is NaN. The fix polishes the mapped iterate with a few tight PDIP iterations on the Jacobi system first.
+# ---------------------------------------------------------------------------------------------------------------
+
+GRAD_NAN_FIXTURE = Path(__file__).parent / "files" / "mge_grad_nan_systems.npz"
+
+
+def _load_grad_nan_systems():
+    with np.load(GRAD_NAN_FIXTURE) as data:
+        meta = json.loads(str(data["meta"]))
+        systems = [
+            (np.asarray(data[f"Q_{s['key']}"]), np.asarray(data[f"q_{s['key']}"]))
+            for s in meta["systems"]
+        ]
+    return meta, systems
+
+
+GRAD_NAN_META, GRAD_NAN_SYSTEMS = _load_grad_nan_systems()
+GRAD_NAN_IDS = [f"prng{s['prng_key']}" for s in GRAD_NAN_META["systems"]]
+
+
+def test__grad_nan_fixture_is_the_captured_jax_grad_mge_set():
+    assert GRAD_NAN_FIXTURE.stat().st_size < 50_000
+    assert [s["prng_key"] for s in GRAD_NAN_META["systems"]] == [2, 10, 12, 14]
+    for Q, q in GRAD_NAN_SYSTEMS:
+        assert Q.shape == (20, 20) and q.shape == (20,)
+
+
+@requires_jax
+@pytest.mark.parametrize("jit", [False, True], ids=["eager", "jit"])
+@pytest.mark.parametrize("index", range(len(GRAD_NAN_SYSTEMS)), ids=GRAD_NAN_IDS)
+def test__raw_mode_gradient_is_finite_on_the_captured_grad_nan_systems(jnp, index, jit):
+    """Red on PyAutoArray 3de624b5 (#572): the gradient is NaN on all four systems, eager and jitted."""
+    import jax
+
+    Q, q = GRAD_NAN_SYSTEMS[index]
+    w = jnp.linspace(0.5, 1.5, q.shape[0])
+
+    grad = jax.grad(lambda Q_, q_: w @ _raw(jnp, Q_, q_), argnums=(0, 1))
+    if jit:
+        grad = jax.jit(grad)
+    gQ, gq = grad(jnp.asarray(Q), jnp.asarray(q))
+
+    assert np.all(np.isfinite(np.asarray(gQ))) and np.all(np.isfinite(np.asarray(gq)))
+    assert np.any(np.asarray(gq) != 0.0)
+
+
+def _backward_status(jnp, Q, q):
+    from autoarray.util.jax_nnls import raw_forward_backward_status
+
+    Qj, qj = jnp.asarray(Q), jnp.asarray(q)
+    Q_pc, q_pc, D = (jnp.asarray(a) for a in _jacobi(Q, q))
+    return [
+        int(v)
+        for v in raw_forward_backward_status(
+            Q_pc, q_pc, Qj, qj, D, target_kappa=1.0e-11, max_iter=PRODUCTION_MAX_ITER
+        )
+    ]
+
+
+@requires_jax
+@pytest.mark.parametrize(
+    "system",
+    [("slam", k) for k in KEYS]
+    + [("grad_nan", i) for i in range(len(GRAD_NAN_SYSTEMS))],
+    ids=[f"slam-{i}" for i in IDS] + [f"grad_nan-{i}" for i in GRAD_NAN_IDS],
+)
+def test__raw_mode_backward_pass_converges(jnp, system):
+    """The backward pass reports convergence: the tight polish of the mapped iterate converges (measured <= 6
+    iterations) and the relaxed-KKT solve then converges well inside its 50-iteration cap (measured 1)."""
+    kind, index = system
+    Q, q = (SYSTEMS if kind == "slam" else GRAD_NAN_SYSTEMS)[index]
+
+    relaxed_converged, relaxed_iter, polish_converged, polish_iter = _backward_status(
+        jnp, Q, q
+    )
+
+    assert polish_converged == 1, polish_iter
+    assert relaxed_converged == 1 and relaxed_iter < PRODUCTION_MAX_ITER, relaxed_iter
