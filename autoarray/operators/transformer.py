@@ -199,9 +199,12 @@ class TransformerDFT:
         mask as this transformer's `real_space_mask`.
         """
         image_slim = transformer_util.image_direct_from(
-            visibilities=visibilities.in_array,
+            visibilities=xp.stack(
+                (xp.real(visibilities.array), xp.imag(visibilities.array)), axis=-1
+            ),
             grid_radians=self.grid.array,
             uv_wavelengths=self.uv_wavelengths,
+            xp=xp,
         )
 
         image_native = array_2d_util.array_2d_native_from(

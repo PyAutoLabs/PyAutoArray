@@ -125,6 +125,10 @@ def inversion_imaging_from(
     An `Inversion` whose type is determined by the input `dataset` and `settings`.
     """
 
+    # Unlike `inversion_interferometer_from`, imaging keeps func-list-only inversions (e.g. an MGE with no
+    # pixelization) on the mapping formalism. A func-list-only imaging mapping inversion is cheap (one PSF
+    # convolution per basis function), and the imaging sparse data vector's handling of profile-subtracted
+    # data is tracked separately, so the interferometer routing change is deliberately not mirrored here.
     use_sparse_operator = True
 
     if all(
@@ -199,15 +203,12 @@ def inversion_interferometer_from(
     -------
     An `Inversion` whose type is determined by the input `dataset` and `settings`.
     """
-    use_sparse_operator = True
-
-    if all(
-        isinstance(linear_obj, AbstractLinearObjFuncList)
-        for linear_obj in linear_obj_list
-    ):
-        use_sparse_operator = False
-
-    if dataset.sparse_operator is not None and use_sparse_operator:
+    # A sparse operator selects the w-tilde formalism for every linear object list, including func-list-only
+    # ones (e.g. an MGE with no pixelization). For interferometer data this avoids the dense
+    # `transform_mapping_matrix` of shape (N_vis, S), which dominates run time and memory at large N_vis, and
+    # `InversionInterferometerSparse` handles zero mappers (the func-func curvature blocks and the data vector
+    # need no mapper). `_use_interferometer_numba` returns False whenever a func-list is present.
+    if dataset.sparse_operator is not None:
 
         if _use_interferometer_numba(
             linear_obj_list=linear_obj_list,

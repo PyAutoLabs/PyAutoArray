@@ -54,6 +54,34 @@ def test__dft__image_from__visibilities_7__first_three_image_pixels_match_expect
     assert image[0:3] == pytest.approx([-1.49022481, -0.22395855, -0.45588535], 1.0e-4)
 
 
+def test__dft__image_from__jax_jit_matches_numpy(
+    visibilities_7, uv_wavelengths_7x2, mask_2d_7x7
+):
+    """
+    The adjoint DFT is used inside `jax.jit` fits (the dirty image of profile-subtracted visibilities for the
+    sparse operator), so it must trace with `xp=jnp` and match the NumPy result.
+    """
+    jax = pytest.importorskip("jax")
+    import jax.numpy as jnp
+
+    transformer = aa.TransformerDFT(
+        uv_wavelengths=uv_wavelengths_7x2,
+        real_space_mask=mask_2d_7x7,
+    )
+
+    @jax.jit
+    def f(visibilities):
+        return transformer.image_from(
+            visibilities=aa.Visibilities(visibilities=visibilities), xp=jnp
+        ).array
+
+    image = transformer.image_from(visibilities=visibilities_7)
+
+    assert np.asarray(f(jnp.asarray(visibilities_7.array))) == pytest.approx(
+        image.array, rel=1.0e-10, abs=1.0e-12
+    )
+
+
 def test__nufft__visibilities_from__all_ones_image__first_visibility_matches_expected():
 
     uv_wavelengths = np.array([[0.2, 1.0], [0.5, 1.1], [0.8, 1.2]])

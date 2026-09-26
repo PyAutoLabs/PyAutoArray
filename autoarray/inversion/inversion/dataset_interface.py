@@ -8,6 +8,7 @@ class DatasetInterface:
         transformer=None,
         sparse_operator=None,
         noise_covariance_matrix=None,
+        sparse_dirty_image=None,
     ):
         """
         Generic class which acts as an interface between a dataset and an inversion.
@@ -49,6 +50,13 @@ class DatasetInterface:
         noise_covariance_matrix
             A noise-map covariance matrix representing the covariance between noise in every `data` value, which
             can be used via a bespoke fit to account for correlated noise in the data.
+        sparse_dirty_image
+            The noise-weighted dirty image `Re(Fᴴ W d)` of this interface's `data`, used by the sparse (w-tilde)
+            interferometer inversion to form its data vector. The `sparse_operator` caches the dirty image of the
+            visibilities it was built from, so this is only needed when `data` differs from them (e.g. when the
+            visibilities of ordinary light profiles have been subtracted). If `None`, the operator's cached dirty
+            image is used. This is distinct from `Interferometer.dirty_image`, the unweighted dirty image of the
+            data used for visualization.
         """
         self.data = data
         self.noise_map = noise_map
@@ -57,6 +65,7 @@ class DatasetInterface:
         self.transformer = transformer
         self.sparse_operator = sparse_operator
         self.noise_covariance_matrix = noise_covariance_matrix
+        self.sparse_dirty_image = sparse_dirty_image
 
     @property
     def mask(self):

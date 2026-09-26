@@ -50,7 +50,10 @@ def visibilities_from(
 
 
 def image_direct_from(
-    visibilities: np.ndarray, grid_radians: np.ndarray, uv_wavelengths: np.ndarray
+    visibilities: np.ndarray,
+    grid_radians: np.ndarray,
+    uv_wavelengths: np.ndarray,
+    xp=np,
 ) -> np.ndarray:
     """
     Reconstruct a real-valued sky image from complex interferometric visibilities
@@ -69,6 +72,8 @@ def image_direct_from(
 
     uv_wavelengths
         The (u, v) spatial frequencies in units of wavelengths for each baseline.
+    xp
+        The array module (`numpy` or `jax.numpy`) the transform is computed with.
 
     Returns
     -------
@@ -78,15 +83,15 @@ def image_direct_from(
     # Compute the phase term for each (pixel, visibility) pair
     phase = (
         2.0
-        * np.pi
+        * xp.pi
         * (
-            np.outer(grid_radians[:, 1], uv_wavelengths[:, 0])
-            + np.outer(grid_radians[:, 0], uv_wavelengths[:, 1])
+            xp.outer(grid_radians[:, 1], uv_wavelengths[:, 0])
+            + xp.outer(grid_radians[:, 0], uv_wavelengths[:, 1])
         )
     )
 
-    real_part = np.dot(np.cos(phase), visibilities[:, 0])
-    imag_part = np.dot(np.sin(phase), visibilities[:, 1])
+    real_part = xp.dot(xp.cos(phase), visibilities[:, 0])
+    imag_part = xp.dot(xp.sin(phase), visibilities[:, 1])
 
     image_1d = real_part - imag_part
 

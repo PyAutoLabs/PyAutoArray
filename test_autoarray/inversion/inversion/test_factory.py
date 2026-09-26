@@ -490,6 +490,43 @@ def test__inversion_imaging__linear_obj_func_with_sparse_operator(
     )
 
 
+def test__inversion_interferometer__via_linear_obj_func_list__sparse_operator(
+    interferometer_7_no_fft,
+):
+    mask = interferometer_7_no_fft.real_space_mask
+
+    grid = aa.Grid2D.from_mask(mask=mask)
+
+    linear_obj = aa.m.MockLinearObjFuncList(
+        parameters=2,
+        grid=grid,
+        mapping_matrix=np.random.default_rng(seed=1).normal(
+            size=(mask.pixels_in_mask, 2)
+        ),
+    )
+
+    inversion = aa.Inversion(
+        dataset=interferometer_7_no_fft,
+        linear_obj_list=[linear_obj],
+    )
+
+    assert isinstance(inversion, aa.InversionInterferometerMapping)
+
+    # Unlike imaging, a func-list-only interferometer inversion (e.g. an MGE with no pixelization) uses the
+    # sparse operator when the dataset has one.
+
+    inversion_sparse = aa.Inversion(
+        dataset=interferometer_7_no_fft.apply_sparse_operator(use_jax=False),
+        linear_obj_list=[linear_obj],
+    )
+
+    assert type(inversion_sparse) is aa.InversionInterferometerSparse
+    assert inversion_sparse.data_vector == pytest.approx(inversion.data_vector, 1.0e-8)
+    assert inversion_sparse.curvature_matrix == pytest.approx(
+        inversion.curvature_matrix, 1.0e-8
+    )
+
+
 def test__inversion_interferometer__via_mapper(
     interferometer_7_no_fft,
     rectangular_mapper_7x7_3x3,

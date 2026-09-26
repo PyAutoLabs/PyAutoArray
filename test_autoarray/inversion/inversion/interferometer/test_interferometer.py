@@ -563,6 +563,133 @@ def test__interferometer_sparse_operator__func_list_and_mapper__identical_to_map
     )
 
 
+def test__interferometer_sparse_operator__func_list_only__identical_to_mapping():
+    """
+    A linear function list with no mapper (e.g. an MGE with no pixelization) is routed to the sparse
+    path whenever the dataset has a sparse operator, where its curvature matrix is the func-func block
+    `Bᵀ W~ B` alone and its data vector is `Bᵀ d~`, reproducing the dense (mapping formalism) inversion.
+    """
+    mask, rng, dataset, dataset_sparse = _sparse_parity_setup()
+
+    linear_obj = aa.m.MockLinearObjFuncList(
+        parameters=3,
+        mapping_matrix=rng.normal(size=(mask.pixels_in_mask, 3)),
+    )
+
+    inversion_sparse = aa.Inversion(
+        dataset=dataset_sparse, linear_obj_list=[linear_obj]
+    )
+    inversion_mapping = aa.Inversion(dataset=dataset, linear_obj_list=[linear_obj])
+
+    assert type(inversion_sparse) is aa.InversionInterferometerSparse
+    assert isinstance(inversion_mapping, aa.InversionInterferometerMapping)
+
+    # The reconstruction comes out of a linear solve of this small, poorly conditioned system and is
+    # compared (to its looser tolerance) by `_assert_sparse_matches_mapping` below.
+    for name in ("curvature_matrix", "data_vector"):
+        reference = np.asarray(getattr(inversion_mapping, name))
+
+        np.testing.assert_allclose(
+            np.asarray(getattr(inversion_sparse, name)),
+            reference,
+            rtol=1.0e-10,
+            atol=1.0e-10 * np.abs(reference).max(),
+            err_msg=name,
+        )
+
+    _assert_sparse_matches_mapping(
+        dataset=dataset,
+        dataset_sparse=dataset_sparse,
+        linear_obj_list=[linear_obj],
+    )
+
+
+def test__interferometer_sparse_operator__sparse_dirty_image_override__used_by_data_vector():
+    """
+    The sparse operator caches the dirty image of the visibilities it was built from. When an inversion
+    fits different visibilities (e.g. with the visibilities of ordinary light profiles subtracted), the
+    `DatasetInterface` supplies their dirty image via `sparse_dirty_image`, which the data vector must use
+    so that the sparse inversion reproduces the dense inversion of the subtracted visibilities.
+    """
+    mask, rng, dataset, dataset_sparse = _sparse_parity_setup()
+
+    linear_obj = aa.m.MockLinearObjFuncList(
+        parameters=2,
+        mapping_matrix=rng.normal(size=(mask.pixels_in_mask, 2)),
+    )
+
+    mapper = _mapper_from(
+        mask=mask,
+        pixels=9,
+        shape=(3, 3),
+        regularization=aa.reg.Constant(coefficient=1.0),
+    )
+
+    subtracted = aa.Visibilities(
+        visibilities=dataset.data.array
+        - rng.normal(size=dataset.data.shape)
+        - 1j * rng.normal(size=dataset.data.shape)
+    )
+
+    sparse_dirty_image = dataset.transformer.image_from(
+        visibilities=aa.Visibilities(
+            visibilities=subtracted.array.real * dataset.noise_map.array.real**-2.0
+            + 1j * subtracted.array.imag * dataset.noise_map.array.imag**-2.0
+        )
+    ).array
+
+    dataset_interface_mapping = aa.DatasetInterface(
+        data=subtracted,
+        noise_map=dataset.noise_map,
+        grids=dataset.grids,
+        transformer=dataset.transformer,
+    )
+
+    for linear_obj_list in ([linear_obj], [linear_obj, mapper]):
+        inversion_mapping = aa.Inversion(
+            dataset=dataset_interface_mapping, linear_obj_list=linear_obj_list
+        )
+
+        inversion_sparse = aa.Inversion(
+            dataset=aa.DatasetInterface(
+                data=subtracted,
+                noise_map=dataset.noise_map,
+                grids=dataset.grids,
+                transformer=dataset.transformer,
+                sparse_operator=dataset_sparse.sparse_operator,
+                sparse_dirty_image=sparse_dirty_image,
+            ),
+            linear_obj_list=linear_obj_list,
+        )
+
+        assert isinstance(inversion_sparse, aa.InversionInterferometerSparse)
+
+        reference = np.asarray(inversion_mapping.data_vector)
+
+        np.testing.assert_allclose(
+            np.asarray(inversion_sparse.data_vector),
+            reference,
+            rtol=1.0e-10,
+            atol=1.0e-10 * np.abs(reference).max(),
+        )
+
+        # The control: without the override the data vector is that of the unsubtracted visibilities.
+        inversion_sparse_cached = aa.Inversion(
+            dataset=aa.DatasetInterface(
+                data=subtracted,
+                noise_map=dataset.noise_map,
+                grids=dataset.grids,
+                transformer=dataset.transformer,
+                sparse_operator=dataset_sparse.sparse_operator,
+            ),
+            linear_obj_list=linear_obj_list,
+        )
+
+        assert np.abs(
+            np.asarray(inversion_sparse_cached.data_vector) - reference
+        ).max() > 1.0e-4 * np.abs(reference).max()
+
+
 def test__interferometer_sparse_operator__x2_mappers__identical_to_mapping():
     """
     Two `Mapper` objects fitted simultaneously require the mapper-mapper off-diagonal block
@@ -863,6 +990,57 @@ def test__interferometer_sparse_operator__numpy_inversion_matches_jax_inversion(
         ).max()
         difference_sparse = np.abs(
             np.asarray(inversion_np.reconstruction) - reconstruction
+        ).max()
+
+        assert difference_sparse <= max(10.0 * difference_dense, 1.0e-14)
+
+        # A linear function list with no mapper (e.g. an MGE with no pixelization) takes the same
+        # sparse path, with only the func-func curvature block and `Bᵀ d~` data vector.
+        linear_obj = aa.m.MockLinearObjFuncList(
+            parameters=3,
+            mapping_matrix=np.random.default_rng(seed=seed).normal(
+                size=(mask.pixels_in_mask, 3)
+            ),
+        )
+
+        inversion_np = aa.Inversion(
+            dataset=dataset_sparse, linear_obj_list=[linear_obj], xp=np
+        )
+        inversion_jax = aa.Inversion(
+            dataset=dataset_sparse, linear_obj_list=[linear_obj], xp=jnp
+        )
+
+        assert type(inversion_np) is aa.InversionInterferometerSparse
+        assert type(inversion_jax) is aa.InversionInterferometerSparse
+
+        for name in ("curvature_matrix", "data_vector"):
+            reference = np.asarray(getattr(inversion_jax, name))
+
+            np.testing.assert_allclose(
+                np.asarray(getattr(inversion_np, name)),
+                reference,
+                rtol=1.0e-10,
+                atol=1.0e-10 * np.abs(reference).max(),
+                err_msg=name,
+            )
+
+        # The unregularized func-list system is poorly conditioned, so the reconstruction is held to
+        # the same control as above: no worse than the dense inversion's NumPy / JAX spread.
+        difference_dense = np.abs(
+            np.asarray(
+                aa.Inversion(
+                    dataset=dataset, linear_obj_list=[linear_obj], xp=np
+                ).reconstruction
+            )
+            - np.asarray(
+                aa.Inversion(
+                    dataset=dataset, linear_obj_list=[linear_obj], xp=jnp
+                ).reconstruction
+            )
+        ).max()
+        difference_sparse = np.abs(
+            np.asarray(inversion_np.reconstruction)
+            - np.asarray(inversion_jax.reconstruction)
         ).max()
 
         assert difference_sparse <= max(10.0 * difference_dense, 1.0e-14)
