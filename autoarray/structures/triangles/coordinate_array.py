@@ -7,6 +7,7 @@ import numpy as np
 from autoarray.structures.triangles.abstract import HEIGHT_FACTOR
 from autoarray.structures.triangles.abstract import AbstractTriangles
 from autoarray.structures.triangles.array import ArrayTriangles
+from autoarray.structures.triangles.array import Step0Layout
 
 
 def _lattice_coordinates(
@@ -83,14 +84,7 @@ def static_vertex_table(
         axis=1,
     )
 
-    offsets = np.array([[0, 1], [1, -1], [-1, -1]])
-    keys = np.stack(
-        (
-            coordinates[:, None, 0] + flip * offsets[None, :, 0],
-            2 * coordinates[:, None, 1] + flip * offsets[None, :, 1],
-        ),
-        axis=-1,
-    ).reshape(-1, 2)
+    keys = _vertex_keys(coordinates)
 
     _, first, inverse = np.unique(keys, axis=0, return_index=True, return_inverse=True)
 
@@ -103,6 +97,107 @@ def static_vertex_table(
     return vertices, indices
 
 
+def _vertex_keys(coordinates: np.ndarray) -> np.ndarray:
+    """
+    The exact integer lattice key of every ``(3N)`` vertex slot, ordered as
+    `static_vertex_table` orders them (see its docstring).
+    """
+    flip = np.where((coordinates[:, 0] + coordinates[:, 1]) % 2 != 0, -1, 1)[:, None]
+    offsets = np.array([[0, 1], [1, -1], [-1, -1]])
+    return np.stack(
+        (
+            coordinates[:, None, 0] + flip * offsets[None, :, 0],
+            2 * coordinates[:, None, 1] + flip * offsets[None, :, 1],
+        ),
+        axis=-1,
+    ).reshape(-1, 2)
+
+
+@lru_cache(maxsize=32)
+def static_lattice_layout(
+    y_min: float, y_max: float, x_min: float, x_max: float, scale: float
+) -> Step0Layout:
+    """
+    The closed-form layout of `static_vertex_table`'s index map, so the step-0 containment can
+    read each triangle's vertices by strided slicing instead of a gather (PyAutoArray#579).
+
+    The lattice's triangles are row-major, ``n_rows x n_cols``. The vertex table is sorted on the
+    integer key ``(ky, kx)``; key rows alternate between two widths ``W0, W1`` (equal when the
+    lattice has an odd number of columns), so the ``(V, 2)`` table -- padded by one row when the
+    number of key rows is odd -- is a ``(n_pairs, W0 + W1, 2)`` grid of row pairs. Splitting the
+    triangles into the four parity classes of their (row, column) index fixes each class's flip
+    and the parity of every vertex's key row, so vertex ``k`` of the class's triangle ``(a, b)``
+    is grid entry ``(p0 + a, c0 + b)``: one contiguous 2-D slice per class and vertex.
+
+    The layout is derived from, and checked element-wise against, the actual index map in NumPy:
+    if any class did not follow the strided pattern, ``grid`` is ``None`` and the structured
+    route is not used for this geometry. Built once per geometry (cached) and made only of Python
+    ints, so it is hashable pytree aux data.
+    """
+    vertices, indices = static_vertex_table(y_min, y_max, x_min, x_max, scale)
+    coordinates = _lattice_coordinates(y_min, y_max, x_min, x_max, scale)
+
+    ys = np.unique(coordinates[:, 0])
+    xs = np.unique(coordinates[:, 1])
+    n_rows, n_cols = ys.shape[0], xs.shape[0]
+
+    grid_coordinates = np.stack(np.meshgrid(ys, xs, indexing="ij"), axis=-1)
+    if coordinates.shape[0] != n_rows * n_cols or not np.array_equal(
+        coordinates, grid_coordinates.reshape(-1, 2)
+    ):
+        return Step0Layout(n_rows=0, n_cols=0, grid=None)
+
+    unique_keys = np.unique(_vertex_keys(coordinates), axis=0)
+    _, row_counts = np.unique(unique_keys[:, 0], return_counts=True)
+    R = row_counts.shape[0]
+    W0 = int(row_counts[0])
+    W1 = int(row_counts[1]) if R > 1 else W0
+    if (
+        unique_keys.shape[0] != vertices.shape[0]
+        or np.any(row_counts[0::2] != W0)
+        or np.any(row_counts[1::2] != W1)
+    ):
+        return Step0Layout(n_rows=n_rows, n_cols=n_cols, grid=None)
+
+    # Key rows come in pairs of widths (W0, W1). Viewing the table as (n_pairs, W0 + W1, 2) --
+    # padded by one row when R is odd -- puts vertex (row r, column c) at
+    # (r // 2, (r % 2) * W0 + c).
+    pair_width = W0 + W1
+    n_pairs = (R + 1) // 2
+    row_start = np.concatenate(([0], np.cumsum(row_counts)[:-1]))
+    vertex_key_row = np.repeat(np.arange(R), row_counts)
+    vertex_key_col = np.arange(vertices.shape[0]) - row_start[vertex_key_row]
+    vertex_pair = (vertex_key_row // 2)[indices].reshape(n_rows, n_cols, 3)
+    vertex_offset = ((vertex_key_row % 2) * W0 + vertex_key_col)[indices].reshape(
+        n_rows, n_cols, 3
+    )
+
+    corners = []
+    for pi in (0, 1):
+        for pj in (0, 1):
+            corner = []
+            for k in range(3):
+                class_pair = vertex_pair[pi::2, pj::2, k]
+                class_offset = vertex_offset[pi::2, pj::2, k]
+                na, nb = class_pair.shape
+                p0, c0 = int(class_pair[0, 0]), int(class_offset[0, 0])
+                expected_pair = p0 + np.arange(na)[:, None] + 0 * class_pair
+                expected_offset = c0 + np.arange(nb)[None, :] + 0 * class_offset
+                if not (
+                    np.array_equal(class_pair, expected_pair)
+                    and np.array_equal(class_offset, expected_offset)
+                ):
+                    return Step0Layout(n_rows=n_rows, n_cols=n_cols, grid=None)
+                corner.append((p0, c0, int(na), int(nb)))
+            corners.append(tuple(corner))
+
+    return Step0Layout(
+        n_rows=n_rows,
+        n_cols=n_cols,
+        grid=(n_pairs, pair_width, int(n_pairs * pair_width - vertices.shape[0]), tuple(corners)),
+    )
+
+
 class CoordinateArrayTriangles(AbstractTriangles, ABC):
 
     def __init__(
@@ -113,6 +208,7 @@ class CoordinateArrayTriangles(AbstractTriangles, ABC):
         y_offset: float = 0.0,
         flipped: bool = False,
         vertex_table: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+        step0_layout: Optional[Step0Layout] = None,
     ):
         """
         Represents a set of triangles by integer coordinates.
@@ -134,11 +230,17 @@ class CoordinateArrayTriangles(AbstractTriangles, ABC):
             sets it. Derived lattices (`for_indexes`, `up_sample`, `neighborhood`) do not inherit
             it, and it is not part of the pytree (`tree_flatten`), so an unflattened copy falls
             back to the flat table -- which is still correct, only unshared.
+        step0_layout
+            The `static_lattice_layout` of ``vertex_table``, set with it by
+            `for_limits_and_scale(..., static_vertices=True)` and passed by `with_vertices` to the
+            `ArrayTriangles` it returns, whose `containing_indices` then avoids the ``(N, 3, 2)``
+            gather. Dropped exactly where ``vertex_table`` is.
         """
         import jax.numpy as jnp
 
         self.coordinates = coordinates
         self.vertex_table = vertex_table
+        self.step0_layout = step0_layout if vertex_table is not None else None
         self.side_length = side_length
         self.flipped = flipped
 
@@ -191,10 +293,17 @@ class CoordinateArrayTriangles(AbstractTriangles, ABC):
         import jax.numpy as jnp
 
         vertex_table = None
+        step0_layout = None
         if static_vertices:
-            vertex_table = static_vertex_table(
-                float(y_min), float(y_max), float(x_min), float(x_max), float(scale)
+            geometry = (
+                float(y_min),
+                float(y_max),
+                float(x_min),
+                float(x_max),
+                float(scale),
             )
+            vertex_table = static_vertex_table(*geometry)
+            step0_layout = static_lattice_layout(*geometry)
 
         return cls(
             coordinates=jnp.array(
@@ -202,6 +311,7 @@ class CoordinateArrayTriangles(AbstractTriangles, ABC):
             ),
             side_length=scale,
             vertex_table=vertex_table,
+            step0_layout=step0_layout,
         )
 
     def tree_flatten(self):
@@ -437,6 +547,7 @@ class CoordinateArrayTriangles(AbstractTriangles, ABC):
         return ArrayTriangles(
             indices=self.indices,
             vertices=vertices,
+            step0_layout=self.step0_layout,
         )
 
     def for_indexes(self, indexes: np.ndarray) -> "CoordinateArrayTriangles":

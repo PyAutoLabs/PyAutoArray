@@ -1,11 +1,60 @@
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
 import numpy as np
 
 from autoarray.structures.triangles.abstract import HEIGHT_FACTOR
 
 from autoarray.structures.triangles.abstract import AbstractTriangles
+from autoarray.structures.triangles.shape import Point
 from autoarray.structures.triangles.shape import Shape
+from autoarray.structures.triangles.shape import _barycentric_contains
 
 MAX_CONTAINING_SIZE = 15
+
+# Private A/B switch for the step-0 containment route (point-source CPU phase 4b,
+# PyAutoArray#579). It only affects `ArrayTriangles` built by
+# `CoordinateArrayTriangles.with_vertices` on the static initial lattice (those carrying a
+# `Step0Layout`) and tested against a `Point`; every other containment keeps the general
+# `shape.mask(self.triangles)` path. All routes return bit-identical kept indices:
+#
+# - "gather":     the general path -- pad, ``(N, 3, 2)`` gather, no-op NaN ``where``.
+# - "nopad":      the ``(N, 3, 2)`` gather without the pad / NaN ``where`` (no index is -1).
+# - "components": six ``(N,)`` 1-D gathers, one per vertex component; no ``(N, 3, 2)`` array.
+# - "structured": strided slices of the traced vertex table reshaped to its lattice rows; no
+#                 gather at all, the boolean mask is interleaved back to triangle order.
+#
+# The switch is read at trace time: a jitted function must be re-traced (fresh closure plus
+# ``jax.clear_caches()``) after changing it.
+_STEP0_CONTAINMENT = "structured"
+
+
+@dataclass(frozen=True)
+class Step0Layout:
+    """
+    The closed-form layout of the static initial lattice's vertex table (see
+    `autoarray.structures.triangles.coordinate_array.static_lattice_layout`).
+
+    Every value is a Python int, so a layout is hashable and can sit in pytree aux data: under
+    ``jit`` / ``vmap`` it is a trace-time constant.
+
+    Attributes
+    ----------
+    n_rows, n_cols
+        The triangle lattice is ``n_rows x n_cols`` triangles, stored row-major.
+    grid
+        ``None`` when the vertex table does not follow the closed-form pattern (only the
+        "gather" / "nopad" / "components" routes then apply), else
+        ``(n_pairs, pair_width, pad, corners)``: the ``(V, 2)`` table padded by ``pad`` rows is a
+        ``(n_pairs, pair_width, 2)`` grid, and ``corners[p][k] = (p0, c0, na, nb)`` says that for
+        the parity class ``p = 2 * (i % 2) + (j % 2)`` of triangle row ``i`` and column ``j``,
+        vertex ``k`` of the class's triangle ``(a, b)`` (``i = 2a + i % 2``, ``j = 2b + j % 2``)
+        is grid entry ``(p0 + a, c0 + b)``.
+    """
+
+    n_rows: int
+    n_cols: int
+    grid: Optional[Tuple] = None
 
 
 class ArrayTriangles(AbstractTriangles):
@@ -14,6 +63,7 @@ class ArrayTriangles(AbstractTriangles):
         indices,
         vertices,
         max_containing_size=MAX_CONTAINING_SIZE,
+        step0_layout: Optional[Step0Layout] = None,
         **kwargs,
     ):
         """
@@ -26,10 +76,16 @@ class ArrayTriangles(AbstractTriangles):
             with the three indices of the vertices.
         vertices
             The vertices of the triangles.
+        step0_layout
+            Set only by `CoordinateArrayTriangles.with_vertices` on the static initial lattice:
+            the static layout of ``indices`` into ``vertices``, which lets `containing_indices`
+            test a `Point` without materialising the ``(N, 3, 2)`` triangle array (see
+            `_STEP0_CONTAINMENT`). A plain Python constant (pytree aux data), never traced.
         """
         self._indices = indices
         self._vertices = vertices
         self.max_containing_size = max_containing_size
+        self.step0_layout = step0_layout
 
     def __len__(self):
         return len(self.triangles)
@@ -159,13 +215,81 @@ class ArrayTriangles(AbstractTriangles):
         """
         import jax.numpy as jnp
 
-        inside = shape.mask(self.triangles)
+        inside = None
+        if self.step0_layout is not None and isinstance(shape, Point):
+            inside = self._step0_point_mask(shape)
+        if inside is None:
+            inside = shape.mask(self.triangles)
 
         return jnp.where(
             inside,
             size=self.max_containing_size,
             fill_value=-1,
         )[0]
+
+    def _step0_point_mask(self, point: "Point"):
+        """
+        `Point.mask` of the static initial lattice without the general ``(N, 3, 2)`` gather, by
+        the route `_STEP0_CONTAINMENT` names; ``None`` selects the general path.
+
+        Every route feeds `_barycentric_contains` the same six component values the general path
+        takes from ``self.triangles`` (at step 0 no index is -1, so its NaN ``where`` is a no-op),
+        in the same operation order, so the mask -- and the kept indices -- are bit-identical.
+        """
+        import jax.numpy as jnp
+
+        route = _STEP0_CONTAINMENT
+        vertices = self.vertices
+        indices = self.indices
+
+        if route == "nopad":
+            return point.mask(vertices[indices])
+
+        if route == "components":
+            v0 = vertices[:, 0]
+            v1 = vertices[:, 1]
+            i0 = indices[:, 0]
+            i1 = indices[:, 1]
+            i2 = indices[:, 2]
+            return _barycentric_contains(
+                v0[i0], v1[i0], v0[i1], v1[i1], v0[i2], v1[i2], point.x, point.y
+            )
+
+        if route == "structured" and self.step0_layout.grid is not None:
+            n_rows = self.step0_layout.n_rows
+            n_cols = self.step0_layout.n_cols
+            n_pairs, pair_width, pad, corners = self.step0_layout.grid
+            if pad:
+                vertices = jnp.pad(vertices, ((0, pad), (0, 0)))
+            grid = vertices.reshape(n_pairs, pair_width, 2)
+
+            half_rows = (n_rows + 1) // 2
+            half_cols = (n_cols + 1) // 2
+
+            classes = []
+            for corner in corners:
+                components = []
+                for p0, c0, na, nb in corner:
+                    block = grid[p0 : p0 + na, c0 : c0 + nb]
+                    components += [block[..., 0], block[..., 1]]
+                na, nb = corner[0][2], corner[0][3]
+                mask = _barycentric_contains(*components, point.x, point.y)
+                classes.append(
+                    jnp.pad(mask, ((0, half_rows - na), (0, half_cols - nb)))
+                )
+
+            # classes[2 * pi + pj][a, b] is triangle (2a + pi, 2b + pj): interleave to row-major.
+            interleaved = jnp.stack(
+                (
+                    jnp.stack((classes[0], classes[1]), axis=-1),
+                    jnp.stack((classes[2], classes[3]), axis=-1),
+                ),
+                axis=1,
+            ).reshape(2 * half_rows, 2 * half_cols)
+
+            return interleaved[:n_rows, :n_cols].reshape(-1)
+
+        return None
 
     def for_indexes(self, indexes: np.ndarray) -> "ArrayTriangles":
         """
@@ -311,6 +435,7 @@ class ArrayTriangles(AbstractTriangles):
             indices=self.indices,
             vertices=vertices,
             max_containing_size=self.max_containing_size,
+            step0_layout=self.step0_layout,
         )
 
     def tree_flatten(self):
@@ -320,7 +445,7 @@ class ArrayTriangles(AbstractTriangles):
         return (
             self.indices,
             self.vertices,
-        ), (self.max_containing_size,)
+        ), (self.max_containing_size, self.step0_layout)
 
     @classmethod
     def tree_unflatten(cls, aux_data, children):
@@ -331,6 +456,7 @@ class ArrayTriangles(AbstractTriangles):
             indices=children[0],
             vertices=children[1],
             max_containing_size=aux_data[0],
+            step0_layout=aux_data[1],
         )
 
 
