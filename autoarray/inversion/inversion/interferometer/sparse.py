@@ -88,10 +88,18 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
           which is exactly the entry the mapping (dense) formalism computes via the linear
           function's transformed mapping matrix. Linear function lists therefore require no
           separate branch here.
+
+        The cached dirty image is that of the visibilities the `sparse_operator` was built from. When
+        the inversion's data differs from them (e.g. a `DatasetInterface` whose data has the visibilities
+        of ordinary light profiles subtracted), the dataset's `sparse_dirty_image` of that data is used
+        instead, so that `D` is consistent with the data the chi-squared is computed from.
         """
-        return self._xp.dot(
-            self.mapping_matrix.T, self.dataset.sparse_operator.dirty_image
-        )
+        dirty_image = getattr(self.dataset, "sparse_dirty_image", None)
+
+        if dirty_image is None:
+            dirty_image = self.dataset.sparse_operator.dirty_image
+
+        return self._xp.dot(self.mapping_matrix.T, dirty_image)
 
     def _sparse_triplets_curvature_from(self, mapper: Mapper):
         """
