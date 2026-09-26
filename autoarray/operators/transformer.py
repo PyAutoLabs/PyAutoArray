@@ -525,14 +525,15 @@ class TransformerNUFFT:
         if xp.__name__.startswith("jax"):
             import jax.numpy as jnp
 
-            mm_T = jnp.asarray(mapping_matrix).T.astype(jnp.complex128)
-            source_images = jnp.zeros((n_src, n_y, n_x), dtype=jnp.complex128)
+            # Real scatter, then cast: GPU complex128 scatter floor (autolens_profiling#308).
+            mm_T = jnp.asarray(mapping_matrix).T
+            source_images = jnp.zeros((n_src, n_y, n_x), dtype=mm_T.dtype)
             source_images = source_images.at[
                 jnp.arange(n_src)[:, None],
                 jnp.asarray(rows)[None, :],
                 jnp.asarray(cols)[None, :],
             ].set(mm_T)
-            flipped = source_images[:, ::-1, :]
+            flipped = source_images[:, ::-1, :].astype(jnp.complex128)
             x = jnp.asarray(self._x)
             y = jnp.asarray(self._y)
             shift = jnp.asarray(self._shift)
@@ -542,10 +543,11 @@ class TransformerNUFFT:
             )
             return vis_batched.T
 
-        mm_T = np.asarray(mapping_matrix).T.astype(np.complex128)
-        source_images = np.zeros((n_src, n_y, n_x), dtype=np.complex128)
+        # Real scatter, then cast: GPU complex128 scatter floor (autolens_profiling#308).
+        mm_T = np.asarray(mapping_matrix).T
+        source_images = np.zeros((n_src, n_y, n_x), dtype=mm_T.dtype)
         source_images[np.arange(n_src)[:, None], rows[None, :], cols[None, :]] = mm_T
-        flipped = source_images[:, ::-1, :]
+        flipped = source_images[:, ::-1, :].astype(np.complex128)
         vis_batched = (
             _nufftax.nufft2d2(self._x, self._y, flipped, self.eps, -1)
             * self._shift[None, :]

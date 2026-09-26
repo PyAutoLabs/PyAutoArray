@@ -139,6 +139,84 @@ def test__nufft__transform_mapping_matrix__ones_mapping_matrix__first_element_ma
     assert transformed_mapping_matrix_nufft[0, 0] == pytest.approx(25.0 + 0.0j, 1.0e-4)
 
 
+def test__nufft__transform_mapping_matrix__real_scatter_matches_complex_scatter_exactly():
+    """Scattering the real mapping matrix and casting afterwards
+    (autolens_profiling#308) must be bit-identical to the previous
+    cast-then-scatter formula, for NumPy and under ``jax.jit``."""
+    import jax
+    import jax.numpy as jnp
+
+    from autoarray.operators import transformer as transformer_module
+
+    rng = np.random.default_rng(seed=4)
+    uv_wavelengths = rng.normal(size=(41, 2)) * 50.0
+    real_space_mask = aa.Mask2D.circular(
+        shape_native=(12, 11), pixel_scales=0.05, radius=0.25
+    )
+    n_src = 5
+    mapping_matrix = rng.normal(size=(real_space_mask.pixels_in_mask, n_src))
+
+    transformer = aa.TransformerNUFFT(
+        uv_wavelengths=uv_wavelengths, real_space_mask=real_space_mask
+    )
+
+    nufftax = transformer_module._load_nufftax()
+    rows, cols = real_space_mask.slim_to_native_tuple
+    n_y, n_x = real_space_mask.shape_native
+
+    source_images = np.zeros((n_src, n_y, n_x), dtype=np.complex128)
+    source_images[np.arange(n_src)[:, None], rows[None, :], cols[None, :]] = (
+        mapping_matrix.T.astype(np.complex128)
+    )
+    expected_numpy = np.array(
+        np.asarray(
+            nufftax.nufft2d2(
+                transformer._x,
+                transformer._y,
+                source_images[:, ::-1, :],
+                transformer.eps,
+                -1,
+            )
+            * transformer._shift[None, :]
+        ).T
+    )
+
+    result_numpy = transformer.transform_mapping_matrix(mapping_matrix=mapping_matrix)
+
+    assert result_numpy.dtype == np.complex128
+    assert np.array_equal(result_numpy, expected_numpy)
+
+    @jax.jit
+    def old_formula(mm):
+        images = jnp.zeros((n_src, n_y, n_x), dtype=jnp.complex128)
+        images = images.at[
+            jnp.arange(n_src)[:, None],
+            jnp.asarray(rows)[None, :],
+            jnp.asarray(cols)[None, :],
+        ].set(mm.T.astype(jnp.complex128))
+        vis = (
+            nufftax.nufft2d2(
+                jnp.asarray(transformer._x),
+                jnp.asarray(transformer._y),
+                images[:, ::-1, :],
+                transformer.eps,
+                -1,
+            )
+            * jnp.asarray(transformer._shift)[None, :]
+        )
+        return vis.T
+
+    @jax.jit
+    def new_formula(mm):
+        return transformer.transform_mapping_matrix(mapping_matrix=mm, xp=jnp)
+
+    expected_jax = np.asarray(old_formula(jnp.asarray(mapping_matrix)))
+    result_jax = np.asarray(new_formula(jnp.asarray(mapping_matrix)))
+
+    assert result_jax.dtype == np.complex128
+    assert np.array_equal(result_jax, expected_jax)
+
+
 def test__nufft__chunk_size__rejects_non_positive():
     real_space_mask = aa.Mask2D.all_false(shape_native=(5, 5), pixel_scales=0.005)
     uv_wavelengths = np.array([[0.2, 1.0], [0.5, 1.1], [0.8, 1.2]])
