@@ -29,6 +29,25 @@ LIMITS = dict(y_min=-1.0, y_max=1.0, x_min=-1.0, x_max=1.0, scale=0.5)
 # The PointSolver's default image-plane extent for a 100x100, 0.2" grid.
 SOLVER_LIMITS = dict(y_min=-9.9, y_max=9.9, x_min=-9.9, x_max=9.9, scale=0.2)
 
+# Step-0 containment routes (`autoarray.structures.triangles.array._STEP0_CONTAINMENT`,
+# PyAutoArray#579). "gather" is the general path every other route must reproduce bit-for-bit.
+STEP0_ROUTES = ("gather", "nopad", "components", "structured")
+
+# Fuzz geometries for the step-0 routes, as (name, limits, deflect, n_extra): the solver lattice
+# (199 x 117 triangles, odd key-row count -> padded grid), the same lattice with an SIS-like
+# deflection of its traced vertex table, and three asymmetric lattices -- alternating key-row
+# widths 14/15 (even column count), alternating widths 10/11 with an odd key-row count (padded),
+# and an even row count at a non-round scale. ``n_extra`` random points are added to every
+# vertex, edge midpoint and centroid of the (possibly deflected) lattice; the solver lattices
+# instead sample a subset of those (see `_fuzz_points`).
+STEP0_FUZZ_GEOMETRIES = (
+    ("solver", SOLVER_LIMITS, False, 2048),
+    ("solver_deflected", SOLVER_LIMITS, True, 1024),
+    ("alternating", dict(y_min=-3.1, y_max=2.2, x_min=-1.7, x_max=2.9, scale=0.2), False, 8192),
+    ("alternating_padded", dict(y_min=-2.1, y_max=1.1, x_min=-0.6, x_max=2.5, scale=0.2), True, 8192),
+    ("even_rows", dict(y_min=-0.9, y_max=1.7, x_min=-2.2, x_max=0.4, scale=0.13), False, 8192),
+)
+
 # jax is an `[optional]` extra and is absent on the NumPy-only matrix env: every test in this module
 # skips there.
 if importlib.util.find_spec("jax") is None:
@@ -43,6 +62,7 @@ else:
 
     jax.config.update("jax_enable_x64", True)
 
+    from autoarray.structures.triangles import array as triangles_array
     from autoarray.structures.triangles.array import MAX_CONTAINING_SIZE
     from autoarray.structures.triangles.coordinate_array import (
         CoordinateArrayTriangles,
@@ -329,3 +349,240 @@ def test_no_sort__static_vertices():
 
     sorts = re.findall(r"\bsort\b", compiled, flags=re.IGNORECASE)
     assert not sorts, f"traced containment carries {len(sorts)} sort op(s)"
+
+
+
+# ---------------------------------------------------------------------------------------------
+# Step-0 containment routes (point-source CPU phase 4b, PyAutoArray#579)
+# ---------------------------------------------------------------------------------------------
+
+# Points per jitted, vmapped call; the last chunk is padded by repeating its final point.
+_FUZZ_CHUNK = 1024
+
+# Set PYAUTO_STEP0_FUZZ_SCALE (an integer >= 1) to multiply the random and sampled fuzz points,
+# e.g. 4 for ~1.5e5 points per route. The default (~5.7e4 points per route, every vertex of the
+# solver lattice included) keeps this block to ~30 s on a laptop.
+_FUZZ_SCALE = int(__import__("os").environ.get("PYAUTO_STEP0_FUZZ_SCALE", "1"))
+
+
+def _deflected(vertices):
+    """An SIS-like (theta_E = 1.6) deflection of a vertex table: an irregular traced table."""
+    vertices = np.asarray(vertices)
+    radius = np.sqrt(np.sum(vertices**2, axis=1, keepdims=True) + 1e-2)
+    return vertices - 1.6 * vertices / radius
+
+
+def _fuzz_setup(limits, deflect):
+    lattice = _static_lattice(limits)
+    vertices = np.asarray(lattice.vertices)
+    if deflect:
+        vertices = _deflected(vertices)
+    return lattice, vertices
+
+
+def _fuzz_points(limits, deflect, n_extra):
+    """
+    Every vertex of the (possibly deflected) table -- the exact step-0 ties -- plus edge
+    midpoints, centroids and uniform random points over the table's bounding box. On the
+    23 283-triangle solver lattices the midpoints and centroids are a random subset.
+    """
+    lattice, vertices = _fuzz_setup(limits, deflect)
+    triangles = vertices[np.asarray(lattice.indices)]
+    rng = np.random.default_rng(579)
+
+    midpoints = np.concatenate(
+        [0.5 * (triangles[:, a] + triangles[:, b]) for a, b in ((0, 1), (1, 2), (2, 0))]
+    )
+    centroids = triangles.mean(axis=1)
+    n_extra = n_extra * _FUZZ_SCALE
+    if triangles.shape[0] > 5000:
+        midpoints = midpoints[rng.choice(midpoints.shape[0], n_extra // 2, replace=False)]
+        centroids = centroids[rng.choice(centroids.shape[0], n_extra // 4, replace=False)]
+        if deflect:
+            vertices = vertices[rng.choice(vertices.shape[0], n_extra, replace=False)]
+
+    low, high = triangles.reshape(-1, 2).min(axis=0), triangles.reshape(-1, 2).max(axis=0)
+    random = rng.uniform(low, high, size=(n_extra, 2))
+
+    return np.concatenate((vertices, midpoints, centroids, random))
+
+
+def _containing_by_route(route, lattice, vertices, points, monkeypatch):
+    """
+    `containing_indices` of every point under ``route``, with the vertex table a traced argument
+    (as on the solver path) under ``jit`` + ``vmap``. A fresh closure and ``jax.clear_caches()``
+    force a re-trace, since the route is read at trace time.
+    """
+    monkeypatch.setattr(triangles_array, "_STEP0_CONTAINMENT", route)
+    jax.clear_caches()
+
+    def containing(vertices, point):
+        point = Point(point[0], point[1])
+        triangles = lattice.with_vertices(vertices)
+        # The routed mask itself, kept to _FUZZ_WIDE entries: `containing_indices` truncates at
+        # MAX_CONTAINING_SIZE, which a folded (deflected) table can exceed.
+        inside = triangles._step0_point_mask(point)
+        if inside is None:
+            inside = point.mask(triangles.triangles)
+        wide = jnp.where(inside, size=_FUZZ_WIDE, fill_value=-1)[0]
+        return jnp.concatenate(
+            (triangles.containing_indices(point), wide, jnp.sum(inside)[None])
+        )
+
+    batched = jax.jit(jax.vmap(containing, in_axes=(None, 0)))
+    vertices = jnp.asarray(vertices)
+
+    n = points.shape[0]
+    padded = np.concatenate(
+        (points, np.repeat(points[-1:], (-n) % _FUZZ_CHUNK, axis=0))
+    )
+    out = [
+        np.asarray(batched(vertices, jnp.asarray(padded[i : i + _FUZZ_CHUNK])))
+        for i in range(0, padded.shape[0], _FUZZ_CHUNK)
+    ]
+    return np.concatenate(out)[:n]
+
+
+_FUZZ_REFERENCE = {}
+
+# Width of the routed-mask comparison (see `_containing_by_route`).
+_FUZZ_WIDE = 64
+
+
+def _fuzz_reference(name, limits, deflect, n_extra, monkeypatch):
+    if name not in _FUZZ_REFERENCE:
+        lattice, vertices = _fuzz_setup(limits, deflect)
+        points = _fuzz_points(limits, deflect, n_extra)
+        _FUZZ_REFERENCE[name] = (
+            points,
+            _containing_by_route("gather", lattice, vertices, points, monkeypatch),
+        )
+    return _FUZZ_REFERENCE[name]
+
+
+@pytest.mark.parametrize("name, limits, deflect, n_extra", STEP0_FUZZ_GEOMETRIES)
+def test__step0_fuzz_geometries_have_a_structured_layout(name, limits, deflect, n_extra):
+    """
+    Every fuzz geometry takes the structured route for real (no silent fall-back), and the
+    layout is hashable int-only aux data cached per geometry.
+    """
+    from autoarray.structures.triangles.coordinate_array import static_lattice_layout
+
+    lattice = _static_lattice(limits)
+    layout = lattice.with_vertices(lattice.vertices).step0_layout
+
+    assert layout is not None and layout.grid is not None
+    assert layout.n_rows * layout.n_cols == lattice.coordinates.shape[0]
+    assert hash(layout) == hash(static_lattice_layout(*[float(limits[k]) for k in (
+        "y_min", "y_max", "x_min", "x_max", "scale")]))
+    assert static_lattice_layout(
+        *[float(limits[k]) for k in ("y_min", "y_max", "x_min", "x_max", "scale")]
+    ) is layout
+
+
+@pytest.mark.parametrize("route", [r for r in STEP0_ROUTES if r != "gather"])
+@pytest.mark.parametrize("name, limits, deflect, n_extra", STEP0_FUZZ_GEOMETRIES)
+def test__step0_route_is_bit_identical_to_gather(
+    name, limits, deflect, n_extra, route, monkeypatch
+):
+    """
+    The bit-identity fuzz: each route keeps exactly the triangles the general gather path keeps,
+    in the same order, for every vertex (exact ties), edge midpoint, centroid and random point
+    of each geometry, with the vertex table traced under ``jit`` + ``vmap``.
+    """
+    points, reference = _fuzz_reference(name, limits, deflect, n_extra, monkeypatch)
+    lattice, vertices = _fuzz_setup(limits, deflect)
+
+    result = _containing_by_route(route, lattice, vertices, points, monkeypatch)
+
+    mismatched = np.flatnonzero(np.any(result != reference, axis=1))
+    assert mismatched.size == 0, (
+        f"{route} on {name}: {mismatched.size} of {points.shape[0]} points differ from gather, "
+        f"first at {points[mismatched[0]]}: {result[mismatched[0]]} vs {reference[mismatched[0]]}"
+    )
+
+    # The fuzz really exercises ties (vertices kept by several triangles) and misses, and the
+    # wide comparison covers every contained triangle.
+    contained = reference[:, -1]
+    assert np.any(contained >= 2)
+    assert np.any(contained == 0)
+    assert np.all(contained < _FUZZ_WIDE)
+
+
+@pytest.mark.parametrize("route", STEP0_ROUTES)
+def test__step0_refinement_path_is_unchanged(route, monkeypatch):
+    """
+    Only the static step-0 lattice carries a layout. Every derived lattice of a solver-style
+    refinement (kept -> neighbourhood -> up-sample) drops it, so its containment takes the
+    general path on every route and matches the gather path exactly; a non-`Point` shape on the
+    static lattice takes the general path too.
+    """
+    from autoarray.structures.triangles.shape import Circle
+
+    lattice = _static_lattice(SOLVER_LIMITS)
+    vertices = _deflected(lattice.vertices)
+    source = tuple(vertices[4321])
+
+    def refine():
+        step0 = lattice.with_vertices(jnp.asarray(vertices))
+        kept = lattice.for_indexes(step0.containing_indices(Point(*source)))
+        up_sampled = kept.neighborhood().up_sample()
+        refined = up_sampled.with_vertices(jnp.asarray(_deflected(up_sampled.vertices)))
+        circle = step0.containing_indices(Circle(source[0], source[1], radius=0.3))
+        return (
+            [kept, kept.neighborhood(), up_sampled],
+            refined,
+            (
+                np.asarray(step0.containing_indices(Point(*source))),
+                np.asarray(refined.containing_indices(Point(*source))),
+                np.asarray(circle),
+            ),
+        )
+
+    monkeypatch.setattr(triangles_array, "_STEP0_CONTAINMENT", route)
+    derived, refined, outputs = refine()
+
+    for triangles in derived:
+        assert triangles.step0_layout is None
+        assert triangles.vertex_table is None
+    assert refined.step0_layout is None
+
+    monkeypatch.setattr(triangles_array, "_STEP0_CONTAINMENT", "gather")
+    _, _, expected = refine()
+
+    for output, reference in zip(outputs, expected):
+        assert np.array_equal(output, reference)
+    assert np.sum(outputs[0] >= 0) >= 2
+
+
+def test__step0_default_route_has_no_triangle_gather():
+    """
+    The HLO guard: the optimised HLO of the default step-0 containment on the solver lattice
+    carries no gather that materialises the ``(23 283, 3, 2)`` triangle array (XLA emits it as a
+    ``f64[69849,1,2]`` gather on the general path). The vertex table is a traced argument -- a
+    closure would let XLA constant-fold the gather away. Red on main (the general path).
+    """
+    lattice = _static_lattice(SOLVER_LIMITS)
+    n = lattice.coordinates.shape[0]
+
+    def containing(vertices, point):
+        return lattice.with_vertices(vertices).containing_indices(
+            Point(point[0], point[1])
+        )
+
+    jax.clear_caches()
+    compiled = (
+        jax.jit(containing)
+        .lower(lattice.vertices, jnp.array([0.1, 0.2]))
+        .compile()
+        .as_text()
+    )
+
+    gathered = []
+    for shape in re.findall(r"= \w+\[([\d,]*)\]\S* gather\(", compiled):
+        gathered.append(int(np.prod([int(d) for d in shape.split(",") if d])))
+
+    assert f"f64[{n},3,2]" not in compiled
+    assert all(size < 3 * n * 2 for size in gathered), (
+        f"step-0 containment gathers {gathered} elements; the triangle array is {3 * n * 2}"
+    )

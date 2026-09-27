@@ -216,7 +216,9 @@ class ArrayTriangles(AbstractTriangles):
         import jax.numpy as jnp
 
         inside = None
-        if self.step0_layout is not None and isinstance(shape, Point):
+        # Exactly `Point`: `Circle`, `Triangle`, `Polygon` and `Square` subclass `Point` but
+        # override `mask`, so they must keep the general path.
+        if self.step0_layout is not None and type(shape) is Point:
             inside = self._step0_point_mask(shape)
         if inside is None:
             inside = shape.mask(self.triangles)
