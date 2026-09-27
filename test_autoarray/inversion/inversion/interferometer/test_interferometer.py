@@ -1176,3 +1176,37 @@ def test__interferometer_mapping__curvature_matrix_and_data_vector_evaluated_onc
 
     assert counts == {"curvature_matrix": 1, "data_vector": 1}
     assert log_evidence_terms == reference
+
+
+def test__operated_mapping_matrix_list__transform_performed_once_per_linear_obj(
+    interferometer_7_no_fft, rectangular_mapper_7x7_3x3, monkeypatch
+):
+    # The dense (mapping) route reaches `operated_mapping_matrix_list` from the
+    # curvature matrix / data vector (via `operated_mapping_matrix`) and again from
+    # `mapped_reconstructed_data_dict`. It must be cached so the Fourier transform of
+    # each linear object's mapping matrix happens once per inversion.
+    calls = []
+
+    transformer_cls = type(interferometer_7_no_fft.transformer)
+    transform_mapping_matrix = transformer_cls.transform_mapping_matrix
+
+    def counted(self, *args, **kwargs):
+        calls.append(1)
+        return transform_mapping_matrix(self, *args, **kwargs)
+
+    monkeypatch.setattr(transformer_cls, "transform_mapping_matrix", counted)
+
+    inversion = aa.Inversion(
+        dataset=interferometer_7_no_fft,
+        linear_obj_list=[rectangular_mapper_7x7_3x3],
+        settings=aa.Settings(),
+    )
+
+    assert isinstance(inversion, aa.InversionInterferometerMapping)
+
+    inversion.log_det_curvature_reg_matrix_term
+    inversion.reconstruction
+    inversion.mapped_reconstructed_operated_data
+    inversion.mapped_reconstructed_data
+
+    assert len(calls) == 1

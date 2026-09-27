@@ -299,8 +299,17 @@ class AbstractInversion:
 
         If there are multiple linear objects, the blurred mapping matrices are stacked such that their simultaneous
         linear equations are solved simultaneously.
+
+        The dataset-specific `operated_mapping_matrix_list` is itself cached, so for a single linear object its
+        matrix is returned directly rather than copied via `hstack`, avoiding holding two identical copies of
+        the (large) operated mapping matrix in memory.
         """
-        return self._xp.hstack(self.operated_mapping_matrix_list)
+        operated_mapping_matrix_list = self.operated_mapping_matrix_list
+
+        if len(operated_mapping_matrix_list) == 1:
+            return operated_mapping_matrix_list[0]
+
+        return self._xp.hstack(operated_mapping_matrix_list)
 
     @property
     def data_vector(self) -> np.ndarray:

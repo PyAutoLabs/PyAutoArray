@@ -116,7 +116,7 @@ class AbstractInversionImaging(AbstractInversion):
         """
         return [linear_obj.mapping_matrix for linear_obj in self.linear_obj_list]
 
-    @property
+    @cached_property
     def operated_mapping_matrix_list(self) -> List[np.ndarray]:
         """
         The `operated_mapping_matrix` of a linear object describes the mappings between the observed data's values and

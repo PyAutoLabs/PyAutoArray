@@ -1,6 +1,8 @@
 import numpy as np
 from typing import Dict, List, Optional, Union
 
+from autonerves import cached_property
+
 from autoarray import exc
 from autoarray.dataset.interferometer.dataset import Interferometer
 from autoarray.inversion.inversion.dataset_interface import DatasetInterface
@@ -61,7 +63,7 @@ class AbstractInversionInterferometer(AbstractInversion):
     def mask(self) -> Mask2D:
         return self.transformer.real_space_mask
 
-    @property
+    @cached_property
     def operated_mapping_matrix_list(self) -> List[np.ndarray]:
         """
         The `operated_mapping_matrix` of a linear object describes the mappings between the observed data's values
