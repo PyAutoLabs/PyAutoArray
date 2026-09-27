@@ -10,7 +10,7 @@ from autoarray.structures.triangles.shape import Point
 from autoarray.structures.triangles.shape import Shape
 from autoarray.structures.triangles.shape import _barycentric_contains
 
-MAX_CONTAINING_SIZE = 15
+MAX_CONTAINING_SIZE = 20
 
 # Private A/B switch for the step-0 containment route (point-source CPU phase 4b,
 # PyAutoArray#579). It only affects `ArrayTriangles` built by
