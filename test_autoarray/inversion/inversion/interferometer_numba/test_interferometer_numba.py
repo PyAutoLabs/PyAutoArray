@@ -512,3 +512,81 @@ def test__existing_sparse_path_is_unchanged_when_the_gate_rejects_the_geometry()
         rtol=1.0e-12,
         atol=0.0,
     )
+
+
+@pytest.mark.parametrize("parallel", [False, True])
+def test__numba_inversion__curvature_matrix_and_data_vector_evaluated_once_per_likelihood(
+    monkeypatch, parallel
+):
+    """
+    `fast_chi_squared`, `curvature_reg_matrix` and `reconstruction` all read `curvature_matrix`
+    (F, via the numba `curvature_matrix_diag`) and `data_vector` (D). The `direct_conv` kernel
+    must run once per inversion, not once per reader (autolens_profiling #326: F twice and
+    D four times on one figure of merit).
+    """
+    import functools
+
+    from autoarray.inversion.inversion.interferometer_numba import sparse as numba_sparse
+
+    monkeypatch.setattr(numba_sparse, "_numba_parallel", lambda: parallel)
+
+    mask, _, dataset_sparse = _dataset_from()
+
+    mapper = _delaunay_mapper_from(mask=mask)
+
+    def log_evidence_terms_from(inversion):
+        return (
+            float(inversion.fast_chi_squared)
+            + float(inversion.regularization_term)
+            + float(inversion.log_det_curvature_reg_matrix_term)
+            - float(inversion.log_det_regularization_matrix_term)
+        )
+
+    reference = log_evidence_terms_from(
+        InversionInterferometerSparseNumba(
+            dataset=dataset_sparse, linear_obj_list=[mapper], xp=np
+        )
+    )
+
+    counts = {"kernel": 0, "data_vector": 0}
+
+    def counted(kernel):
+        @functools.wraps(kernel)
+        def wrapper(*args, **kwargs):
+            counts["kernel"] += 1
+            return kernel(*args, **kwargs)
+
+        return wrapper
+
+    monkeypatch.setattr(
+        numba_util, "curvature_direct_conv", counted(numba_util.curvature_direct_conv)
+    )
+    parallel_kernel = numba_util.direct_conv_parallel_kernel
+    monkeypatch.setattr(
+        numba_util,
+        "direct_conv_parallel_kernel",
+        lambda: counted(parallel_kernel()),
+    )
+
+    descriptor = InversionInterferometerSparse.__dict__["data_vector"]
+    func = descriptor.fget if isinstance(descriptor, property) else descriptor.func
+
+    @functools.wraps(func)
+    def counted_data_vector(self):
+        counts["data_vector"] += 1
+        return func(self)
+
+    monkeypatch.setattr(
+        InversionInterferometerSparse,
+        "data_vector",
+        type(descriptor)(counted_data_vector),
+    )
+
+    inversion = InversionInterferometerSparseNumba(
+        dataset=dataset_sparse, linear_obj_list=[mapper], xp=np
+    )
+
+    log_evidence_terms = log_evidence_terms_from(inversion)
+
+    assert counts == {"kernel": 1, "data_vector": 1}
+    assert log_evidence_terms == reference
