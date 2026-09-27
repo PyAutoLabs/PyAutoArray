@@ -1,6 +1,8 @@
 import numpy as np
 from typing import Dict, List, Optional, Union
 
+from autonerves import cached_property
+
 from autoarray import exc
 from autoarray.dataset.interferometer.dataset import Interferometer
 from autoarray.inversion.inversion.dataset_interface import DatasetInterface
@@ -67,7 +69,7 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
             preloads=preloads,
         )
 
-    @property
+    @cached_property
     def data_vector(self) -> np.ndarray:
         """
         The `data_vector` is a 1D vector whose values are solved for by the simultaneous linear equations constructed
@@ -129,7 +131,7 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
             xp=self._xp,
         )
 
-    @property
+    @cached_property
     def curvature_matrix(self) -> np.ndarray:
         """
         The `curvature_matrix` is a 2D matrix which uses the mappings between the data and the linear objects to
@@ -187,7 +189,7 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
 
         return curvature_matrix
 
-    @property
+    @cached_property
     def curvature_matrix_diag(self) -> np.ndarray:
         """
         The `curvature_matrix` is a 2D matrix which uses the mappings between the data and the linear objects to

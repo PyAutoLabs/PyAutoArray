@@ -1044,3 +1044,135 @@ def test__interferometer_sparse_operator__numpy_inversion_matches_jax_inversion(
         ).max()
 
         assert difference_sparse <= max(10.0 * difference_dense, 1.0e-14)
+
+
+def _count_evaluations(monkeypatch, cls, name, counts):
+    """
+    Wrap the body of the `cls.name` property with a counter while keeping its descriptor
+    type, so a `cached_property` stays cached (and a plain `property` stays uncached) and
+    the count is the number of times the body actually runs.
+    """
+    import functools
+
+    descriptor = cls.__dict__[name]
+    func = descriptor.fget if isinstance(descriptor, property) else descriptor.func
+
+    @functools.wraps(func)
+    def counted(self):
+        counts[name] += 1
+        return func(self)
+
+    monkeypatch.setattr(cls, name, type(descriptor)(counted))
+
+
+def _log_evidence_terms_from(inversion):
+    """
+    The inversion terms of `FitInterferometer.log_evidence`, which is what a figure of merit
+    evaluates: the fast chi-squared (reads F, D and the reconstruction), the regularization
+    term and both log-determinants (the cached `curvature_reg_matrix` reads F).
+    """
+    return (
+        float(inversion.fast_chi_squared)
+        + float(inversion.regularization_term)
+        + float(inversion.log_det_curvature_reg_matrix_term)
+        - float(inversion.log_det_regularization_matrix_term)
+    )
+
+
+def test__interferometer_sparse_operator__curvature_matrix_and_data_vector_evaluated_once_per_likelihood(
+    monkeypatch,
+):
+    """
+    `fast_chi_squared`, `curvature_reg_matrix` and `reconstruction` all read `curvature_matrix`
+    (F) and `data_vector` (D). Each must be built once per inversion, not once per reader:
+    on the NumPy path nothing merges the repeated builds, which were ~45 % of an alma call
+    (autolens_profiling #326).
+    """
+    mask, _, _, dataset_sparse = _sparse_parity_setup()
+
+    mapper = _mapper_from(
+        mask=mask, pixels=9, shape=(3, 3), regularization=aa.reg.Constant(coefficient=1.0)
+    )
+
+    # Built directly (not via `aa.Inversion`) so the NumPy FFT class runs even when numba is
+    # installed and the factory would route to `InversionInterferometerSparseNumba`.
+    def inversion_from():
+        return aa.InversionInterferometerSparse(
+            dataset=dataset_sparse, linear_obj_list=[mapper], xp=np
+        )
+
+    reference = _log_evidence_terms_from(inversion_from())
+
+    counts = {
+        "curvature_matrix_diag": 0,
+        "data_vector": 0,
+        "curvature_matrix_diag_from": 0,
+    }
+
+    _count_evaluations(
+        monkeypatch, aa.InversionInterferometerSparse, "curvature_matrix_diag", counts
+    )
+    _count_evaluations(
+        monkeypatch, aa.InversionInterferometerSparse, "data_vector", counts
+    )
+
+    from autoarray.inversion.inversion.interferometer.inversion_interferometer_util import (
+        InterferometerSparseOperator,
+    )
+
+    curvature_matrix_diag_from = InterferometerSparseOperator.curvature_matrix_diag_from
+
+    def counted_curvature_matrix_diag_from(self, *args, **kwargs):
+        counts["curvature_matrix_diag_from"] += 1
+        return curvature_matrix_diag_from(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        InterferometerSparseOperator,
+        "curvature_matrix_diag_from",
+        counted_curvature_matrix_diag_from,
+    )
+
+    inversion = inversion_from()
+
+    log_evidence_terms = _log_evidence_terms_from(inversion)
+
+    assert counts == {
+        "curvature_matrix_diag": 1,
+        "data_vector": 1,
+        "curvature_matrix_diag_from": 1,
+    }
+    assert log_evidence_terms == reference
+
+
+def test__interferometer_mapping__curvature_matrix_and_data_vector_evaluated_once_per_likelihood(
+    monkeypatch,
+):
+    """
+    The dense mapping inversion's `curvature_matrix` and `data_vector` are cached per inversion
+    too, as the imaging mapping inversion's are.
+    """
+    mask, _, dataset, _ = _sparse_parity_setup()
+
+    mapper = _mapper_from(
+        mask=mask, pixels=9, shape=(3, 3), regularization=aa.reg.Constant(coefficient=1.0)
+    )
+
+    reference = _log_evidence_terms_from(
+        aa.Inversion(dataset=dataset, linear_obj_list=[mapper])
+    )
+
+    counts = {"curvature_matrix": 0, "data_vector": 0}
+
+    for name in counts:
+        _count_evaluations(
+            monkeypatch, aa.InversionInterferometerMapping, name, counts
+        )
+
+    inversion = aa.Inversion(dataset=dataset, linear_obj_list=[mapper])
+
+    assert isinstance(inversion, aa.InversionInterferometerMapping)
+
+    log_evidence_terms = _log_evidence_terms_from(inversion)
+
+    assert counts == {"curvature_matrix": 1, "data_vector": 1}
+    assert log_evidence_terms == reference

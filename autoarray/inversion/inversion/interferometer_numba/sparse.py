@@ -181,7 +181,7 @@ class InversionInterferometerSparseNumba(InversionInterferometerSparse):
 
         return inputs
 
-    @property
+    @cached_property
     def curvature_matrix_diag(self) -> np.ndarray:
         """
         `F = Aᵀ W~ A` for the inversion's single mapper, from the `direct_conv` numba
