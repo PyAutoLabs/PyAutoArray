@@ -1176,3 +1176,148 @@ def test__interferometer_mapping__curvature_matrix_and_data_vector_evaluated_onc
 
     assert counts == {"curvature_matrix": 1, "data_vector": 1}
     assert log_evidence_terms == reference
+
+
+def _sparse_interface_setup():
+    mask = aa.Mask2D.circular(shape_native=(10, 10), pixel_scales=1.0, radius=3.0)
+
+    rng = np.random.default_rng(seed=21)
+    n_visibilities = 30
+    data = rng.normal(size=n_visibilities) + 1j * rng.normal(size=n_visibilities)
+    sigma = rng.uniform(0.5, 2.0, size=n_visibilities)
+
+    dataset = aa.Interferometer(
+        data=aa.Visibilities(visibilities=data),
+        noise_map=aa.VisibilitiesNoiseMap(visibilities=sigma + 1j * sigma),
+        uv_wavelengths=rng.normal(size=(n_visibilities, 2)),
+        real_space_mask=mask,
+        transformer_class=aa.TransformerDFT,
+    )
+
+    dataset_sparse = dataset.apply_sparse_operator(use_jax=False)
+
+    mapper = _mapper_from(
+        mask=mask, pixels=16, shape=(4, 4), regularization=aa.reg.Constant(1.0)
+    )
+
+    return dataset_sparse, mapper
+
+
+def _interface_from(dataset_sparse, data):
+    return aa.DatasetInterface(
+        data=data,
+        noise_map=dataset_sparse.noise_map,
+        grids=dataset_sparse.grids,
+        transformer=dataset_sparse.transformer,
+        sparse_operator=dataset_sparse.sparse_operator,
+    )
+
+
+def test__fast_chi_squared__data_none_uses_the_sparse_operator_data_term():
+    dataset_sparse, mapper = _sparse_interface_setup()
+
+    inversion_array = aa.Inversion(
+        dataset=_interface_from(dataset_sparse, data=dataset_sparse.data),
+        linear_obj_list=[mapper],
+    )
+    inversion_scalar = aa.Inversion(
+        dataset=_interface_from(dataset_sparse, data=None),
+        linear_obj_list=[mapper],
+    )
+
+    assert isinstance(inversion_scalar, aa.InversionInterferometerSparse)
+
+    # `apply_sparse_operator` computes `data_term` with the expression term 3 reduces with,
+    # so the two paths agree bit-for-bit.
+    assert inversion_scalar.fast_chi_squared == inversion_array.fast_chi_squared
+
+    # And both equal the chi-squared of the residual visibilities.
+    residual_map = aa.util.fit.residual_map_from(
+        data=dataset_sparse.data,
+        model_data=inversion_array.mapped_reconstructed_operated_data,
+    )
+    chi_squared = aa.util.fit.chi_squared_complex_from(
+        chi_squared_map=aa.util.fit.chi_squared_map_complex_from(
+            residual_map=residual_map, noise_map=dataset_sparse.noise_map
+        )
+    )
+
+    assert inversion_scalar.fast_chi_squared == pytest.approx(chi_squared, 1.0e-8)
+
+
+def test__fast_chi_squared__data_given__the_cached_data_term_is_ignored():
+    dataset_sparse, mapper = _sparse_interface_setup()
+
+    # Stand-in for profile-subtracted data: the interface's data differs from the data the
+    # operator's `data_term` was built from, so term 3 must be reduced from the interface.
+    subtracted = aa.Visibilities(visibilities=0.5 * dataset_sparse.data.array)
+
+    inversion = aa.Inversion(
+        dataset=_interface_from(dataset_sparse, data=subtracted),
+        linear_obj_list=[mapper],
+    )
+    inversion_scalar = aa.Inversion(
+        dataset=_interface_from(dataset_sparse, data=None),
+        linear_obj_list=[mapper],
+    )
+
+    noise_map = dataset_sparse.noise_map.array
+
+    term_3 = np.sum(subtracted.array.real**2.0 / noise_map.real**2.0) + np.sum(
+        subtracted.array.imag**2.0 / noise_map.imag**2.0
+    )
+
+    difference = inversion.fast_chi_squared - inversion_scalar.fast_chi_squared
+
+    assert difference == pytest.approx(
+        term_3 - dataset_sparse.sparse_operator.data_term, rel=1.0e-10
+    )
+
+
+def test__fast_chi_squared__data_none_without_a_data_term__raises():
+    dataset_sparse, mapper = _sparse_interface_setup()
+
+    operator = dataset_sparse.sparse_operator
+
+    operator_without_scalars = (
+        aa.InterferometerSparseOperator.from_nufft_precision_operator(
+            nufft_precision_operator=operator.nufft_precision_operator,
+            dirty_image=operator.dirty_image,
+        )
+    )
+
+    interface = aa.DatasetInterface(
+        data=None,
+        noise_map=dataset_sparse.noise_map,
+        grids=dataset_sparse.grids,
+        transformer=dataset_sparse.transformer,
+        sparse_operator=operator_without_scalars,
+    )
+
+    inversion = aa.Inversion(dataset=interface, linear_obj_list=[mapper])
+
+    with pytest.raises(aa.exc.InversionException):
+        inversion.fast_chi_squared
+
+
+def test__fast_chi_squared__data_none__jax_matches_numpy():
+    pytest.importorskip("jax")
+
+    import jax.numpy as jnp
+
+    dataset_sparse, mapper = _sparse_interface_setup()
+
+    inversion_np = aa.Inversion(
+        dataset=_interface_from(dataset_sparse, data=None),
+        linear_obj_list=[mapper],
+        xp=np,
+    )
+    inversion_jax = aa.Inversion(
+        dataset=_interface_from(dataset_sparse, data=None),
+        linear_obj_list=[mapper],
+        xp=jnp,
+    )
+
+    assert float(inversion_jax.fast_chi_squared) == pytest.approx(
+        float(inversion_np.fast_chi_squared), rel=1.0e-7
+    )

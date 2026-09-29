@@ -53,6 +53,7 @@ from .inversion.inversion.interferometer.sparse import (
 from .inversion.inversion.interferometer.mapping import InversionInterferometerMapping
 from .inversion.inversion.interferometer.inversion_interferometer_util import (
     InterferometerSparseOperator,
+    SparseTerms,
 )
 from .inversion.linear_obj.linear_obj import LinearObj
 from .inversion.linear_obj.func_list import AbstractLinearObjFuncList

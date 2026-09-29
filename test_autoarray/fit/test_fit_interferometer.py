@@ -308,3 +308,85 @@ def test__dirty_chi_squared_map__equals_transformer_image_from_chi_squared_map(
     )
 
     assert (fit_interferometer_7.dirty_chi_squared_map == dirty_chi_squared_map).all()
+
+
+# ---------------------------------------------------------------------------
+# Tests: noise normalization cached on the sparse operator
+# ---------------------------------------------------------------------------
+
+
+def _sparse_dataset(noise_normalization):
+    dataset, _ = _make_dataset()
+
+    sparse_operator = aa.InterferometerSparseOperator.from_nufft_precision_operator(
+        nufft_precision_operator=np.ones((4, 4)),
+        dirty_image=np.zeros(4),
+        noise_normalization=noise_normalization,
+    )
+
+    return aa.Interferometer(
+        data=dataset.data,
+        noise_map=dataset.noise_map,
+        uv_wavelengths=dataset.uv_wavelengths,
+        real_space_mask=dataset.real_space_mask,
+        sparse_operator=sparse_operator,
+    )
+
+
+def test__noise_normalization__reads_the_sparse_operator_scalar_when_present():
+    dataset = _sparse_dataset(noise_normalization=123.0)
+
+    fit = aa.m.MockFitInterferometer(
+        dataset=dataset,
+        use_mask_in_fit=False,
+        model_data=aa.Visibilities(visibilities=[1.0 + 2.0j, 3.0 + 4.0j]),
+    )
+
+    assert fit.noise_normalization == 123.0
+
+
+def test__noise_normalization__falls_back_to_the_noise_map_without_the_scalar():
+    dataset = _sparse_dataset(noise_normalization=None)
+
+    fit = aa.m.MockFitInterferometer(
+        dataset=dataset,
+        use_mask_in_fit=False,
+        model_data=aa.Visibilities(visibilities=[1.0 + 2.0j, 3.0 + 4.0j]),
+    )
+
+    assert fit.noise_normalization == pytest.approx(
+        4.0 * np.log(2 * np.pi * 4.0), 1.0e-12
+    )
+
+
+def test__noise_normalization__a_replaced_noise_map_ignores_the_scalar():
+    dataset = _sparse_dataset(noise_normalization=123.0)
+
+    noise_map = aa.VisibilitiesNoiseMap(visibilities=[1.0 + 1.0j, 1.0 + 1.0j])
+
+    fit = aa.m.MockFitInterferometer(
+        dataset=dataset,
+        use_mask_in_fit=False,
+        model_data=aa.Visibilities(visibilities=[1.0 + 2.0j, 3.0 + 4.0j]),
+        noise_map=noise_map,
+    )
+
+    assert fit.noise_normalization == pytest.approx(4.0 * np.log(2 * np.pi), 1.0e-12)
+
+
+def test__noise_normalization__apply_sparse_operator_scalar_matches_array_path():
+    dataset, _ = _make_dataset()
+
+    model_data = aa.Visibilities(visibilities=[1.0 + 2.0j, 3.0 + 4.0j])
+
+    fit_array = aa.m.MockFitInterferometer(
+        dataset=dataset, use_mask_in_fit=False, model_data=model_data
+    )
+    fit_sparse = aa.m.MockFitInterferometer(
+        dataset=dataset.apply_sparse_operator(),
+        use_mask_in_fit=False,
+        model_data=model_data,
+    )
+
+    assert fit_sparse.dataset.sparse_operator.noise_normalization is not None
+    assert fit_sparse.noise_normalization == fit_array.noise_normalization
