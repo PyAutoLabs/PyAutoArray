@@ -23,6 +23,18 @@ from autoarray.plot.utils import (
 from autoarray.inversion.plot.mapper_plots import plot_mapper
 from autoarray.structures.arrays.uniform_2d import Array2D
 
+
+def _is_array_free_interferometer(inversion) -> bool:
+    """
+    Whether ``inversion`` is an interferometer inversion of an array-free dataset (built by
+    ``Interferometer.from_stream`` / ``from_sparse_terms``), which has no transformer and so no
+    visibility-space ``mapped_reconstructed_operated_data_dict``: its reconstructed image is read
+    from ``mapped_reconstructed_data_dict`` directly. Imaging inversions have no ``transformer``
+    attribute and are unaffected.
+    """
+    return hasattr(type(inversion), "transformer") and inversion.transformer is None
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -91,6 +103,9 @@ def subplot_of_mapper(
 
     # panels 1-3: reconstructed operated data (plain, log10, + mesh grid overlay)
     def _recon_array():
+        if _is_array_free_interferometer(inversion):
+            return inversion.mapped_reconstructed_data_dict[mapper]
+
         array = inversion.mapped_reconstructed_operated_data_dict[mapper]
         from autoarray.structures.visibilities import Visibilities
 
@@ -129,7 +144,7 @@ def subplot_of_mapper(
             positions=positions,
             lines=lines,
         )
-    except (AttributeError, KeyError):
+    except (AttributeError, KeyError, exc.InversionException):
         pass
 
     # panels 4-5: source reconstruction zoomed / unzoomed
@@ -401,11 +416,14 @@ def subplot_mappings(
 
     # panel 1: reconstructed operated data
     try:
-        array = inversion.mapped_reconstructed_operated_data_dict[mapper]
-        from autoarray.structures.visibilities import Visibilities
-
-        if isinstance(array, Visibilities):
+        if _is_array_free_interferometer(inversion):
             array = inversion.mapped_reconstructed_data_dict[mapper]
+        else:
+            array = inversion.mapped_reconstructed_operated_data_dict[mapper]
+            from autoarray.structures.visibilities import Visibilities
+
+            if isinstance(array, Visibilities):
+                array = inversion.mapped_reconstructed_data_dict[mapper]
         plot_array(
             array,
             ax=axes[1],
@@ -419,7 +437,7 @@ def subplot_mappings(
             region_alpha=region_alpha,
             region_labels=region_labels,
         )
-    except (AttributeError, KeyError):
+    except (AttributeError, KeyError, exc.InversionException):
         pass
 
     pixel_values = inversion.reconstruction_dict[mapper]

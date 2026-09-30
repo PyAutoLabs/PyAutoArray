@@ -13,6 +13,54 @@ from autoarray import exc
 from autoarray import type as ty
 
 
+def dirty_model_image_natural_from(dataset, image) -> Array2D:
+    """
+    Returns the naturally weighted, normalised dirty image of the model visibilities of a real-space
+    `image`, `Re(F^H W F m) / sum(w)`, computed without a transformer or any visibility-sized array.
+
+    `W~ = Re(F^H W F)` is the operator cached on the dataset's `sparse_operator` (the one the sparse
+    inversion uses for its curvature matrix), so `W~ m / sum(w)` is one FFT convolution on the real-space
+    grid. It is the model counterpart of `Interferometer.dirty_image_natural` (the natural dirty image of
+    the data, `Re(F^H W d) / sum(w)`): their difference is the natural dirty residual map. It is available
+    on both dataset types -- an array-free one built by `from_stream` / `from_sparse_terms` and an in-memory
+    one after `apply_sparse_operator()` -- and is how the visualizers draw a model on an array-free dataset.
+
+    Parameters
+    ----------
+    dataset
+        The `Interferometer` dataset, which must carry a `sparse_operator`.
+    image
+        The model image `m` on the slim masked real-space grid of the dataset's `real_space_mask`.
+    """
+    sparse_operator = getattr(dataset, "sparse_operator", None)
+
+    if sparse_operator is None:
+        raise exc.DatasetException(
+            "The natural dirty model image `W~ m / sum(w)` needs the dataset's `sparse_operator`; call "
+            "`apply_sparse_operator()` on the dataset (an array-free dataset built by from_stream / "
+            "from_sparse_terms always carries one)."
+        )
+
+    sparse_terms = getattr(dataset, "sparse_terms", None)
+
+    if sparse_terms is not None:
+        sum_weights = float(sparse_terms.sum_weights)
+    else:
+        sum_weights = float(np.sum(dataset.noise_map.array.real**-2.0))
+
+    image = np.asarray(getattr(image, "array", image), dtype=np.float64)
+
+    operated_image = sparse_operator.operated_matrix_slim_from(
+        matrix_slim=image[:, None],
+        extent_index_for_masked_pixel=dataset.real_space_mask.extent_index_for_masked_pixel,
+        xp=np,
+    )[:, 0]
+
+    return Array2D(
+        values=np.asarray(operated_image) / sum_weights, mask=dataset.real_space_mask
+    )
+
+
 class FitInterferometer(FitDataset):
     def __init__(
         self,

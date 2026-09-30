@@ -516,3 +516,55 @@ def test__fit_interferometer__sparse_log_evidence_never_touches_visibility_maps(
     assert np.isfinite(fit.log_evidence)
     assert fit.figure_of_merit == fit.log_evidence
     assert touched == []
+
+
+def test__dirty_model_image_natural_from__matches_transformer_natural_dirty_image(
+    interferometer_7,
+):
+    from autoarray.fit.fit_interferometer import dirty_model_image_natural_from
+
+    dataset = interferometer_7.apply_sparse_operator()
+
+    image = aa.Array2D(
+        values=np.random.default_rng(seed=1).normal(
+            size=dataset.real_space_mask.pixels_in_mask
+        ),
+        mask=dataset.real_space_mask,
+    )
+
+    dirty_model_image = dirty_model_image_natural_from(dataset=dataset, image=image)
+
+    # The natural dirty image of the model visibilities, built exactly as
+    # `Interferometer.dirty_image_natural` builds it from the data.
+    noise_map = dataset.noise_map.array
+    visibilities = dataset.transformer.visibilities_from(image=image).array
+    weighted = aa.Visibilities(
+        visibilities=visibilities.real * noise_map.real**-2.0
+        + 1j * visibilities.imag * noise_map.imag**-2.0
+    )
+    expected = dataset.transformer.image_from(visibilities=weighted) / float(
+        np.sum(noise_map.real**-2.0)
+    )
+
+    assert isinstance(dirty_model_image, aa.Array2D)
+    assert dirty_model_image.mask is dataset.real_space_mask
+    np.testing.assert_allclose(
+        dirty_model_image.array,
+        expected.array,
+        rtol=1.0e-10,
+        atol=1.0e-10 * np.abs(expected.array).max(),
+    )
+
+
+def test__dirty_model_image_natural_from__no_sparse_operator__raises(
+    interferometer_7,
+):
+    from autoarray.fit.fit_interferometer import dirty_model_image_natural_from
+
+    image = aa.Array2D.ones(
+        shape_native=interferometer_7.real_space_mask.shape_native,
+        pixel_scales=interferometer_7.real_space_mask.pixel_scales,
+    ).apply_mask(mask=interferometer_7.real_space_mask)
+
+    with pytest.raises(aa.exc.DatasetException, match="sparse_operator"):
+        dirty_model_image_natural_from(dataset=interferometer_7, image=image)

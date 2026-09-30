@@ -108,3 +108,74 @@ def test__fit_sub_plots(fit_interferometer_7, plot_path, plot_patch):
     )
 
     assert str(Path(plot_path) / "fit_dirty_images.png") in plot_patch.paths
+
+
+def _array_free_from(dataset):
+    """
+    The array-free counterpart of an in-memory `Interferometer`: the same visibilities
+    streamed through `Interferometer.from_stream` in two chunks.
+    """
+    import autoarray as aa
+
+    uv_wavelengths = np.asarray(dataset.uv_wavelengths)
+    data = np.asarray(dataset.data.array)
+    noise_map = np.asarray(dataset.noise_map.array)
+
+    chunks = [
+        (uv_wavelengths[k0:k1], data[k0:k1], noise_map[k0:k1])
+        for k0, k1 in ((0, 3), (3, data.shape[0]))
+    ]
+
+    return aa.Interferometer.from_stream(chunks, dataset.real_space_mask)
+
+
+def test__fit_sub_plots__array_free_dataset(
+    interferometer_7, plot_path, plot_patch, monkeypatch
+):
+    pytest.importorskip("nufftax")
+
+    import autoarray as aa
+    from autoarray.fit.plot import fit_interferometer_plots
+
+    dataset = _array_free_from(interferometer_7)
+
+    fit = aa.m.MockFitInterferometer(dataset=dataset)
+
+    model_image = aa.Array2D(
+        values=np.ones(dataset.real_space_mask.pixels_in_mask),
+        mask=dataset.real_space_mask,
+    )
+
+    titles = []
+    plot_array = fit_interferometer_plots.plot_array
+
+    def _plot_array(array, *args, title=None, **kwargs):
+        titles.append(title)
+        return plot_array(array, *args, title=title, **kwargs)
+
+    monkeypatch.setattr(fit_interferometer_plots, "plot_array", _plot_array)
+
+    aplt.subplot_fit_interferometer(
+        fit=fit,
+        output_path=plot_path,
+        output_format="png",
+        model_image=model_image,
+    )
+
+    assert str(Path(plot_path) / "fit.png") in plot_patch.paths
+    assert titles == [
+        "Dirty Image (Natural)",
+        "Dirty Model Image (Natural)",
+        "Dirty Residual Map (Natural)",
+    ]
+
+    titles.clear()
+
+    aplt.subplot_fit_interferometer_dirty_images(
+        fit=fit,
+        output_path=plot_path,
+        output_format="png",
+    )
+
+    assert str(Path(plot_path) / "fit_dirty_images.png") in plot_patch.paths
+    assert titles == ["Dirty Image (Natural)"]
