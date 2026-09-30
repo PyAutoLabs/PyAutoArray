@@ -368,7 +368,9 @@ def reconstruction_positive_only_from(
         byte-identical to before this option existed): the Jacobi-preconditioned solve ``(D Q D) y = D q``
         governed by the ``nnls_jacobi_preconditioning`` config key. ``"raw"``: the forward PDIP solve runs on
         the un-preconditioned ``(Q, q)`` with the data-scaled tolerance
-        :func:`autoarray.util.jax_nnls.data_scaled_solver_tol` (or ``settings.nnls_solver_tol`` if set), and the
+        :func:`autoarray.util.jax_nnls.data_scaled_solver_tol` (or ``settings.nnls_solver_tol`` if set), its iterate
+        is polished by a few tight PDIP iterations on the Jacobi-scaled system and the polished iterate is returned
+        (PyAutoArray#594; ``stats["converged"]`` / ``stats["iterations"]`` describe the raw forward solve), and the
         gradient is the Jacobi-space relaxed-KKT pass as in ``"jacobi"`` -- see
         :func:`autoarray.util.jax_nnls.solve_nnls_primal_raw_forward`. Jacobi scaling makes the signal-free
         columns of linear-object-only (MGE) inversions, whose diagonal is only the
