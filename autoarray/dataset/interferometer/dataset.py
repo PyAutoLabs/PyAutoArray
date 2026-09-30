@@ -35,6 +35,7 @@ from autoarray.structures.visibilities import Visibilities
 from autoarray.structures.visibilities import VisibilitiesNoiseMap
 
 from autoarray import exc
+from autoarray.fit import fit_util
 from autoarray.inversion.inversion.interferometer import (
     inversion_interferometer_util,
 )
@@ -333,35 +334,7 @@ class Interferometer(AbstractDataset):
         if disable_jax():
             use_jax = False
 
-        noise_map_real = np.asarray(self.noise_map.real)
-        noise_map_imag = np.asarray(self.noise_map.imag)
-
-        if not np.allclose(noise_map_real, noise_map_imag):
-
-            unequal = ~np.isclose(noise_map_real, noise_map_imag)
-
-            denominator = np.maximum(np.abs(noise_map_real), np.abs(noise_map_imag))
-            relative_difference = np.abs(noise_map_real - noise_map_imag) / np.where(
-                denominator == 0.0, 1.0, denominator
-            )
-
-            raise exc.DatasetException(
-                "The sparse operator cannot be applied to this interferometer dataset because its "
-                "noise-map has unequal real and imaginary sigma.\n\n"
-                "The sparse operator's precision operator `W~ = Re(F^H W F)` is built from the "
-                "real-part noise sigma only (see `psf_precision_operator_from`, which passes "
-                "`noise_map_real` to `nufft_precision_operator_from`). That reduction is exact only "
-                "when every visibility has equal real and imaginary sigma "
-                "(`sigma_real == sigma_imag`).\n\n"
-                f"This dataset has {int(np.count_nonzero(unequal))} of {noise_map_real.size} "
-                "visibilities where the real and imaginary sigma differ (maximum relative difference "
-                f"{np.max(relative_difference):.3e}), so the sparse curvature matrix would silently "
-                "disagree with the dense path.\n\n"
-                "Either equalise the real and imaginary noise sigma of every visibility, or fit "
-                "without calling `apply_sparse_operator()` — the dense "
-                "`InversionInterferometerMapping` path handles unequal real and imaginary sigmas "
-                "correctly."
-            )
+        inversion_interferometer_util.check_noise_map_real_imag_equal(self.noise_map)
 
         if nufft_precision_operator is None:
 
@@ -411,9 +384,151 @@ class Interferometer(AbstractDataset):
             + 1j * self.data.imag * self.noise_map.imag**-2.0,
         )
 
+        # The two visibility-sum scalars of the likelihood, reduced once here so that neither
+        # `fast_chi_squared` (term 3) nor `FitInterferometer.noise_normalization` reduces over
+        # the visibility arrays on every likelihood call. The expressions are the ones those
+        # two reductions use, so the cached values are bit-for-bit what they would compute.
+        data_term = float(
+            np.sum(self.data.array.real**2.0 / self.noise_map.array.real**2.0)
+            + np.sum(self.data.array.imag**2.0 / self.noise_map.array.imag**2.0)
+        )
+        noise_normalization = float(
+            fit_util.noise_normalization_complex_from(noise_map=self.noise_map.array)
+        )
+
         sparse_operator = inversion_interferometer_util.InterferometerSparseOperator.from_nufft_precision_operator(
             nufft_precision_operator=nufft_precision_operator,
             dirty_image=dirty_image.array,
+            batch_size=batch_size,
+            data_term=data_term,
+            noise_normalization=noise_normalization,
+        )
+
+        return Interferometer(
+            real_space_mask=self.real_space_mask,
+            data=self.data,
+            noise_map=self.noise_map,
+            uv_wavelengths=self.uv_wavelengths,
+            transformer_class=lambda uv_wavelengths, real_space_mask: self.transformer,
+            sparse_operator=sparse_operator,
+        )
+
+    def apply_sparse_operator_from_chunks(
+        self,
+        chunks,
+        *,
+        batch_size: int = 128,
+        **accumulator_kwargs,
+    ):
+        """
+        Build the sparse operator by accumulating the visibilities one chunk at a time, rather
+        than from this dataset's resident arrays in one shot.
+
+        This is the chunked counterpart of `apply_sparse_operator`: every quantity the sparse
+        likelihood needs from the visibilities -- the NUFFT precision operator `W~`, the
+        noise-weighted dirty image, `sum(d^2 / sigma^2)` and `sum(log(2 pi sigma^2))` -- is a sum
+        over visibilities, so it is accumulated per chunk by
+        `inversion_interferometer_util.sparse_terms_from_chunks` into a `SparseTerms` record and
+        turned into an `InterferometerSparseOperator` by
+        `InterferometerSparseOperator.from_sparse_terms`. The result equals
+        `apply_sparse_operator()` to summation order (verified at `rtol=1e-12` by the test
+        suite), and the operator carries both scalars, so a fit on it never reduces over the
+        visibility arrays in its likelihood.
+
+        Chunk contract
+        --------------
+        `chunks` is any iterable (a list, or a generator reading from disk) of
+        `(uv_wavelengths, data, noise_map)` triples of `K` visibilities each, where `K` may
+        differ per chunk: `uv_wavelengths` a real `(K, 2)` array in wavelengths, `data` and
+        `noise_map` a `Visibilities`, a complex `(K,)` array or a real `(K, 2)` array of
+        (real, imag) columns. Every chunk must have equal real and imaginary noise sigma
+        (checked per chunk). The chunks must together be exactly this dataset's visibilities
+        (in any order) for the returned dataset to be self-consistent -- this method does not
+        check that.
+
+        Memory
+        ------
+        The accumulation holds one chunk at a time, so its peak memory is set by the chunk
+        size, not the dataset size. Holding the visibilities costs at least 48 B/visibility
+        (`data` and `noise_map` complex128, 16 B each; `uv_wavelengths` 2 x float64, 16 B), before
+        the transformer's own per-visibility state. Measured in pyuvimage on the same
+        accumulation (peak RSS over baseline, 400-pixel image, 4096-visibility chunks, fresh
+        process each; Discussion #13):
+
+        ======  ======================  =========================
+        N_vis   peak RSS of the stream  resident if held (48 B/vis)
+        ======  ======================  =========================
+        5e5     36 MB                   24 MB
+        1e6     36 MB                   48 MB
+        2e6     36 MB                   96 MB
+        4e6     36 MB                   192 MB
+        ======  ======================  =========================
+
+        i.e. flat across 8x, while the in-memory path grows linearly (~10 GB at 2e8
+        visibilities, a real ALMA MFS cube).
+
+        This method returns a dataset of the same shape as `apply_sparse_operator` -- this
+        dataset's `data`, `noise_map`, `uv_wavelengths` and transformer are retained, because
+        the visualizer, `save_attributes`/aggregator and dirty-image outputs still read them.
+        Dropping them (an array-free `Interferometer` built straight from a chunk stream) is a
+        follow-up that needs its own dataset contract; this method is the seam it builds on.
+
+        Parameters
+        ----------
+        chunks
+            The `(uv_wavelengths, data, noise_map)` chunks.
+        batch_size
+            The number of source-pixel columns processed per batch by the sparse operator.
+        accumulator_kwargs
+            Passed to `sparse_terms_from_chunks` (`transformer_class`, `method`, `eps`,
+            `chunk_size`, `chunk_k`, `use_jax`, `show_progress`). When not given,
+            `transformer_class`, `eps` and `chunk_size` follow this dataset's transformer (the
+            same defaults `psf_precision_operator_from` takes), so the accumulated terms match
+            `apply_sparse_operator()`.
+
+        Returns
+        -------
+        Interferometer
+            A new `Interferometer` dataset with the accumulated `InterferometerSparseOperator`
+            attached.
+
+        Raises
+        ------
+        exc.DatasetException
+            If any chunk has unequal real and imaginary noise sigma.
+        """
+        if disable_jax() and accumulator_kwargs.get("use_jax", False):
+            accumulator_kwargs["use_jax"] = False
+
+        transformer = self.transformer
+
+        if isinstance(transformer, TransformerNUFFT):
+            accumulator_kwargs.setdefault("eps", transformer.eps)
+            accumulator_kwargs.setdefault("chunk_size", transformer.chunk_size)
+
+            if "transformer_class" not in accumulator_kwargs:
+                transformer_eps = transformer.eps
+                transformer_chunk_size = transformer.chunk_size
+
+                def transformer_class(uv_wavelengths, real_space_mask):
+                    return TransformerNUFFT(
+                        uv_wavelengths=uv_wavelengths,
+                        real_space_mask=real_space_mask,
+                        eps=transformer_eps,
+                        chunk_size=transformer_chunk_size,
+                    )
+
+                accumulator_kwargs["transformer_class"] = transformer_class
+        else:
+            accumulator_kwargs.setdefault("transformer_class", type(transformer))
+
+        terms = inversion_interferometer_util.sparse_terms_from_chunks(
+            chunks, real_space_mask=self.real_space_mask, **accumulator_kwargs
+        )
+
+        sparse_operator = inversion_interferometer_util.InterferometerSparseOperator.from_sparse_terms(
+            terms,
+            real_space_mask=self.real_space_mask,
             batch_size=batch_size,
         )
 

@@ -82,7 +82,7 @@ class AbstractInversionInterferometer(AbstractInversion):
             operated_mapping_matrix_override = linear_obj.operated_mapping_matrix_override
 
             if operated_mapping_matrix_override is not None:
-                expected_shape = (self.data.shape[0], linear_obj.params)
+                expected_shape = (self.noise_map.shape[0], linear_obj.params)
 
                 if tuple(operated_mapping_matrix_override.shape) != expected_shape:
                     raise exc.InversionException(
@@ -170,6 +170,11 @@ class AbstractInversionInterferometer(AbstractInversion):
         where `s` is the reconstruction vector, `F` is the curvature matrix, `D` is the data vector,
         and `d_r`/`d_i` are the real/imaginary parts of the observed visibilities.
 
+        When the dataset interface's `data` is `None` the third term is read from the scalar
+        `sparse_operator.data_term` cached when the operator was built, so no visibility array
+        is reduced over. That is only correct when the data fitted is the raw data the operator
+        was built from (nothing subtracted), which is the contract of passing `data=None`.
+
         This avoids computing the full mapped reconstructed visibilities and is faster than computing
         `chi_squared` via the residual visibilities when many source pixels are used.
         """
@@ -190,10 +195,31 @@ class AbstractInversionInterferometer(AbstractInversion):
             ]
         )
 
-        chi_squared_term_3 = xp.sum(
-            self.dataset.data.array.real**2.0 / self.dataset.noise_map.array.real**2.0
-        ) + xp.sum(
-            self.dataset.data.array.imag**2.0 / self.dataset.noise_map.array.imag**2.0
-        )
+        if self.dataset.data is None:
+            # The interface carries no visibilities (e.g. a pixelization-only fit on the sparse
+            # path, where nothing was subtracted from the data), so term 3 is the scalar
+            # `d^T N^-1 d` the sparse operator cached when it was built from the raw data.
+            chi_squared_term_3 = getattr(
+                self.dataset.sparse_operator, "data_term", None
+            )
+
+            if chi_squared_term_3 is None:
+                raise exc.InversionException(
+                    "The dataset input to this interferometer inversion has `data=None`, which "
+                    "is only valid when its `sparse_operator` carries a precomputed `data_term` "
+                    "(sum(d_r^2/sigma_r^2) + sum(d_i^2/sigma_i^2)) -- e.g. one built by "
+                    "`Interferometer.apply_sparse_operator` or "
+                    "`Interferometer.apply_sparse_operator_from_chunks`. This dataset's "
+                    "sparse operator has none, so `fast_chi_squared` cannot be computed. "
+                    "Pass the visibilities as `data` instead."
+                )
+        else:
+            chi_squared_term_3 = xp.sum(
+                self.dataset.data.array.real**2.0
+                / self.dataset.noise_map.array.real**2.0
+            ) + xp.sum(
+                self.dataset.data.array.imag**2.0
+                / self.dataset.noise_map.array.imag**2.0
+            )
 
         return chi_squared_term_1 + chi_squared_term_2 + chi_squared_term_3

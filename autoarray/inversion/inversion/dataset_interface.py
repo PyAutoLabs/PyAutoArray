@@ -33,6 +33,14 @@ class DatasetInterface:
         data
             The array of the image data containing the signal that is fitted (in PyAutoGalaxy and PyAutoLens the
             recommended units are electrons per second).
+
+            For an interferometer inversion on the sparse path this may be `None`, meaning "the raw visibilities
+            the `sparse_operator` was built from, unmodified". It is only valid with a `sparse_operator` that
+            carries a precomputed `data_term` (built by `Interferometer.apply_sparse_operator` or
+            `apply_sparse_operator_from_chunks`): the sparse inversion's data vector already comes from the
+            operator's cached dirty image, and `fast_chi_squared` then reads the operator's `data_term` instead
+            of reducing over the visibilities, so no visibility array is touched by the likelihood. Output-only
+            quantities that need the data itself (e.g. `data_subtracted_dict`) are unavailable in that case.
         noise_map
             An array describing the RMS standard deviation error in each pixel used for computing quantities like the
             chi-squared in a fit (in PyAutoGalaxy and PyAutoLens the recommended units are electrons per second).
