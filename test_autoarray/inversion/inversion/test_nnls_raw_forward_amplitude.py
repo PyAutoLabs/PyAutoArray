@@ -233,7 +233,15 @@ def test__raw_forward_source_flux(jnp, path, name):
 @requires_jax
 @pytest.mark.parametrize("name", NAMES)
 def test__raw_forward_jit_matches_eager(jnp, name):
-    """``jax.jit`` of the reconstruction returns the eager value exactly, end-to-end and for the solver alone."""
+    """``jax.jit`` of the reconstruction returns the eager value: end-to-end to a few ULP, and exactly for
+    the solver alone.
+
+    End-to-end, XLA's CPU code generation may reassociate the Jacobi scaling and the final ``x / D`` around
+    the solver, which moves entries by a few ULP and differs between runners: the GitHub Actions Python 3.12
+    leg (jax 0.11.2, same as the green 3.13 leg) reproduced eager to 5.4e-11 relative / 9e-12 absolute on
+    every fixture system (PyAutoArray#595), so the end-to-end check is a tight ``allclose`` rather than
+    bit-exact. The solver-alone check below stays bit-exact.
+    """
     import jax
 
     Q, q, _ = SYSTEMS[name]
@@ -242,7 +250,13 @@ def test__raw_forward_jit_matches_eager(jnp, name):
     def f(Q_, q_):
         return _dispatch(jnp, Q_, q_)
 
-    np.testing.assert_array_equal(np.asarray(jax.jit(f)(Qj, qj)), np.asarray(f(Qj, qj)))
+    eager = np.asarray(f(Qj, qj))
+    np.testing.assert_allclose(
+        np.asarray(jax.jit(f)(Qj, qj)),
+        eager,
+        rtol=1e-9,
+        atol=1e-12 * np.abs(eager).max(),
+    )
 
     # The solver alone, on inputs built outside the traced function: tracing the Jacobi scaling together with
     # the final ``x / D`` lets XLA reassociate them and moves ``y`` by 1 ULP (seen on the unfixed base too),
