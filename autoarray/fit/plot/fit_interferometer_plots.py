@@ -7,6 +7,78 @@ from autoarray.plot.yx import plot_yx
 from autoarray.plot.utils import subplots, subplot_save, symmetric_vmin_vmax, hide_unused_axes, conf_subplot_figsize, tight_layout
 
 
+def _subplot_fit_natural(
+    fit,
+    model_image,
+    output_path,
+    output_filename,
+    output_format,
+    colormap,
+    use_log10,
+    residuals_symmetric_cmap,
+):
+    """
+    Subplot of the natural-weighted dirty images of a ``FitInterferometer`` whose dataset is
+    array-free (built by ``from_stream`` / ``from_sparse_terms``), which has no visibilities,
+    transformer or visibility-space residuals.
+
+    Panels: Dirty Image (Natural) | Dirty Model Image (Natural) | Dirty Residual Map (Natural),
+    the last two only when the real-space ``model_image`` is given. The dirty model image is
+    ``W~ m / sum(w)`` (see ``dirty_model_image_natural_from``) and the dirty residual map is the
+    dirty image minus it.
+    """
+    from autoarray.fit.fit_interferometer import dirty_model_image_natural_from
+
+    dataset = fit.dataset
+    dirty_image = dataset.dirty_image_natural
+
+    if model_image is None:
+        fig, axes = subplots(1, 1, figsize=conf_subplot_figsize(1, 1))
+        axes = [axes]
+    else:
+        fig, axes = subplots(1, 3, figsize=conf_subplot_figsize(1, 3))
+
+    plot_array(
+        dirty_image,
+        ax=axes[0],
+        title="Dirty Image (Natural)",
+        colormap=colormap,
+        use_log10=use_log10,
+    )
+
+    if model_image is not None:
+        dirty_model_image = dirty_model_image_natural_from(
+            dataset=dataset, image=model_image
+        )
+        dirty_residual_map = dirty_image - dirty_model_image
+
+        if residuals_symmetric_cmap:
+            vmin_r, vmax_r = symmetric_vmin_vmax(dirty_residual_map)
+        else:
+            vmin_r = vmax_r = None
+
+        plot_array(
+            dirty_model_image,
+            ax=axes[1],
+            title="Dirty Model Image (Natural)",
+            colormap=colormap,
+            use_log10=use_log10,
+        )
+        plot_array(
+            dirty_residual_map,
+            ax=axes[2],
+            title="Dirty Residual Map (Natural)",
+            colormap=colormap,
+            use_log10=False,
+            vmin=vmin_r,
+            vmax=vmax_r,
+        )
+
+    hide_unused_axes(axes)
+    tight_layout()
+    subplot_save(fig, output_path, output_filename, output_format)
+
+
 def subplot_fit_interferometer(
     fit,
     output_path: Optional[str] = None,
@@ -15,6 +87,7 @@ def subplot_fit_interferometer(
     colormap=None,
     use_log10: bool = False,
     residuals_symmetric_cmap: bool = True,
+    model_image=None,
 ):
     """
     2×3 subplot of ``FitInterferometer`` residuals in UV-plane.
@@ -38,7 +111,24 @@ def subplot_fit_interferometer(
     residuals_symmetric_cmap
         Not used here (UV-plane residuals are scatter plots); kept for API
         consistency.
+    model_image
+        The real-space model image, used only when the fit's dataset is array-free
+        (``fit.dataset.is_array_free``): the visibility-space panels cannot be drawn, so
+        the natural-weighted dirty image, dirty model image and dirty residual map are
+        plotted to the same filename instead (the last two only if this is given).
     """
+    if fit.dataset.is_array_free:
+        return _subplot_fit_natural(
+            fit,
+            model_image=model_image,
+            output_path=output_path,
+            output_filename=output_filename,
+            output_format=output_format,
+            colormap=colormap,
+            use_log10=use_log10,
+            residuals_symmetric_cmap=residuals_symmetric_cmap,
+        )
+
     fig, axes = subplots(2, 3, figsize=conf_subplot_figsize(2, 3))
     axes = axes.flatten()
 
@@ -110,6 +200,7 @@ def subplot_fit_interferometer_dirty_images(
     colormap=None,
     use_log10: bool = False,
     residuals_symmetric_cmap: bool = True,
+    model_image=None,
 ):
     """
     2×3 subplot of ``FitInterferometer`` dirty-image components.
@@ -133,7 +224,24 @@ def subplot_fit_interferometer_dirty_images(
         Apply log10 normalisation to non-residual panels.
     residuals_symmetric_cmap
         Centre residual colour scale symmetrically around zero.
+    model_image
+        The real-space model image, used only when the fit's dataset is array-free
+        (``fit.dataset.is_array_free``): the natural-weighted dirty image, dirty model
+        image and dirty residual map are plotted to the same filename instead (the last
+        two only if this is given).
     """
+    if fit.dataset.is_array_free:
+        return _subplot_fit_natural(
+            fit,
+            model_image=model_image,
+            output_path=output_path,
+            output_filename=output_filename,
+            output_format=output_format,
+            colormap=colormap,
+            use_log10=use_log10,
+            residuals_symmetric_cmap=residuals_symmetric_cmap,
+        )
+
     fig, axes = subplots(2, 3, figsize=conf_subplot_figsize(2, 3))
     axes = axes.flatten()
 

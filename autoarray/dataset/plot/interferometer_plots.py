@@ -9,6 +9,44 @@ from autoarray.plot.utils import subplots, subplot_save, hide_unused_axes, conf_
 from autoarray.structures.grids.irregular_2d import Grid2DIrregular
 
 
+def _subplot_natural_dataset(
+    dataset,
+    output_path,
+    output_filename,
+    output_format,
+    colormap,
+    use_log10,
+    title_prefix=None,
+):
+    """
+    1x2 subplot of the natural-weighted dirty image and dirty beam of an array-free
+    ``Interferometer`` (built by ``from_stream`` / ``from_sparse_terms``), which carries no
+    visibilities, uv-wavelengths or transformer, so only these real-space terms can be drawn.
+    """
+    _pf = (lambda t: f"{title_prefix.rstrip()} {t}") if title_prefix else (lambda t: t)
+
+    fig, axes = subplots(1, 2, figsize=conf_subplot_figsize(1, 2))
+
+    plot_array(
+        dataset.dirty_image_natural,
+        ax=axes[0],
+        title=_pf("Dirty Image (Natural)"),
+        colormap=colormap,
+        use_log10=use_log10,
+    )
+    plot_array(
+        dataset.dirty_beam,
+        ax=axes[1],
+        title=_pf("Dirty Beam (Natural)"),
+        colormap=colormap,
+        use_log10=use_log10,
+    )
+
+    hide_unused_axes(axes)
+    tight_layout()
+    subplot_save(fig, output_path, output_filename, output_format)
+
+
 def subplot_interferometer_dataset(
     dataset,
     output_path: Optional[str] = None,
@@ -23,6 +61,9 @@ def subplot_interferometer_dataset(
 
     Panels: Visibilities | UV-Wavelengths | Amplitudes vs UV-distances |
             Phases vs UV-distances | Dirty Image | Dirty S/N Map
+
+    An array-free dataset (``dataset.is_array_free``) has no visibilities, so a 1x2 subplot
+    of its ``dirty_image_natural`` and ``dirty_beam`` is written to the same filename instead.
 
     Parameters
     ----------
@@ -39,6 +80,17 @@ def subplot_interferometer_dataset(
     use_log10
         Apply log10 normalisation to image panels.
     """
+    if dataset.is_array_free:
+        return _subplot_natural_dataset(
+            dataset,
+            output_path=output_path,
+            output_filename=output_filename,
+            output_format=output_format,
+            colormap=colormap,
+            use_log10=use_log10,
+            title_prefix=title_prefix,
+        )
+
     _pf = (lambda t: f"{title_prefix.rstrip()} {t}") if title_prefix else (lambda t: t)
 
     fig, axes = subplots(2, 3, figsize=conf_subplot_figsize(2, 3))
@@ -104,6 +156,9 @@ def subplot_interferometer_dirty_images(
     """
     1x3 subplot of dirty image, dirty noise map, and dirty S/N map.
 
+    An array-free dataset (``dataset.is_array_free``) has no visibilities, so a 1x2 subplot
+    of its ``dirty_image_natural`` and ``dirty_beam`` is written to the same filename instead.
+
     Parameters
     ----------
     dataset
@@ -119,6 +174,16 @@ def subplot_interferometer_dirty_images(
     use_log10
         Apply log10 normalisation.
     """
+    if dataset.is_array_free:
+        return _subplot_natural_dataset(
+            dataset,
+            output_path=output_path,
+            output_filename=output_filename,
+            output_format=output_format,
+            colormap=colormap,
+            use_log10=use_log10,
+        )
+
     fig, axes = subplots(1, 3, figsize=conf_subplot_figsize(1, 3))
 
     plot_array(
@@ -164,7 +229,9 @@ def fits_interferometer(
       ``uv_wavelengths_path`` to write each component to its own FITS file.
     * **Single multi-HDU file** -- pass ``file_path`` to write all components
       into one FITS file with named extensions (``data``, ``noise_map``,
-      ``uv_wavelengths``).
+      ``uv_wavelengths``). An array-free dataset (``from_stream`` /
+      ``from_sparse_terms``) has none of these, so its natural-weighted
+      ``dirty_image_natural`` and ``dirty_beam`` are written instead.
 
     Parameters
     ----------
@@ -183,8 +250,9 @@ def fits_interferometer(
         values_list = []
         ext_name_list = []
 
-        values_list.append(np.asarray(dataset.data.in_array))
-        ext_name_list.append("data")
+        if dataset.data is not None:
+            values_list.append(np.asarray(dataset.data.in_array))
+            ext_name_list.append("data")
 
         if dataset.noise_map is not None:
             values_list.append(np.asarray(dataset.noise_map.in_array))
@@ -194,13 +262,19 @@ def fits_interferometer(
             values_list.append(np.asarray(dataset.uv_wavelengths))
             ext_name_list.append("uv_wavelengths")
 
+        if dataset.is_array_free:
+            values_list.append(np.asarray(dataset.dirty_image_natural.native))
+            ext_name_list.append("dirty_image_natural")
+            values_list.append(np.asarray(dataset.dirty_beam.native))
+            ext_name_list.append("dirty_beam")
+
         hdu_list = hdu_list_for_output_from(
             values_list=values_list,
             ext_name_list=ext_name_list,
         )
         write_hdu_list(hdu_list, file_path=file_path, overwrite=overwrite)
     else:
-        if data_path is not None:
+        if dataset.data is not None and data_path is not None:
             output_to_fits(
                 values=np.asarray(dataset.data.in_array),
                 file_path=data_path, overwrite=overwrite,

@@ -205,3 +205,105 @@ def test__subplot_mappings__pix_indexes_bypasses_the_clump_finding(
     )
 
     assert str(Path(plot_path) / "mappings_pix_indexes_0.png") in plot_patch.paths
+
+
+def _array_free_inversion():
+    """
+    A rectangular-mesh inversion of an array-free `Interferometer` (built by
+    `from_stream`), which has no transformer and no visibility-space
+    `mapped_reconstructed_operated_data_dict`.
+    """
+    import autoarray as aa
+    from autoarray.inversion.mesh.mesh.rectangular_rtu_adapt_density import (
+        overlay_grid_from,
+    )
+
+    mask = aa.Mask2D.circular(shape_native=(10, 10), pixel_scales=0.5, radius=2.0)
+
+    rng = np.random.default_rng(seed=3)
+    uv_wavelengths = rng.normal(size=(60, 2)) * 1.0e5
+    data = rng.normal(size=60) + 1j * rng.normal(size=60)
+    sigma = rng.uniform(0.5, 2.0, size=60)
+
+    dataset = aa.Interferometer.from_stream(
+        [(uv_wavelengths, data, sigma + 1j * sigma)], mask
+    )
+
+    grid = aa.Grid2D.from_mask(mask=mask, over_sample_size=1)
+    mesh = aa.mesh.RectangularUniform(shape=(4, 4))
+    interpolator = mesh.interpolator_from(
+        source_plane_data_grid=grid,
+        source_plane_mesh_grid=aa.Grid2DIrregular(
+            overlay_grid_from(shape_native=(4, 4), grid=grid)
+        ),
+        adapt_data=None,
+    )
+    mapper = aa.Mapper(
+        interpolator=interpolator, regularization=aa.reg.Constant(coefficient=1.0)
+    )
+
+    return aa.Inversion(dataset=dataset, linear_obj_list=[mapper])
+
+
+def _record_titles(monkeypatch):
+    from autoarray.inversion.plot import inversion_plots
+
+    titles = []
+    plot_array = inversion_plots.plot_array
+
+    def _plot_array(array, *args, title=None, **kwargs):
+        titles.append(title)
+        return plot_array(array, *args, title=title, **kwargs)
+
+    monkeypatch.setattr(inversion_plots, "plot_array", _plot_array)
+
+    return titles
+
+
+def test__subplot_of_mapper__array_free_interferometer_inversion(
+    plot_path, plot_patch, monkeypatch
+):
+    pytest.importorskip("nufftax")
+
+    inversion = _array_free_inversion()
+
+    with pytest.raises(exc.InversionException):
+        inversion.mapped_reconstructed_operated_data_dict
+
+    titles = _record_titles(monkeypatch)
+
+    aplt.subplot_of_mapper(
+        inversion=inversion,
+        mapper_index=0,
+        output_path=plot_path,
+        output_format="png",
+    )
+
+    assert str(Path(plot_path) / "inversion_0.png") in plot_patch.paths
+
+    # The reconstructed-image panels are drawn from `mapped_reconstructed_data_dict`.
+    assert "Reconstructed Image" in titles
+    assert "Reconstructed Image (log10)" in titles
+    assert "Mesh Pixel Grid Overlaid" in titles
+
+
+def test__subplot_mappings__array_free_interferometer_inversion(
+    plot_path, plot_patch, monkeypatch
+):
+    pytest.importorskip("nufftax")
+
+    inversion = _array_free_inversion()
+
+    titles = _record_titles(monkeypatch)
+
+    aplt.subplot_mappings(
+        inversion=inversion,
+        pixelization_index=0,
+        pix_indexes=[[0, 1], [8]],
+        output_path=plot_path,
+        output_filename="mappings",
+        output_format="png",
+    )
+
+    assert str(Path(plot_path) / "mappings_0.png") in plot_patch.paths
+    assert "Reconstructed Image" in titles
