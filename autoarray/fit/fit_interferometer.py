@@ -128,7 +128,20 @@ class FitInterferometer(FitDataset):
         Returns the noise-map normalization term of the noise-map, summing the noise_map value in every pixel as:
 
         [Noise_Term] = sum(log(2*pi*[Noise]**2.0))
+
+        When the dataset carries a sparse operator with a precomputed `noise_normalization`
+        (set by `Interferometer.apply_sparse_operator` and
+        `apply_sparse_operator_from_chunks`), and the noise-map fitted is the dataset's own
+        (not one a subclass has scaled or replaced), that scalar is returned instead of
+        reducing over every visibility's sigma on each likelihood call. It is computed with
+        the same expression, so the value is identical.
         """
+        sparse_operator = getattr(self.dataset, "sparse_operator", None)
+        noise_normalization = getattr(sparse_operator, "noise_normalization", None)
+
+        if noise_normalization is not None and self.noise_map is self.dataset.noise_map:
+            return noise_normalization
+
         return fit_util.noise_normalization_complex_from(
             noise_map=self.noise_map.array,
         )

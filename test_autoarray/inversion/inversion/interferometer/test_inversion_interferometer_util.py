@@ -1125,3 +1125,208 @@ def test__interferometer_sparse_operator__numpy_branch_imports_no_jax():
     subprocess.run(
         [sys.executable, "-c", script], check=True, env=environment, timeout=600
     )
+
+
+def _streaming_inputs(n_visibilities=60, seed=3):
+    """
+    A circular-masked NUFFT dataset with random data and non-uniform (but equal real and
+    imaginary) noise, so every per-visibility weight is distinct.
+    """
+    mask = aa.Mask2D.circular(shape_native=(10, 10), pixel_scales=0.5, radius=2.0)
+
+    rng = np.random.default_rng(seed=seed)
+    uv_wavelengths = rng.normal(size=(n_visibilities, 2)) * 1.0e5
+    data = rng.normal(size=n_visibilities) + 1j * rng.normal(size=n_visibilities)
+    sigma = rng.uniform(0.5, 2.0, size=n_visibilities)
+    noise_map = sigma + 1j * sigma
+
+    dataset = aa.Interferometer(
+        data=aa.Visibilities(visibilities=data),
+        noise_map=aa.VisibilitiesNoiseMap(visibilities=noise_map),
+        uv_wavelengths=uv_wavelengths,
+        real_space_mask=mask,
+        transformer_class=aa.TransformerNUFFT,
+    )
+
+    return mask, uv_wavelengths, data, noise_map, dataset
+
+
+def _chunks_from(uv_wavelengths, data, noise_map, edges):
+    return [
+        (uv_wavelengths[k0:k1], data[k0:k1], noise_map[k0:k1])
+        for k0, k1 in zip(edges[:-1], edges[1:])
+    ]
+
+
+def test__sparse_terms_from_chunks__matches_one_shot_for_one_two_three_and_uneven_chunks():
+    pytest.importorskip("nufftax")
+
+    mask, uv_wavelengths, data, noise_map, dataset = _streaming_inputs()
+
+    operator_one_shot = np.asarray(dataset.psf_precision_operator_from())
+    dirty_image_one_shot = dataset.apply_sparse_operator().sparse_operator.dirty_image
+
+    data_term = np.sum(data.real**2 / noise_map.real**2) + np.sum(
+        data.imag**2 / noise_map.imag**2
+    )
+    noise_normalization = aa.util.fit.noise_normalization_complex_from(
+        noise_map=noise_map
+    )
+
+    for edges in ([0, 60], [0, 30, 60], [0, 20, 40, 60], [0, 1, 17, 59, 60]):
+        terms = aa.util.inversion_interferometer.sparse_terms_from_chunks(
+            _chunks_from(uv_wavelengths, data, noise_map, edges),
+            real_space_mask=mask,
+        )
+
+        np.testing.assert_allclose(
+            terms.nufft_precision_operator,
+            operator_one_shot,
+            rtol=1.0e-12,
+            atol=1.0e-12 * np.abs(operator_one_shot).max(),
+        )
+
+        dirty_image = aa.Array2D(values=terms.dirty_image_native, mask=mask).slim.array
+
+        np.testing.assert_allclose(
+            dirty_image,
+            dirty_image_one_shot,
+            rtol=1.0e-12,
+            atol=1.0e-12 * np.abs(dirty_image_one_shot).max(),
+        )
+
+        assert terms.n_vis == 60
+        assert terms.data_term == pytest.approx(data_term, rel=1.0e-12)
+        assert terms.noise_normalization == pytest.approx(
+            noise_normalization, rel=1.0e-12
+        )
+        assert terms.sum_weights == pytest.approx(
+            np.sum(noise_map.real**-2.0), rel=1.0e-12
+        )
+
+        # The dirty beam is the adjoint of the weights, whose peak (at the image centre for
+        # a centred mask) is bounded by sum(w).
+        assert terms.dirty_beam_native.shape == mask.shape_native
+        assert np.max(np.abs(terms.dirty_beam_native)) <= terms.sum_weights * (
+            1.0 + 1.0e-12
+        )
+
+
+def test__sparse_terms_from_chunks__accepts_visibilities_and_real_two_column_arrays():
+    pytest.importorskip("nufftax")
+
+    mask, uv_wavelengths, data, noise_map, _ = _streaming_inputs(n_visibilities=20)
+
+    terms_complex = aa.util.inversion_interferometer.sparse_terms_from_chunks(
+        [(uv_wavelengths, data, noise_map)], real_space_mask=mask
+    )
+    terms_structures = aa.util.inversion_interferometer.sparse_terms_from_chunks(
+        [
+            (
+                uv_wavelengths,
+                aa.Visibilities(visibilities=data),
+                aa.VisibilitiesNoiseMap(visibilities=noise_map),
+            )
+        ],
+        real_space_mask=mask,
+    )
+    terms_columns = aa.util.inversion_interferometer.sparse_terms_from_chunks(
+        [
+            (
+                uv_wavelengths,
+                np.stack([data.real, data.imag], axis=-1),
+                np.stack([noise_map.real, noise_map.imag], axis=-1),
+            )
+        ],
+        real_space_mask=mask,
+    )
+
+    for terms in (terms_structures, terms_columns):
+        np.testing.assert_array_equal(
+            terms.nufft_precision_operator, terms_complex.nufft_precision_operator
+        )
+        np.testing.assert_array_equal(
+            terms.dirty_image_native, terms_complex.dirty_image_native
+        )
+        assert terms.data_term == terms_complex.data_term
+        assert terms.noise_normalization == terms_complex.noise_normalization
+
+
+def test__sparse_terms_from_chunks__unequal_real_imag_noise_in_a_later_chunk__raises():
+    pytest.importorskip("nufftax")
+
+    mask, uv_wavelengths, data, noise_map, _ = _streaming_inputs()
+
+    noise_map = noise_map.copy()
+    noise_map[45] = noise_map[45].real + 2.0j * noise_map[45].real
+
+    with pytest.raises(aa.exc.DatasetException):
+        aa.util.inversion_interferometer.sparse_terms_from_chunks(
+            _chunks_from(uv_wavelengths, data, noise_map, [0, 20, 40, 60]),
+            real_space_mask=mask,
+        )
+
+
+def test__sparse_terms_from_chunks__no_visibilities__raises():
+    mask = aa.Mask2D.circular(shape_native=(10, 10), pixel_scales=0.5, radius=2.0)
+
+    with pytest.raises(ValueError):
+        aa.util.inversion_interferometer.sparse_terms_from_chunks(
+            [], real_space_mask=mask
+        )
+
+
+def test__sparse_terms__add__is_field_wise_sum():
+    def terms(value, n_vis):
+        return aa.SparseTerms(
+            nufft_precision_operator=np.full((4, 4), value),
+            dirty_image_native=np.full((2, 2), 2.0 * value),
+            dirty_beam_native=np.full((2, 2), 3.0 * value),
+            sum_weights=4.0 * value,
+            data_term=5.0 * value,
+            noise_normalization=6.0 * value,
+            n_vis=n_vis,
+        )
+
+    total = terms(1.0, 3) + terms(10.0, 4)
+
+    np.testing.assert_array_equal(total.nufft_precision_operator, np.full((4, 4), 11.0))
+    np.testing.assert_array_equal(total.dirty_image_native, np.full((2, 2), 22.0))
+    np.testing.assert_array_equal(total.dirty_beam_native, np.full((2, 2), 33.0))
+    assert total.sum_weights == 44.0
+    assert total.data_term == 55.0
+    assert total.noise_normalization == 66.0
+    assert total.n_vis == 7
+
+    mismatched = aa.SparseTerms(
+        nufft_precision_operator=np.zeros((6, 6)),
+        dirty_image_native=np.zeros((3, 3)),
+        dirty_beam_native=np.zeros((3, 3)),
+        sum_weights=0.0,
+        data_term=0.0,
+        noise_normalization=0.0,
+        n_vis=0,
+    )
+
+    with pytest.raises(ValueError):
+        terms(1.0, 1) + mismatched
+
+
+def test__interferometer_sparse_operator__scalars_default_to_none_and_thread_through():
+    operator = aa.InterferometerSparseOperator.from_nufft_precision_operator(
+        nufft_precision_operator=np.ones((4, 4)), dirty_image=np.ones(3)
+    )
+
+    assert operator.data_term is None
+    assert operator.noise_normalization is None
+
+    operator = aa.InterferometerSparseOperator.from_nufft_precision_operator(
+        nufft_precision_operator=np.ones((4, 4)),
+        dirty_image=np.ones(3),
+        data_term=np.float64(2.5),
+        noise_normalization=3.5,
+    )
+
+    assert operator.data_term == 2.5
+    assert type(operator.data_term) is float
+    assert operator.noise_normalization == 3.5

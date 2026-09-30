@@ -4,7 +4,9 @@ import logging
 import numpy as np
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Iterable, Optional, Tuple
+
+from autoarray import exc
 
 from autoarray.operators.transformer import _load_nufftax, nufftax_exception
 
@@ -25,6 +27,61 @@ except ImportError:
 
 
 logger = logging.getLogger(__name__)
+
+
+def check_noise_map_real_imag_equal(noise_map) -> None:
+    """
+    Raise a `DatasetException` unless every visibility of `noise_map` has equal real and
+    imaginary noise sigma (`noise_map.real == noise_map.imag`, to `np.allclose`).
+
+    This is the precondition of the sparse operator: its precision operator
+    `W~ = Re(F^H W F)` is built from the real-part sigma alone (see
+    `nufft_precision_operator_from`), a reduction that is exact only under that equality.
+    It is shared by `Interferometer.apply_sparse_operator`, which checks the whole resident
+    noise-map, and `sparse_terms_from_chunks`, which checks every chunk as it streams past.
+
+    Parameters
+    ----------
+    noise_map
+        The complex noise-map (a `VisibilitiesNoiseMap` or a complex ndarray) to check.
+
+    Raises
+    ------
+    exc.DatasetException
+        If any visibility has unequal real and imaginary noise sigma.
+    """
+    noise_map = getattr(noise_map, "array", noise_map)
+
+    noise_map_real = np.asarray(np.real(noise_map))
+    noise_map_imag = np.asarray(np.imag(noise_map))
+
+    if np.allclose(noise_map_real, noise_map_imag):
+        return
+
+    unequal = ~np.isclose(noise_map_real, noise_map_imag)
+
+    denominator = np.maximum(np.abs(noise_map_real), np.abs(noise_map_imag))
+    relative_difference = np.abs(noise_map_real - noise_map_imag) / np.where(
+        denominator == 0.0, 1.0, denominator
+    )
+
+    raise exc.DatasetException(
+        "The sparse operator cannot be applied to this interferometer dataset because its "
+        "noise-map has unequal real and imaginary sigma.\n\n"
+        "The sparse operator's precision operator `W~ = Re(F^H W F)` is built from the "
+        "real-part noise sigma only (see `psf_precision_operator_from`, which passes "
+        "`noise_map_real` to `nufft_precision_operator_from`). That reduction is exact only "
+        "when every visibility has equal real and imaginary sigma "
+        "(`sigma_real == sigma_imag`).\n\n"
+        f"This dataset has {int(np.count_nonzero(unequal))} of {noise_map_real.size} "
+        "visibilities where the real and imaginary sigma differ (maximum relative difference "
+        f"{np.max(relative_difference):.3e}), so the sparse curvature matrix would silently "
+        "disagree with the dense path.\n\n"
+        "Either equalise the real and imaginary noise sigma of every visibility, or fit "
+        "without calling `apply_sparse_operator()` — the dense "
+        "`InversionInterferometerMapping` path handles unequal real and imaginary sigmas "
+        "correctly."
+    )
 
 
 def data_vector_via_transformed_mapping_matrix_from(
@@ -883,6 +940,8 @@ class InterferometerSparseOperator:
     M: int
     batch_size: int
     w_dtype: np.dtype
+    data_term: Optional[float] = None
+    noise_normalization: Optional[float] = None
     """
     Cached FFT operator state for fast interferometer curvature-matrix assembly.
 
@@ -948,6 +1007,18 @@ class InterferometerSparseOperator:
         Larger batch sizes improve throughput on GPU but increase memory usage.
     w_dtype
         Floating-point dtype for weights and accumulations (e.g. float64).
+    data_term
+        The scalar `sum(d_r^2 / sigma_r^2) + sum(d_i^2 / sigma_i^2)` of the visibilities the
+        operator was built from, i.e. `d^T N^-1 d`. When set, `fast_chi_squared` of an
+        inversion whose interface `data` is `None` uses it for its third term, so the
+        likelihood never reduces over the visibility arrays. `None` for an operator built
+        without it (e.g. a directly constructed one); callers then fall back to the array
+        reduction.
+    noise_normalization
+        The scalar `sum(log(2 pi sigma_r^2)) + sum(log(2 pi sigma_i^2))` of the same
+        visibilities, equal to `fit_util.noise_normalization_complex_from(noise_map)`. When
+        set, `FitInterferometer.noise_normalization` reads it instead of reducing over the
+        noise-map every likelihood call. `None` falls back to the array reduction.
 
     Cached properties
     -----------------
@@ -1020,6 +1091,8 @@ class InterferometerSparseOperator:
         dirty_image: np.ndarray,
         *,
         batch_size: int = 128,
+        data_term: Optional[float] = None,
+        noise_normalization: Optional[float] = None,
     ):
         """
         Construct an `InterferometerSparseOperator` from a curvature-preload array.
@@ -1083,6 +1156,53 @@ class InterferometerSparseOperator:
             M=M,
             batch_size=int(batch_size),
             w_dtype=nufft_precision_operator.dtype,
+            data_term=None if data_term is None else float(data_term),
+            noise_normalization=(
+                None if noise_normalization is None else float(noise_normalization)
+            ),
+        )
+
+    @classmethod
+    def from_sparse_terms(
+        cls,
+        terms: "SparseTerms",
+        *,
+        real_space_mask,
+        batch_size: int = 128,
+    ) -> "InterferometerSparseOperator":
+        """
+        Construct an `InterferometerSparseOperator` from the per-visibility sums of a
+        `SparseTerms` record (e.g. one accumulated chunk by chunk by
+        `sparse_terms_from_chunks`).
+
+        The operator stores its dirty image in the slim (masked, 1D) representation that
+        `Interferometer.apply_sparse_operator` gives it, so the record's native dirty image is
+        slimmed through `Array2D(values=..., mask=real_space_mask)`. The two scalars
+        `data_term` and `noise_normalization` are carried over, so an inversion and fit built
+        on this operator need no visibility arrays for their likelihood terms.
+
+        Parameters
+        ----------
+        terms
+            The accumulated sums of every visibility the operator is to represent.
+        real_space_mask
+            The real-space `Mask2D` the terms were accumulated on.
+        batch_size
+            Number of source-pixel columns processed per block when assembling the curvature
+            matrix (see `from_nufft_precision_operator`).
+        """
+        from autoarray.structures.arrays.uniform_2d import Array2D
+
+        dirty_image = Array2D(
+            values=np.asarray(terms.dirty_image_native), mask=real_space_mask
+        ).slim.array
+
+        return cls.from_nufft_precision_operator(
+            nufft_precision_operator=terms.nufft_precision_operator,
+            dirty_image=dirty_image,
+            batch_size=batch_size,
+            data_term=terms.data_term,
+            noise_normalization=terms.noise_normalization,
         )
 
     @staticmethod
@@ -1680,3 +1800,257 @@ class InterferometerSparseOperator:
         )
 
         return curvature_weights_0.T @ operated
+
+
+@dataclass(frozen=True)
+class SparseTerms:
+    """
+    Every quantity the sparse (w-tilde) interferometer likelihood needs from the visibilities,
+    and nothing per-visibility.
+
+    Each field is a sum over visibilities, so the terms of a union of visibility sets are the
+    field-wise sum of the terms of its parts (`__add__`). That is what lets them be accumulated
+    one chunk at a time by `sparse_terms_from_chunks`, with peak memory set by the chunk size
+    rather than the dataset size, and what makes multi-channel (MFS) terms the sum of the
+    per-channel terms.
+
+    Fields
+    ------
+    nufft_precision_operator
+        The `(2Ny, 2Nx)` real preload `sum_k w_k cos(...)` with `w_k = 1 / sigma_r,k^2`, in the
+        FFT-wrapped offset order `nufft_precision_operator_from` returns (index 0 = zero lag).
+    dirty_image_native
+        The `(Ny, Nx)` native noise-weighted dirty image `Re(F^H (d_r / sigma_r^2 + i d_i /
+        sigma_i^2))`, the adjoint `Interferometer.apply_sparse_operator` stores (masked pixels
+        zero).
+    dirty_beam_native
+        The `(Ny, Nx)` native adjoint of the weights `w = 1 / sigma_r^2` (the naturally weighted
+        dirty beam at the image pixels, unnormalised). Not used by the likelihood; kept for
+        normalised dirty images of an array-free dataset.
+    sum_weights
+        `sum(w)`, the normalisation of the naturally weighted dirty beam/image.
+    data_term
+        `sum(d_r^2 / sigma_r^2) + sum(d_i^2 / sigma_i^2)`, i.e. `d^T N^-1 d`, the third term of
+        `fast_chi_squared`.
+    noise_normalization
+        `sum(log(2 pi sigma_r^2)) + sum(log(2 pi sigma_i^2))`, equal to
+        `fit_util.noise_normalization_complex_from(noise_map)`.
+    n_vis
+        The number of visibilities summed.
+    """
+
+    nufft_precision_operator: np.ndarray
+    dirty_image_native: np.ndarray
+    dirty_beam_native: np.ndarray
+    sum_weights: float
+    data_term: float
+    noise_normalization: float
+    n_vis: int
+
+    def __add__(self, other: "SparseTerms") -> "SparseTerms":
+        if not isinstance(other, SparseTerms):
+            return NotImplemented
+
+        if self.nufft_precision_operator.shape != other.nufft_precision_operator.shape:
+            raise ValueError(
+                "SparseTerms can only be added when accumulated on the same real-space mask: "
+                f"precision operator shapes {self.nufft_precision_operator.shape} and "
+                f"{other.nufft_precision_operator.shape} differ."
+            )
+
+        return SparseTerms(
+            nufft_precision_operator=self.nufft_precision_operator
+            + other.nufft_precision_operator,
+            dirty_image_native=self.dirty_image_native + other.dirty_image_native,
+            dirty_beam_native=self.dirty_beam_native + other.dirty_beam_native,
+            sum_weights=float(self.sum_weights + other.sum_weights),
+            data_term=float(self.data_term + other.data_term),
+            noise_normalization=float(
+                self.noise_normalization + other.noise_normalization
+            ),
+            n_vis=int(self.n_vis + other.n_vis),
+        )
+
+
+def _complex_visibilities_from(values) -> np.ndarray:
+    """
+    Return `values` (a `Visibilities`/`VisibilitiesNoiseMap`, a complex ndarray of shape
+    `(K,)` or a real ndarray of shape `(K, 2)` of (real, imag) columns) as a 1D complex128
+    ndarray, without the per-row `np.apply_along_axis` the `Visibilities` constructor uses.
+    """
+    values = np.asarray(getattr(values, "array", values))
+
+    if not np.iscomplexobj(values):
+        if values.ndim == 2 and values.shape[1] == 2:
+            values = values[:, 0] + 1j * values[:, 1]
+
+    return np.asarray(values, dtype=np.complex128).ravel()
+
+
+def sparse_terms_from_chunks(
+    chunks: Iterable[Tuple[np.ndarray, np.ndarray, np.ndarray]],
+    *,
+    real_space_mask,
+    transformer_class: Optional[Callable] = None,
+    method: str = "nufft",
+    eps: Optional[float] = None,
+    chunk_size: Optional[int] = None,
+    chunk_k: int = 2048,
+    use_jax: bool = False,
+    show_progress: bool = False,
+) -> SparseTerms:
+    """
+    Accumulate the `SparseTerms` of an interferometer dataset one chunk of visibilities at a
+    time, so the full visibility arrays never need to be resident at once.
+
+    Every term is linear in the per-visibility contributions: the precision operator is a sum
+    over visibilities of `w_k cos(...)` (the ifftshift and Nyquist zeroing inside the NUFFT
+    builder are linear, so they commute with the sum -- see
+    `test__nufft_precision_operator_via_nufft__chunked_matches_one_shot`), the dirty image and
+    beam are adjoint transforms of per-visibility values, and the scalars are plain sums. The
+    result therefore equals the one-shot terms of the concatenated chunks to summation order.
+
+    Chunk contract
+    --------------
+    `chunks` is any iterable (a list, or a generator reading from disk) of
+    `(uv_wavelengths, data, noise_map)` triples, where
+
+    - `uv_wavelengths` is a real `(K, 2)` array of (u, v) baselines in wavelengths;
+    - `data` is the `K` complex visibilities (a `Visibilities`, a complex `(K,)` array or a
+      real `(K, 2)` array of (real, imag) columns);
+    - `noise_map` is the `K` complex noise sigmas in the same forms, with equal real and
+      imaginary sigma per visibility (checked per chunk; the first offending chunk raises).
+
+    `K` may differ between chunks; empty chunks are skipped. Chunks are consumed once, in
+    order, and only one is referenced at a time.
+
+    Parameters
+    ----------
+    chunks
+        The `(uv_wavelengths, data, noise_map)` chunks.
+    real_space_mask
+        The real-space `Mask2D` the terms are accumulated on.
+    transformer_class
+        A callable `transformer_class(uv_wavelengths=..., real_space_mask=...)` returning a
+        transformer (`TransformerNUFFT`, `TransformerDFT`, or a factory closing over e.g. an
+        `eps`) that is built per chunk to form the dirty image and beam. `None` is
+        `TransformerNUFFT`.
+    method, eps, chunk_size, chunk_k, use_jax, show_progress
+        Passed to `nufft_precision_operator_from` for each chunk (`chunk_size` is the NUFFT
+        builder's own inner chunk, a memory ceiling within a chunk). `eps=None` is `1e-12`.
+
+    Returns
+    -------
+    SparseTerms
+        The accumulated terms, with the scalars in float64.
+
+    Raises
+    ------
+    exc.DatasetException
+        If any chunk's noise-map has unequal real and imaginary sigma.
+    ValueError
+        If `chunks` yields no visibilities.
+    """
+    if transformer_class is None:
+        from autoarray.operators.transformer import TransformerNUFFT
+
+        transformer_class = TransformerNUFFT
+
+    from autoarray.structures.visibilities import Visibilities
+
+    if eps is None:
+        eps = 1.0e-12
+
+    terms = None
+
+    for uv_wavelengths, data, noise_map in chunks:
+
+        uv_wavelengths = np.asarray(
+            getattr(uv_wavelengths, "array", uv_wavelengths), dtype=np.float64
+        )
+
+        if uv_wavelengths.shape[0] == 0:
+            continue
+
+        data = _complex_visibilities_from(data)
+        noise_map = _complex_visibilities_from(noise_map)
+
+        if not (data.shape[0] == noise_map.shape[0] == uv_wavelengths.shape[0]):
+            raise ValueError(
+                "sparse_terms_from_chunks: a chunk's uv_wavelengths, data and noise_map must "
+                f"have the same length, got {uv_wavelengths.shape[0]}, {data.shape[0]} and "
+                f"{noise_map.shape[0]}."
+            )
+
+        check_noise_map_real_imag_equal(noise_map)
+
+        noise_map_real = noise_map.real
+        noise_map_imag = noise_map.imag
+
+        transformer = transformer_class(
+            uv_wavelengths=uv_wavelengths, real_space_mask=real_space_mask
+        )
+
+        # The same arguments `Interferometer.psf_precision_operator_from` builds from the
+        # dataset's own transformer, so the per-chunk operators sum to the dataset's.
+        nufft_precision_operator = np.asarray(
+            nufft_precision_operator_from(
+                noise_map_real=noise_map_real,
+                uv_wavelengths=uv_wavelengths,
+                shape_masked_pixels_2d=transformer.grid.mask.shape_native_masked_pixels,
+                grid_radians_2d=transformer.grid.mask.derive_grid.all_false.in_radians.native.array,
+                method=method,
+                eps=eps,
+                chunk_size=chunk_size,
+                chunk_k=chunk_k,
+                show_progress=show_progress,
+                use_jax=use_jax,
+            ),
+            dtype=np.float64,
+        )
+
+        # The same expression `Interferometer.apply_sparse_operator` forms its dirty image from.
+        dirty_image_native = np.asarray(
+            transformer.image_from(
+                visibilities=Visibilities(
+                    visibilities=data.real * noise_map_real**-2.0
+                    + 1j * data.imag * noise_map_imag**-2.0
+                ),
+            ).native.array,
+            dtype=np.float64,
+        )
+
+        weights = noise_map_real**-2.0
+
+        dirty_beam_native = np.asarray(
+            transformer.image_from(
+                visibilities=Visibilities(visibilities=weights.astype(np.complex128)),
+            ).native.array,
+            dtype=np.float64,
+        )
+
+        chunk_terms = SparseTerms(
+            nufft_precision_operator=nufft_precision_operator,
+            dirty_image_native=dirty_image_native,
+            dirty_beam_native=dirty_beam_native,
+            sum_weights=float(np.sum(weights)),
+            data_term=float(
+                np.sum(data.real**2.0 / noise_map_real**2.0)
+                + np.sum(data.imag**2.0 / noise_map_imag**2.0)
+            ),
+            noise_normalization=float(
+                np.sum(np.log(2 * np.pi * noise_map_real**2.0))
+                + np.sum(np.log(2 * np.pi * noise_map_imag**2.0))
+            ),
+            n_vis=int(uv_wavelengths.shape[0]),
+        )
+
+        terms = chunk_terms if terms is None else terms + chunk_terms
+
+    if terms is None:
+        raise ValueError(
+            "sparse_terms_from_chunks: `chunks` yielded no visibilities, so there is nothing "
+            "to accumulate."
+        )
+
+    return terms

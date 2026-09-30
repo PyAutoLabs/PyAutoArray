@@ -476,3 +476,147 @@ def test__apply_sparse_operator__method_and_nufft_kwargs_reach_the_builder(mask_
         rtol=1.0e-10,
         atol=1.0e-10 * np.abs(operator_via_numpy[0, 0]),
     )
+
+
+def _random_interferometer(mask, transformer_class, n_visibilities=40, seed=5):
+    rng = np.random.default_rng(seed=seed)
+    data = rng.normal(size=n_visibilities) + 1j * rng.normal(size=n_visibilities)
+    sigma = rng.uniform(0.5, 2.0, size=n_visibilities)
+
+    return aa.Interferometer(
+        data=aa.Visibilities(visibilities=data),
+        noise_map=aa.VisibilitiesNoiseMap(visibilities=sigma + 1j * sigma),
+        uv_wavelengths=rng.normal(size=(n_visibilities, 2)) * 5.0e4,
+        real_space_mask=mask,
+        transformer_class=transformer_class,
+    )
+
+
+def test__apply_sparse_operator__populates_data_term_and_noise_normalization(
+    mask_2d_7x7,
+):
+    dataset = _random_interferometer(mask_2d_7x7, transformer.TransformerDFT)
+
+    sparse_operator = dataset.apply_sparse_operator(use_jax=False).sparse_operator
+
+    data = dataset.data.array
+    noise_map = dataset.noise_map.array
+
+    assert sparse_operator.data_term == np.sum(
+        data.real**2.0 / noise_map.real**2.0
+    ) + np.sum(data.imag**2.0 / noise_map.imag**2.0)
+    assert (
+        sparse_operator.noise_normalization
+        == aa.util.fit.noise_normalization_complex_from(noise_map=noise_map)
+    )
+
+
+def test__apply_sparse_operator_from_chunks__matches_apply_sparse_operator(
+    interferometer_7_lop, mask_2d_7x7
+):
+    pytest.importorskip("nufftax")
+
+    for dataset in (
+        interferometer_7_lop,
+        _random_interferometer(mask_2d_7x7, transformer.TransformerNUFFT),
+        _random_interferometer(mask_2d_7x7, transformer.TransformerDFT),
+    ):
+        uv_wavelengths = dataset.uv_wavelengths
+        data = dataset.data.array
+        noise_map = dataset.noise_map.array
+        n = uv_wavelengths.shape[0]
+
+        edges = [0, 1, n // 2, n]
+        chunks = [
+            (uv_wavelengths[k0:k1], data[k0:k1], noise_map[k0:k1])
+            for k0, k1 in zip(edges[:-1], edges[1:])
+        ]
+
+        dataset_one_shot = dataset.apply_sparse_operator()
+        dataset_chunked = dataset.apply_sparse_operator_from_chunks(chunks)
+
+        one_shot = dataset_one_shot.sparse_operator
+        chunked = dataset_chunked.sparse_operator
+
+        np.testing.assert_allclose(
+            chunked.nufft_precision_operator,
+            one_shot.nufft_precision_operator,
+            rtol=1.0e-12,
+            atol=1.0e-12 * np.abs(one_shot.nufft_precision_operator).max(),
+        )
+        np.testing.assert_allclose(
+            chunked.dirty_image,
+            one_shot.dirty_image,
+            rtol=1.0e-12,
+            atol=1.0e-12 * np.abs(one_shot.dirty_image).max(),
+        )
+        assert chunked.dirty_image.shape == one_shot.dirty_image.shape
+        assert chunked.data_term == pytest.approx(one_shot.data_term, rel=1.0e-12)
+        assert chunked.noise_normalization == pytest.approx(
+            one_shot.noise_normalization, rel=1.0e-12
+        )
+        assert chunked.batch_size == one_shot.batch_size
+
+        assert dataset_chunked.data is dataset.data
+        assert dataset_chunked.transformer is dataset.transformer
+
+
+def test__apply_sparse_operator_from_chunks__inversion_is_sparse_and_matches(
+    mask_2d_7x7,
+):
+    pytest.importorskip("nufftax")
+
+    dataset = _random_interferometer(mask_2d_7x7, transformer.TransformerNUFFT)
+
+    chunks = [
+        (dataset.uv_wavelengths[k0:k1], dataset.data[k0:k1], dataset.noise_map[k0:k1])
+        for k0, k1 in ((0, 13), (13, 40))
+    ]
+
+    grid = aa.Grid2D.from_mask(mask=mask_2d_7x7, over_sample_size=1)
+    mesh = aa.mesh.Delaunay(pixels=9)
+    image_mesh_grid = aa.image_mesh.Overlay(shape=(3, 3)).image_plane_mesh_grid_from(
+        mask=mask_2d_7x7, adapt_data=None
+    )
+    mapper = aa.Mapper(
+        interpolator=mesh.interpolator_from(
+            source_plane_data_grid=grid, source_plane_mesh_grid=image_mesh_grid
+        ),
+        regularization=aa.reg.Constant(coefficient=1.0),
+    )
+
+    inversion_one_shot = aa.Inversion(
+        dataset=dataset.apply_sparse_operator(), linear_obj_list=[mapper]
+    )
+    inversion_chunked = aa.Inversion(
+        dataset=dataset.apply_sparse_operator_from_chunks(chunks),
+        linear_obj_list=[mapper],
+    )
+
+    assert isinstance(inversion_chunked, aa.InversionInterferometerSparse)
+
+    assert inversion_chunked.fast_chi_squared == pytest.approx(
+        inversion_one_shot.fast_chi_squared, rel=1.0e-10
+    )
+    assert inversion_chunked.log_det_curvature_reg_matrix_term == pytest.approx(
+        inversion_one_shot.log_det_curvature_reg_matrix_term, rel=1.0e-10
+    )
+
+
+def test__apply_sparse_operator_from_chunks__unequal_real_imag_noise__raises(
+    mask_2d_7x7,
+):
+    pytest.importorskip("nufftax")
+
+    dataset = _random_interferometer(mask_2d_7x7, transformer.TransformerNUFFT)
+
+    noise_map = dataset.noise_map.array.copy()
+    noise_map[30] = noise_map[30].real + 1.5j * noise_map[30].real
+
+    chunks = [
+        (dataset.uv_wavelengths[k0:k1], dataset.data.array[k0:k1], noise_map[k0:k1])
+        for k0, k1 in ((0, 20), (20, 40))
+    ]
+
+    with pytest.raises(aa.exc.DatasetException):
+        dataset.apply_sparse_operator_from_chunks(chunks)
