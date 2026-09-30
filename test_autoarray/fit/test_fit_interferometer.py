@@ -390,3 +390,129 @@ def test__noise_normalization__apply_sparse_operator_scalar_matches_array_path()
 
     assert fit_sparse.dataset.sparse_operator.noise_normalization is not None
     assert fit_sparse.noise_normalization == fit_array.noise_normalization
+
+
+def _array_free_fit_setup():
+    from autoarray.inversion.mesh.mesh.rectangular_rtu_adapt_density import (
+        overlay_grid_from,
+    )
+
+    mask = aa.Mask2D.circular(shape_native=(10, 10), pixel_scales=0.5, radius=2.0)
+
+    rng = np.random.default_rng(seed=7)
+    n_visibilities = 50
+    uv_wavelengths = rng.normal(size=(n_visibilities, 2)) * 1.0e5
+    data = rng.normal(size=n_visibilities) + 1j * rng.normal(size=n_visibilities)
+    sigma = rng.uniform(0.5, 2.0, size=n_visibilities)
+    noise_map = sigma + 1j * sigma
+
+    dataset = aa.Interferometer(
+        data=aa.Visibilities(visibilities=data),
+        noise_map=aa.VisibilitiesNoiseMap(visibilities=noise_map),
+        uv_wavelengths=uv_wavelengths,
+        real_space_mask=mask,
+    )
+
+    dataset_stream = aa.Interferometer.from_stream(
+        [
+            (uv_wavelengths[k0:k1], data[k0:k1], noise_map[k0:k1])
+            for k0, k1 in ((0, 20), (20, n_visibilities))
+        ],
+        mask,
+    )
+
+    grid = aa.Grid2D.from_mask(mask=mask, over_sample_size=1)
+    mesh = aa.mesh.RectangularUniform(shape=(4, 4))
+    mapper = aa.Mapper(
+        interpolator=mesh.interpolator_from(
+            source_plane_data_grid=grid,
+            source_plane_mesh_grid=aa.Grid2DIrregular(
+                overlay_grid_from(shape_native=(4, 4), grid=grid)
+            ),
+            adapt_data=None,
+        ),
+        regularization=aa.reg.Constant(coefficient=1.0),
+    )
+
+    return dataset.apply_sparse_operator(), dataset_stream, mapper
+
+
+def test__fit_interferometer__array_free_dataset__log_evidence_works_and_maps_raise():
+    pytest.importorskip("nufftax")
+
+    dataset_memory, dataset_stream, mapper = _array_free_fit_setup()
+
+    fit_stream = aa.m.MockFitInterferometer(
+        dataset=dataset_stream,
+        inversion=aa.Inversion(dataset=dataset_stream, linear_obj_list=[mapper]),
+    )
+    fit_memory = aa.m.MockFitInterferometer(
+        dataset=dataset_memory,
+        inversion=aa.Inversion(dataset=dataset_memory, linear_obj_list=[mapper]),
+    )
+
+    assert fit_stream.log_evidence == pytest.approx(fit_memory.log_evidence, rel=1.0e-8)
+    assert fit_stream.figure_of_merit == pytest.approx(
+        fit_memory.figure_of_merit, rel=1.0e-8
+    )
+    assert fit_stream.noise_normalization == pytest.approx(
+        fit_memory.noise_normalization, rel=1.0e-12
+    )
+
+    for name in (
+        "mask",
+        "transformer",
+        "residual_map",
+        "normalized_residual_map",
+        "chi_squared_map",
+        "signal_to_noise_map",
+        "chi_squared",
+        "dirty_image",
+        "dirty_noise_map",
+        "dirty_residual_map",
+        "dirty_chi_squared_map",
+    ):
+        with pytest.raises(aa.exc.DatasetException, match="array-free"):
+            getattr(fit_stream, name)
+
+
+def test__fit_interferometer__sparse_log_evidence_never_touches_visibility_maps(
+    monkeypatch,
+):
+    """
+    Spy: on the in-memory sparse dataset (which *has* the arrays), make every
+    visibility-space quantity of the fit raise, and check `log_evidence` /
+    `figure_of_merit` still evaluate -- i.e. the sparse likelihood does not reach them.
+    """
+    pytest.importorskip("nufftax")
+
+    dataset_memory, _, mapper = _array_free_fit_setup()
+
+    touched = []
+
+    def spy(name):
+        def fget(self):
+            touched.append(name)
+            raise AssertionError(f"log_evidence touched {name}")
+
+        return property(fget)
+
+    for name in (
+        "mask",
+        "transformer",
+        "residual_map",
+        "normalized_residual_map",
+        "chi_squared_map",
+        "signal_to_noise_map",
+        "chi_squared",
+    ):
+        monkeypatch.setattr(aa.FitInterferometer, name, spy(name))
+
+    fit = aa.m.MockFitInterferometer(
+        dataset=dataset_memory,
+        inversion=aa.Inversion(dataset=dataset_memory, linear_obj_list=[mapper]),
+    )
+
+    assert np.isfinite(fit.log_evidence)
+    assert fit.figure_of_merit == fit.log_evidence
+    assert touched == []

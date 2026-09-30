@@ -448,6 +448,16 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
             The reconstruction (in the source frame) whose values are mapped to a dictionary of values for each
             individual mapper (in the image-plane).
         """
+        if self.transformer is None:
+            raise exc.InversionException(
+                "This interferometer inversion's dataset is array-free (an `Interferometer` "
+                "built by from_stream / from_sparse_terms) and has no transformer, so the "
+                "reconstruction cannot be mapped to visibilities "
+                "(`mapped_reconstructed_operated_data_dict`). The `log_evidence` and "
+                "`fast_chi_squared` do not need it; use the in-memory constructor if you need "
+                "model visibilities."
+            )
+
         mapped_reconstructed_operated_data_dict = {}
 
         image_dict = self.mapped_reconstructed_data_dict

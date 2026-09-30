@@ -1340,3 +1340,124 @@ def test__interferometer_sparse_operator__scalars_default_to_none_and_thread_thr
     assert operator.data_term == 2.5
     assert type(operator.data_term) is float
     assert operator.noise_normalization == 3.5
+
+
+def _terms_with_provenance(value=1.0, n_vis=1, **provenance):
+    return aa.SparseTerms(
+        nufft_precision_operator=np.full((4, 4), value),
+        dirty_image_native=np.full((2, 2), value),
+        dirty_beam_native=np.full((2, 2), value),
+        sum_weights=value,
+        data_term=value,
+        noise_normalization=value,
+        n_vis=n_vis,
+        **provenance,
+    )
+
+
+def test__sparse_terms__add__provenance_matching_sums_and_is_carried():
+    provenance = dict(
+        shape_native=(2, 2),
+        pixel_scales=(0.5, 0.5),
+        origin=(0.0, 0.0),
+        eps=1.0e-12,
+        transformer_class_name="TransformerNUFFT",
+    )
+
+    total = _terms_with_provenance(1.0, 3, **provenance) + _terms_with_provenance(
+        10.0, 4, **provenance
+    )
+
+    assert total.data_term == 11.0
+    assert total.n_vis == 7
+    for name, value in provenance.items():
+        assert getattr(total, name) == value
+
+    # `None` on either side skips that check (the recorded value is carried).
+    total = _terms_with_provenance(1.0, 1, **provenance) + _terms_with_provenance(1.0, 1)
+
+    assert total.eps == 1.0e-12
+    assert total.n_vis == 2
+
+
+def test__sparse_terms__add__provenance_mismatch_raises():
+    base = dict(shape_native=(2, 2), pixel_scales=(0.5, 0.5), eps=1.0e-12)
+
+    for name, other_value in (
+        ("shape_native", (3, 3)),
+        ("pixel_scales", (0.25, 0.25)),
+        ("eps", 1.0e-6),
+    ):
+        other = dict(base, **{name: other_value})
+
+        with pytest.raises(aa.exc.InversionException, match=name):
+            _terms_with_provenance(**base) + _terms_with_provenance(**other)
+
+
+def test__sparse_terms__add__origin_mismatch_raises():
+    with pytest.raises(aa.exc.InversionException, match="origin"):
+        _terms_with_provenance(origin=(0.0, 0.0)) + _terms_with_provenance(
+            origin=(0.5, 0.0)
+        )
+
+
+def test__sparse_terms__add__unrecorded_left_operand_keeps_right_provenance():
+    unknown = _terms_with_provenance()
+    a = _terms_with_provenance(pixel_scales=(0.5, 0.5), origin=(0.1, 0.2), eps=1.0e-9)
+    b = _terms_with_provenance(pixel_scales=(1.0, 1.0))
+
+    merged = unknown + a
+
+    assert merged.pixel_scales == (0.5, 0.5)
+    assert merged.origin == (0.1, 0.2)
+    assert merged.eps == 1.0e-9
+
+    with pytest.raises(aa.exc.InversionException, match="pixel_scales"):
+        (unknown + a) + b
+
+    with pytest.raises(aa.exc.InversionException, match="pixel_scales"):
+        (a + unknown) + b
+
+
+def test__sparse_terms__add__unrecorded_plus_unrecorded_stays_unrecorded():
+    total = _terms_with_provenance() + _terms_with_provenance()
+
+    for name in (
+        "shape_native",
+        "pixel_scales",
+        "origin",
+        "eps",
+        "transformer_class_name",
+    ):
+        assert getattr(total, name) is None
+
+
+def test__sparse_terms_from_chunks__records_provenance():
+    pytest.importorskip("nufftax")
+
+    mask, uv_wavelengths, data, noise_map, _ = _streaming_inputs(n_visibilities=20)
+
+    terms = aa.util.inversion_interferometer.sparse_terms_from_chunks(
+        _chunks_from(uv_wavelengths, data, noise_map, [0, 10, 20]),
+        real_space_mask=mask,
+        eps=1.0e-10,
+    )
+
+    assert terms.shape_native == (10, 10)
+    assert terms.pixel_scales == (0.5, 0.5)
+    assert terms.origin == (0.0, 0.0)
+    assert terms.eps == 1.0e-10
+    assert terms.transformer_class_name == "TransformerNUFFT"
+
+    terms_dft = aa.util.inversion_interferometer.sparse_terms_from_chunks(
+        _chunks_from(uv_wavelengths, data, noise_map, [0, 20]),
+        real_space_mask=mask,
+        transformer_class=aa.TransformerDFT,
+    )
+
+    assert terms_dft.transformer_class_name == "TransformerDFT"
+    assert terms_dft.eps == 1.0e-12
+
+    # Terms accumulated at different NUFFT accuracies cannot be summed.
+    with pytest.raises(aa.exc.InversionException):
+        terms + terms_dft
