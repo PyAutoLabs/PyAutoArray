@@ -1252,6 +1252,16 @@ def test__sparse_terms_from_chunks__accepts_visibilities_and_real_two_column_arr
         assert terms.noise_normalization == terms_complex.noise_normalization
 
 
+def test__check_noise_map_real_imag_equal__tiny_sigmas_use_a_relative_tolerance():
+    check = aa.util.inversion_interferometer.check_noise_map_real_imag_equal
+
+    # 1e-9 vs 2e-9 differ by a factor of two; the default `atol=1e-8` would wave it through.
+    with pytest.raises(aa.exc.DatasetException):
+        check(np.array([1.0e-9 + 2.0e-9j]))
+
+    check(np.array([1.0e-9 + 1.0e-9j]))
+
+
 def test__sparse_terms_from_chunks__unequal_real_imag_noise_in_a_later_chunk__raises():
     pytest.importorskip("nufftax")
 

@@ -1334,6 +1334,18 @@ def test__fast_chi_squared__data_none_without_a_data_term__raises():
         inversion.fast_chi_squared
 
 
+def test__data_subtracted_dict__data_none__raises_pointing_to_inversion_with_data():
+    dataset_sparse, mapper = _sparse_interface_setup()
+
+    inversion = aa.Inversion(
+        dataset=_interface_from(dataset_sparse, data=None),
+        linear_obj_list=[mapper],
+    )
+
+    with pytest.raises(aa.exc.InversionException, match="inversion_with_data"):
+        inversion.data_subtracted_dict
+
+
 def test__fast_chi_squared__data_none__jax_matches_numpy():
     pytest.importorskip("jax")
 

@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Type, Union
 
 from autonerves import cached_property, is_test_mode
 
+from autoarray import exc
 from autoarray.dataset.imaging.dataset import Imaging
 from autoarray.dataset.interferometer.dataset import Interferometer
 from autoarray.inversion.inversion.dataset_interface import DatasetInterface
@@ -878,6 +879,14 @@ class AbstractInversion:
         A dictionary of the data subtracted by the reconstructed images of combinations of all but one of the
         linear objects the inversion.
         """
+        if self.data is None:
+            raise exc.InversionException(
+                "`data_subtracted_dict` cannot be computed because this inversion was built "
+                "without data (`data=None` -- the sparse-operator path, which uses the "
+                "precomputed `data_term` instead of the visibilities). `data_subtracted_dict` "
+                "needs the fitted data, so use `fit.inversion_with_data` (or `fit.data`) "
+                "instead of `fit.inversion`."
+            )
 
         data_subtracted_dict = {}
 
