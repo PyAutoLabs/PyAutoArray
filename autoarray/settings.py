@@ -230,7 +230,11 @@ class Settings:
 
             - ``"raw"`` (default) -- the forward PDIP solve runs on the un-preconditioned system with a
               data-scaled KKT tolerance (``1e-2 * n * eps_pdip * max(1, max|data_vector|)``, or
-              `nnls_solver_tol` if set); the gradient is the same Jacobi-space relaxed-KKT pass as ``"jacobi"``.
+              `nnls_solver_tol` if set), polished by at most 10 tight warm-started PDIP iterations on the
+              Jacobi-scaled system; the polished iterate is the returned reconstruction (unpolished, the loose
+              tolerance left 11.5 % of the fnnls flux on inactive columns of the euclid vis_lp system,
+              PyAutoArray#594) and the start of the gradient, the same Jacobi-space relaxed-KKT pass as
+              ``"jacobi"``.
               On the SLaM `source_lp[1]` MGE model (2 x 20 lens + 20 source Gaussians) Jacobi scaling made 14/48
               near-truth points hit the 50-iteration cap with wrong log-likelihoods (signal-free Gaussian columns,
               whose diagonal is only `no_regularization_add_to_curvature_diag_value`, become degenerate

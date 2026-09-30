@@ -15,3 +15,13 @@
   Captured 2026-09-25 on CPU fp64 via a `jax.debug.callback` on `reconstruction_positive_only_from`, with
   autolens_workspace_test 5ec64413d2, PyAutoArray 3de624b5b9, PyAutoGalaxy 70a61e26cd, PyAutoLens 86054bbc19,
   PyAutoFit dd9fbe0aab, jax 0.10.2, numpy 2.5.3.
+- `mge_solver_reference_systems.npz` — 9 positive-only MGE systems (60x60 fp64) with their fnnls reference
+  solutions, for the raw-forward PDIP amplitude regression (PyAutoArray#594): keys `Q_<name>` / `q_<name>` /
+  `x_ref_<name>` for names `k0`..`k7` (the 8 #571 SLaM `source_lp[1]` systems, identical to
+  `mge_slam_nnls_systems.npz`) and `euclid_vis_lp` (the euclid pipeline vis_lp system behind
+  `test_latent_euclid_variables_traces_under_jax_jit`, captured with PyAutoArray d4298445). `meta` is a JSON
+  string with per-system `group`, `source_column_index_list`, `max_abs_q`, `cond_Q`, `category` and reference
+  active-column counts, plus provenance. Copied verbatim (no recomputation) from the autolens_profiling solver
+  corpus `results/lens/solver/corpus/{slam_fixture_571,euclid_vis_lp}.npz` + `manifest.json` at
+  autolens_profiling 3ad68af (phase-1 record `complete/2026/09/linear-solver-accuracy-study.md`) by a one-off
+  script outside the repo that checks symmetry of `Q`, `x_ref >= 0` and `max|q|` against the manifest.
