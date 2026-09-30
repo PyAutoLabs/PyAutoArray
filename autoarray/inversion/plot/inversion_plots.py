@@ -6,6 +6,8 @@ from typing import List, Optional, Union
 
 from autonerves import conf
 
+from autoarray import exc
+
 from autoarray.inversion.mappers.abstract import Mapper
 from autoarray.plot.array import plot_array
 from autoarray.plot.utils import (
@@ -84,7 +86,7 @@ def subplot_of_mapper(
             positions=positions,
             lines=lines,
         )
-    except (AttributeError, KeyError):
+    except (AttributeError, KeyError, exc.InversionException):
         pass
 
     # panels 1-3: reconstructed operated data (plain, log10, + mesh grid overlay)
@@ -394,7 +396,7 @@ def subplot_mappings(
             region_alpha=region_alpha,
             region_labels=region_labels,
         )
-    except (AttributeError, KeyError):
+    except (AttributeError, KeyError, exc.InversionException):
         pass
 
     # panel 1: reconstructed operated data

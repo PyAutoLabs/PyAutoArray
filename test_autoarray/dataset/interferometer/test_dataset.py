@@ -511,6 +511,53 @@ def test__apply_sparse_operator__populates_data_term_and_noise_normalization(
     )
 
 
+def test__apply_sparse_operator__complex64_data__data_term_is_reduced_in_complex128(
+    mask_2d_7x7,
+):
+    n_visibilities = 7
+    rng = np.random.default_rng(seed=1)
+    uv_wavelengths = rng.normal(size=(n_visibilities, 2)) * 5.0e4
+
+    values = np.full(n_visibilities, 10001.0 + 0.0j)
+    sigma = np.full(n_visibilities, 1.0 + 1.0j)
+
+    def dataset_from(dtype):
+        return aa.Interferometer(
+            data=aa.Visibilities(visibilities=np.asarray(values, dtype=dtype)),
+            noise_map=aa.VisibilitiesNoiseMap(
+                visibilities=np.asarray(sigma, dtype=dtype)
+            ),
+            uv_wavelengths=uv_wavelengths,
+            real_space_mask=mask_2d_7x7,
+            transformer_class=transformer.TransformerDFT,
+        )
+
+    dataset_c64 = dataset_from(np.complex64)
+    assert dataset_c64.data.array.dtype == np.complex64
+
+    data_term_c64 = dataset_c64.apply_sparse_operator(
+        use_jax=False
+    ).sparse_operator.data_term
+    data_term_c128 = dataset_from(np.complex128).apply_sparse_operator(
+        use_jax=False
+    ).sparse_operator.data_term
+
+    assert data_term_c128 == 700140007.0
+    assert data_term_c64 == data_term_c128
+
+    # The dataset itself is not promoted.
+    assert dataset_c64.data.array.dtype == np.complex64
+
+    pytest.importorskip("nufftax")
+
+    terms = aa.util.inversion_interferometer.sparse_terms_from_chunks(
+        [(uv_wavelengths, dataset_c64.data.array, dataset_c64.noise_map.array)],
+        real_space_mask=mask_2d_7x7,
+    )
+
+    assert terms.data_term == pytest.approx(data_term_c64, rel=1.0e-12)
+
+
 def test__apply_sparse_operator_from_chunks__matches_apply_sparse_operator(
     interferometer_7_lop, mask_2d_7x7
 ):

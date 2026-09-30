@@ -1,4 +1,5 @@
 import autoarray.plot as aplt
+from autoarray import exc
 from autoarray.inversion.mappers.abstract import Mapper
 from autoarray.inversion.plot.inversion_plots import save_reconstruction_csv
 
@@ -94,6 +95,39 @@ def test__inversion_subplot_of_mapper__singular_curvature_reg_matrix(
     )
 
     assert str(Path(plot_path) / "inversion_0.png") in plot_patch.paths
+
+
+def test__inversion_subplots__data_subtracted_dict_raises_inversion_exception(
+    rectangular_inversion_7x7_3x3,
+    plot_path,
+    plot_patch,
+    monkeypatch,
+):
+    inversion = rectangular_inversion_7x7_3x3
+
+    def _raise(self):
+        raise exc.InversionException("built without data")
+
+    monkeypatch.setattr(type(inversion), "data_subtracted_dict", property(_raise))
+
+    with pytest.raises(exc.InversionException):
+        inversion.data_subtracted_dict
+
+    aplt.subplot_of_mapper(
+        inversion=inversion,
+        mapper_index=0,
+        output_path=plot_path,
+        output_format="png",
+    )
+    assert str(Path(plot_path) / "inversion_0.png") in plot_patch.paths
+
+    aplt.subplot_mappings(
+        inversion=inversion,
+        pixelization_index=0,
+        output_path=plot_path,
+        output_format="png",
+    )
+    assert str(Path(plot_path) / "mappings_0.png") in plot_patch.paths
 
 
 def test__save_reconstruction_csv__singular_curvature_reg_matrix(

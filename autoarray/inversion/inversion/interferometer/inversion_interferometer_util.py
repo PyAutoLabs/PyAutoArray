@@ -32,7 +32,9 @@ logger = logging.getLogger(__name__)
 def check_noise_map_real_imag_equal(noise_map) -> None:
     """
     Raise a `DatasetException` unless every visibility of `noise_map` has equal real and
-    imaginary noise sigma (`noise_map.real == noise_map.imag`, to `np.allclose`).
+    imaginary noise sigma (`noise_map.real == noise_map.imag`, to `np.allclose` with
+    `atol=0.0` and the default relative tolerance, so the check is scale-free and tiny sigmas
+    such as 1e-9 vs 2e-9 are not waved through by the default absolute tolerance).
 
     This is the precondition of the sparse operator: its precision operator
     `W~ = Re(F^H W F)` is built from the real-part sigma alone (see
@@ -55,10 +57,10 @@ def check_noise_map_real_imag_equal(noise_map) -> None:
     noise_map_real = np.asarray(np.real(noise_map))
     noise_map_imag = np.asarray(np.imag(noise_map))
 
-    if np.allclose(noise_map_real, noise_map_imag):
+    if np.allclose(noise_map_real, noise_map_imag, atol=0.0):
         return
 
-    unequal = ~np.isclose(noise_map_real, noise_map_imag)
+    unequal = ~np.isclose(noise_map_real, noise_map_imag, atol=0.0)
 
     denominator = np.maximum(np.abs(noise_map_real), np.abs(noise_map_imag))
     relative_difference = np.abs(noise_map_real - noise_map_imag) / np.where(

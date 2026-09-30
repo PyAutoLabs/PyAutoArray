@@ -388,9 +388,13 @@ class Interferometer(AbstractDataset):
         # `fast_chi_squared` (term 3) nor `FitInterferometer.noise_normalization` reduces over
         # the visibility arrays on every likelihood call. The expressions are the ones those
         # two reductions use, so the cached values are bit-for-bit what they would compute.
+        # Promote local copies to complex128 so the one-shot `data_term` equals
+        # `sparse_terms_from_chunks`, which promotes every chunk to complex128.
+        data_c128 = np.asarray(self.data.array, dtype=np.complex128)
+        noise_c128 = np.asarray(self.noise_map.array, dtype=np.complex128)
         data_term = float(
-            np.sum(self.data.array.real**2.0 / self.noise_map.array.real**2.0)
-            + np.sum(self.data.array.imag**2.0 / self.noise_map.array.imag**2.0)
+            np.sum(data_c128.real**2.0 / noise_c128.real**2.0)
+            + np.sum(data_c128.imag**2.0 / noise_c128.imag**2.0)
         )
         noise_normalization = float(
             fit_util.noise_normalization_complex_from(noise_map=self.noise_map.array)
