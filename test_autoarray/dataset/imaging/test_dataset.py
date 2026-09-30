@@ -1,4 +1,5 @@
 import copy
+import logging
 
 import numpy as np
 import pytest
@@ -6,6 +7,9 @@ import pytest
 import autoarray as aa
 
 from autoarray import exc
+from autoarray.inversion.inversion.imaging_numba.sparse import (
+    InversionImagingSparseNumba,
+)
 from pathlib import Path
 
 test_data_path = Path(Path(__file__).resolve().parent) / "files"
@@ -504,3 +508,95 @@ def test__convolve_over_sample_size__sparse_operator_guard():
 
     with pytest.raises(aa.exc.DatasetException):
         dataset.apply_sparse_operator()
+
+
+def test__apply_over_sampling__keeps_sparse_operator_and_noise_covariance(
+    masked_imaging_7x7, masked_imaging_covariance_7x7, delaunay_mapper_9_3x3
+):
+    # The sparse operator depends only on the noise-map, PSF kernel and mask, so it
+    # stays valid when only the over sampling changes and must not be dropped.
+    dataset_operator_first = (
+        masked_imaging_7x7.apply_sparse_operator_cpu().apply_over_sampling(
+            over_sample_size_lp=2
+        )
+    )
+
+    assert dataset_operator_first.sparse_operator is not None
+
+    dataset_operator_last = masked_imaging_7x7.apply_over_sampling(
+        over_sample_size_lp=2
+    ).apply_sparse_operator_cpu()
+
+    inversion_operator_first = aa.Inversion(
+        dataset=dataset_operator_first,
+        linear_obj_list=[delaunay_mapper_9_3x3],
+    )
+    inversion_operator_last = aa.Inversion(
+        dataset=dataset_operator_last,
+        linear_obj_list=[delaunay_mapper_9_3x3],
+    )
+
+    assert isinstance(inversion_operator_first, InversionImagingSparseNumba)
+    assert inversion_operator_first.reconstruction == pytest.approx(
+        inversion_operator_last.reconstruction, 1.0e-8
+    )
+    assert inversion_operator_first.log_det_curvature_reg_matrix_term == pytest.approx(
+        inversion_operator_last.log_det_curvature_reg_matrix_term, 1.0e-8
+    )
+
+    # The noise covariance matrix is independent of over sampling and is also kept.
+    dataset_covariance = masked_imaging_covariance_7x7.apply_over_sampling(
+        over_sample_size_lp=2
+    )
+
+    assert dataset_covariance.noise_covariance_matrix == pytest.approx(
+        masked_imaging_covariance_7x7.noise_covariance_matrix, 1.0e-8
+    )
+
+
+def test__apply_mask_and_noise_scaling__warn_when_sparse_operator_discarded(
+    masked_imaging_7x7, caplog
+):
+    dataset = masked_imaging_7x7.apply_sparse_operator_cpu()
+
+    with caplog.at_level(logging.WARNING, logger="autoarray.dataset.imaging.dataset"):
+        masked = dataset.apply_mask(mask=masked_imaging_7x7.mask)
+
+    assert masked.sparse_operator is None
+    assert "sparse operator" in caplog.text
+    assert "apply_mask" in caplog.text
+
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING, logger="autoarray.dataset.imaging.dataset"):
+        scaled = dataset.apply_noise_scaling(mask=masked_imaging_7x7.mask)
+
+    assert scaled.sparse_operator is None
+    assert "sparse operator" in caplog.text
+    assert "apply_noise_scaling" in caplog.text
+
+    # No warning when there is no operator to discard.
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING, logger="autoarray.dataset.imaging.dataset"):
+        masked_imaging_7x7.apply_mask(mask=masked_imaging_7x7.mask)
+
+    assert "sparse operator" not in caplog.text
+
+
+def test__convolve_over_sample_size__sparse_operator_cpu_guard():
+    data = aa.Array2D.no_mask(values=np.ones((11, 11)), pixel_scales=1.0)
+    noise_map = aa.Array2D.no_mask(values=np.ones((11, 11)), pixel_scales=1.0)
+    kernel_fine = aa.Array2D.no_mask(values=np.ones((9, 9)), pixel_scales=0.5)
+    psf = aa.Convolver(kernel=kernel_fine)
+
+    dataset = aa.Imaging(
+        data=data,
+        noise_map=noise_map,
+        psf=psf,
+        over_sample_size_pixelization=2,
+        convolve_over_sample_size_pixelization=2,
+    )
+
+    with pytest.raises(aa.exc.DatasetException):
+        dataset.apply_sparse_operator_cpu()

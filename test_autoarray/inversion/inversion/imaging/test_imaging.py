@@ -267,3 +267,35 @@ def test__mapping_matrix_over_sampled_for__kxs__full_bin_reproduces_mapping_matr
     # s=2 rows mean-binned to image resolution also reproduce mapping_matrix.
     binned = m_s2.reshape(n_pix, 4, mapping_matrix.shape[1]).mean(axis=1)
     assert binned == pytest.approx(mapping_matrix, abs=1.0e-14)
+
+
+def test__operated_mapping_matrix_list__psf_convolution_performed_once_per_linear_obj(
+    masked_imaging_7x7, delaunay_mapper_9_3x3, monkeypatch
+):
+    # The dense (mapping) route reaches `operated_mapping_matrix_list` from the
+    # curvature matrix / data vector (via `operated_mapping_matrix`) and again from
+    # `mapped_reconstructed_data_dict`. It must be cached so the PSF convolution of
+    # each linear object's mapping matrix happens once per inversion.
+    calls = []
+
+    convolved_mapping_matrix_from = aa.Convolver.convolved_mapping_matrix_from
+
+    def counted(self, *args, **kwargs):
+        calls.append(1)
+        return convolved_mapping_matrix_from(self, *args, **kwargs)
+
+    monkeypatch.setattr(aa.Convolver, "convolved_mapping_matrix_from", counted)
+
+    inversion = aa.Inversion(
+        dataset=masked_imaging_7x7,
+        linear_obj_list=[delaunay_mapper_9_3x3],
+    )
+
+    assert isinstance(inversion, aa.InversionImagingMapping)
+
+    inversion.log_det_curvature_reg_matrix_term
+    inversion.reconstruction
+    inversion.mapped_reconstructed_operated_data
+    inversion.mapped_reconstructed_data
+
+    assert len(calls) == 1

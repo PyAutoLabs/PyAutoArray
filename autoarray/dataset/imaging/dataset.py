@@ -61,6 +61,36 @@ def _validate_convolve_over_sample_size(
         )
 
 
+_SPARSE_OPERATOR_CONVOLVE_OVER_SAMPLE_SIZE_ERROR = (
+    "The sparse linear algebra formalism precomputes PSF products at "
+    "image resolution and is incompatible with an oversampled PSF "
+    "(convolve_over_sample_size > 1)."
+)
+
+
+def _warn_sparse_operator_discarded(sparse_operator, method_name: str) -> None:
+    """
+    Log a warning when a dataset rebuild discards an attached sparse operator.
+
+    The sparse operator precomputes PSF products of every pair of masked noise-map
+    values, so it is invalidated by any change to the mask or noise-map. Rebuilds
+    which make such changes (e.g. `apply_mask`, `apply_noise_scaling`) therefore do
+    not carry it, and the returned dataset falls back to the (slower) mapping matrix
+    formalism unless the operator is re-applied. This warning stops that fallback
+    from happening silently.
+    """
+    if sparse_operator is None:
+        return
+
+    logger.warning(
+        f"IMAGING - {method_name} changes the mask or noise-map, which invalidates the "
+        f"sparse operator attached to this dataset, so it has been discarded. Pixelized "
+        f"reconstructions will use the slower mapping matrix formalism unless the sparse "
+        f"operator is re-applied (via apply_sparse_operator() or "
+        f"apply_sparse_operator_cpu()) as the last dataset operation."
+    )
+
+
 class Imaging(AbstractDataset):
     def __init__(
         self,
@@ -439,6 +469,10 @@ class Imaging(AbstractDataset):
             values=self.over_sample_size_pixelization.native, mask=mask
         )
 
+        _warn_sparse_operator_discarded(
+            sparse_operator=self.sparse_operator, method_name="apply_mask"
+        )
+
         dataset = Imaging(
             data=data,
             noise_map=noise_map,
@@ -520,6 +554,10 @@ class Imaging(AbstractDataset):
 
         noise_map = Array2D(values=noise_map, mask=self.data.mask)
 
+        _warn_sparse_operator_discarded(
+            sparse_operator=self.sparse_operator, method_name="apply_noise_scaling"
+        )
+
         dataset = Imaging(
             data=data,
             noise_map=noise_map,
@@ -527,6 +565,8 @@ class Imaging(AbstractDataset):
             noise_covariance_matrix=self.noise_covariance_matrix,
             over_sample_size_lp=self.over_sample_size_lp,
             over_sample_size_pixelization=self.over_sample_size_pixelization,
+            convolve_over_sample_size_lp=self.convolve_over_sample_size_lp,
+            convolve_over_sample_size_pixelization=self.convolve_over_sample_size_pixelization,
             check_noise_map=False,
         )
 
@@ -551,6 +591,10 @@ class Imaging(AbstractDataset):
         This function resets the cached properties so that the new over sampling is used in the grid and grid
         pixelization.
 
+        The `noise_covariance_matrix` and any attached `sparse_operator` are carried over, as neither depends on
+        the over sampling (the sparse operator depends only on the noise-map, PSF kernel and mask). This means
+        `apply_sparse_operator()` / `apply_sparse_operator_cpu()` may be called before or after this method.
+
         Parameters
         ----------
         over_sample_size_lp
@@ -566,12 +610,14 @@ class Imaging(AbstractDataset):
             data=self.data,
             noise_map=self.noise_map,
             psf=self.psf,
+            noise_covariance_matrix=self.noise_covariance_matrix,
             over_sample_size_lp=over_sample_size_lp or self.over_sample_size_lp,
             over_sample_size_pixelization=over_sample_size_pixelization
             or self.over_sample_size_pixelization,
             convolve_over_sample_size_lp=self.convolve_over_sample_size_lp,
             convolve_over_sample_size_pixelization=self.convolve_over_sample_size_pixelization,
             check_noise_map=False,
+            sparse_operator=self.sparse_operator,
         )
 
         return dataset
@@ -620,9 +666,7 @@ class Imaging(AbstractDataset):
 
         if self.psf is not None and self.psf.convolve_over_sample_size > 1:
             raise exc.DatasetException(
-                "The sparse linear algebra formalism precomputes PSF products at "
-                "image resolution and is incompatible with an oversampled PSF "
-                "(convolve_over_sample_size > 1)."
+                _SPARSE_OPERATOR_CONVOLVE_OVER_SAMPLE_SIZE_ERROR
             )
 
         logger.info(
@@ -645,6 +689,8 @@ class Imaging(AbstractDataset):
             noise_covariance_matrix=self.noise_covariance_matrix,
             over_sample_size_lp=self.over_sample_size_lp,
             over_sample_size_pixelization=self.over_sample_size_pixelization,
+            convolve_over_sample_size_lp=self.convolve_over_sample_size_lp,
+            convolve_over_sample_size_pixelization=self.convolve_over_sample_size_pixelization,
             check_noise_map=False,
             sparse_operator=sparse_operator,
         )
@@ -668,6 +714,11 @@ class Imaging(AbstractDataset):
             A new `Imaging` dataset with a precomputed Numba-based sparse operator attached,
             enabling efficient pixelized source reconstruction on CPU hardware.
         """
+        if self.psf is not None and self.psf.convolve_over_sample_size > 1:
+            raise exc.DatasetException(
+                _SPARSE_OPERATOR_CONVOLVE_OVER_SAMPLE_SIZE_ERROR
+            )
+
         try:
             import numba
         except ModuleNotFoundError:
@@ -711,6 +762,8 @@ class Imaging(AbstractDataset):
             noise_covariance_matrix=self.noise_covariance_matrix,
             over_sample_size_lp=self.over_sample_size_lp,
             over_sample_size_pixelization=self.over_sample_size_pixelization,
+            convolve_over_sample_size_lp=self.convolve_over_sample_size_lp,
+            convolve_over_sample_size_pixelization=self.convolve_over_sample_size_pixelization,
             check_noise_map=False,
             sparse_operator=sparse_operator,
         )
