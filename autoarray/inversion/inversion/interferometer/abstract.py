@@ -61,7 +61,26 @@ class AbstractInversionInterferometer(AbstractInversion):
 
     @property
     def mask(self) -> Mask2D:
-        return self.transformer.real_space_mask
+        """
+        The real-space mask the inversion reconstructs on.
+
+        This is read from the dataset rather than its transformer, so it is defined on an
+        array-free `Interferometer` (built by `from_stream` / `from_sparse_terms`), whose
+        transformer is `None`: an `Interferometer`'s `real_space_mask`, else a transformer's
+        `real_space_mask`, else the dataset's own `mask` (a `DatasetInterface`'s
+        `grids.lp.mask`).
+        """
+        real_space_mask = getattr(self.dataset, "real_space_mask", None)
+
+        if real_space_mask is not None:
+            return real_space_mask
+
+        transformer = getattr(self.dataset, "transformer", None)
+
+        if transformer is not None:
+            return transformer.real_space_mask
+
+        return self.dataset.mask
 
     @cached_property
     def operated_mapping_matrix_list(self) -> List[np.ndarray]:

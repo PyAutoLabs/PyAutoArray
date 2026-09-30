@@ -1367,3 +1367,171 @@ def test__fast_chi_squared__data_none__jax_matches_numpy():
     assert float(inversion_jax.fast_chi_squared) == pytest.approx(
         float(inversion_np.fast_chi_squared), rel=1.0e-7
     )
+
+
+def _array_free_setup(n_visibilities=60, seed=3):
+    """
+    A NUFFT dataset with random data and non-uniform (equal real/imaginary) noise, its
+    in-memory `apply_sparse_operator()` counterpart, the array-free dataset streamed from
+    three uneven chunks of the same visibilities, and a rectangular-mesh mapper.
+    """
+    from autoarray.inversion.mesh.mesh.rectangular_rtu_adapt_density import (
+        overlay_grid_from,
+    )
+
+    mask = aa.Mask2D.circular(shape_native=(10, 10), pixel_scales=0.5, radius=2.0)
+
+    rng = np.random.default_rng(seed=seed)
+    uv_wavelengths = rng.normal(size=(n_visibilities, 2)) * 1.0e5
+    data = rng.normal(size=n_visibilities) + 1j * rng.normal(size=n_visibilities)
+    sigma = rng.uniform(0.5, 2.0, size=n_visibilities)
+    noise_map = sigma + 1j * sigma
+
+    dataset = aa.Interferometer(
+        data=aa.Visibilities(visibilities=data),
+        noise_map=aa.VisibilitiesNoiseMap(visibilities=noise_map),
+        uv_wavelengths=uv_wavelengths,
+        real_space_mask=mask,
+        transformer_class=aa.TransformerNUFFT,
+    )
+
+    chunks = (
+        (uv_wavelengths[k0:k1], data[k0:k1], noise_map[k0:k1])
+        for k0, k1 in ((0, 1), (1, 25), (25, n_visibilities))
+    )
+
+    dataset_stream = aa.Interferometer.from_stream(chunks, mask)
+
+    grid = aa.Grid2D.from_mask(mask=mask, over_sample_size=1)
+    mesh = aa.mesh.RectangularUniform(shape=(4, 4))
+    interpolator = mesh.interpolator_from(
+        source_plane_data_grid=grid,
+        source_plane_mesh_grid=aa.Grid2DIrregular(
+            overlay_grid_from(shape_native=(4, 4), grid=grid)
+        ),
+        adapt_data=None,
+    )
+    mapper = aa.Mapper(
+        interpolator=interpolator, regularization=aa.reg.Constant(coefficient=1.0)
+    )
+
+    return mask, dataset.apply_sparse_operator(), dataset_stream, mapper
+
+
+def _assert_array_free_matches_in_memory(inversion_stream, inversion_memory, rel):
+    assert isinstance(inversion_stream, aa.InversionInterferometerSparse)
+    assert isinstance(inversion_memory, aa.InversionInterferometerSparse)
+
+    for name in (
+        "fast_chi_squared",
+        "regularization_term",
+        "log_det_curvature_reg_matrix_term",
+        "log_det_regularization_matrix_term",
+    ):
+        assert float(getattr(inversion_stream, name)) == pytest.approx(
+            float(getattr(inversion_memory, name)), rel=rel
+        ), name
+
+    reconstruction = np.asarray(inversion_memory.reconstruction)
+
+    np.testing.assert_allclose(
+        np.asarray(inversion_stream.reconstruction),
+        reconstruction,
+        rtol=rel,
+        atol=rel * np.abs(reconstruction).max(),
+    )
+
+    log_evidence_stream = aa.m.MockFitInterferometer(
+        dataset=inversion_stream.dataset, inversion=inversion_stream
+    ).log_evidence
+    log_evidence_memory = aa.m.MockFitInterferometer(
+        dataset=inversion_memory.dataset, inversion=inversion_memory
+    ).log_evidence
+
+    assert float(log_evidence_stream) == pytest.approx(
+        float(log_evidence_memory), rel=rel
+    )
+
+
+def test__array_free_dataset__sparse_inversion_matches_in_memory__numpy():
+    pytest.importorskip("nufftax")
+
+    _, dataset_memory, dataset_stream, mapper = _array_free_setup()
+
+    _assert_array_free_matches_in_memory(
+        aa.Inversion(dataset=dataset_stream, linear_obj_list=[mapper]),
+        aa.Inversion(dataset=dataset_memory, linear_obj_list=[mapper]),
+        rel=1.0e-8,
+    )
+
+
+def test__array_free_dataset__sparse_inversion_matches_in_memory__jax():
+    pytest.importorskip("nufftax")
+    pytest.importorskip("jax")
+
+    import jax.numpy as jnp
+
+    _, dataset_memory, dataset_stream, mapper = _array_free_setup()
+
+    _assert_array_free_matches_in_memory(
+        aa.Inversion(dataset=dataset_stream, linear_obj_list=[mapper], xp=jnp),
+        aa.Inversion(dataset=dataset_memory, linear_obj_list=[mapper], xp=jnp),
+        rel=1.0e-8,
+    )
+
+
+def test__array_free_dataset__mapped_reconstructed_operated_data_raises_typed():
+    pytest.importorskip("nufftax")
+
+    mask, dataset_memory, dataset_stream, mapper = _array_free_setup()
+
+    inversion_stream = aa.Inversion(dataset=dataset_stream, linear_obj_list=[mapper])
+
+    # The real-space reconstruction is still available (it needs only the mask).
+    image = inversion_stream.mapped_reconstructed_data_dict[mapper]
+
+    assert image.mask is mask
+
+    with pytest.raises(aa.exc.InversionException, match="array-free"):
+        inversion_stream.mapped_reconstructed_operated_data_dict
+
+    # The in-memory dataset still maps to visibilities.
+    inversion_memory = aa.Inversion(dataset=dataset_memory, linear_obj_list=[mapper])
+
+    assert (
+        inversion_memory.mapped_reconstructed_operated_data_dict[mapper].shape[0] == 60
+    )
+
+
+def test__inversion_interferometer_mask__is_the_real_space_mask_for_every_dataset_type():
+    pytest.importorskip("nufftax")
+
+    mask, dataset_memory, dataset_stream, mapper = _array_free_setup()
+
+    dataset_interface = aa.DatasetInterface(
+        data=None,
+        noise_map=dataset_memory.noise_map,
+        grids=dataset_memory.grids,
+        transformer=dataset_memory.transformer,
+        sparse_operator=dataset_memory.sparse_operator,
+    )
+
+    # A `DatasetInterface` without a transformer falls back to `grids.lp.mask`.
+    dataset_interface_no_transformer = aa.DatasetInterface(
+        data=None,
+        noise_map=None,
+        grids=dataset_memory.grids,
+        sparse_operator=dataset_memory.sparse_operator,
+    )
+
+    for dataset in (
+        dataset_memory,
+        dataset_stream,
+        dataset_interface,
+        dataset_interface_no_transformer,
+    ):
+        inversion = aa.Inversion(dataset=dataset, linear_obj_list=[mapper])
+
+        assert isinstance(inversion, aa.InversionInterferometerSparse)
+        assert (inversion.mask == mask).all()
+        assert inversion.mask.pixel_scales == mask.pixel_scales

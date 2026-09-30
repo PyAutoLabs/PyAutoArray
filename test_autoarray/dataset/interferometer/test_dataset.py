@@ -1,3 +1,4 @@
+import dataclasses
 import numpy as np
 
 import autoarray as aa
@@ -667,3 +668,196 @@ def test__apply_sparse_operator_from_chunks__unequal_real_imag_noise__raises(
 
     with pytest.raises(aa.exc.DatasetException):
         dataset.apply_sparse_operator_from_chunks(chunks)
+
+
+def _chunks_of(dataset, edges):
+    return [
+        (
+            dataset.uv_wavelengths[k0:k1],
+            dataset.data.array[k0:k1],
+            dataset.noise_map.array[k0:k1],
+        )
+        for k0, k1 in zip(edges[:-1], edges[1:])
+    ]
+
+
+def test__from_stream__array_free_dataset_carries_terms_and_operator(mask_2d_7x7):
+    pytest.importorskip("nufftax")
+
+    dataset = _random_interferometer(mask_2d_7x7, transformer.TransformerNUFFT)
+    chunks = _chunks_of(dataset, [0, 13, 40])
+
+    dataset_stream = aa.Interferometer.from_stream(chunks, mask_2d_7x7)
+
+    assert dataset_stream.data is None
+    assert dataset_stream.noise_map is None
+    assert dataset_stream.uv_wavelengths is None
+    assert dataset_stream.transformer is None
+    assert dataset_stream.is_array_free
+    assert dataset_stream.real_space_mask is mask_2d_7x7
+    assert dataset_stream.mask is mask_2d_7x7
+    assert dataset_stream.shape_slim is None
+
+    terms = dataset_stream.sparse_terms
+
+    assert terms.n_vis == 40
+    assert terms.shape_native == mask_2d_7x7.shape_native
+    assert terms.pixel_scales == mask_2d_7x7.pixel_scales
+    assert terms.origin == mask_2d_7x7.origin
+    assert terms.eps == 1.0e-12
+    assert terms.transformer_class_name == "TransformerNUFFT"
+
+    one_shot = dataset.apply_sparse_operator().sparse_operator
+
+    assert dataset_stream.sparse_operator.data_term == pytest.approx(
+        one_shot.data_term, rel=1.0e-12
+    )
+    assert dataset_stream.sparse_operator.noise_normalization == pytest.approx(
+        one_shot.noise_normalization, rel=1.0e-12
+    )
+
+    dataset_terms = aa.Interferometer.from_sparse_terms(terms, mask_2d_7x7)
+
+    assert dataset_terms.transformer is None
+    assert dataset_terms.data is None
+    assert dataset_terms.sparse_terms is terms
+    assert dataset_terms.sparse_operator.data_term == terms.data_term
+
+
+def test__from_sparse_terms__mask_shape_mismatch__raises(mask_2d_7x7):
+    pytest.importorskip("nufftax")
+
+    dataset = _random_interferometer(mask_2d_7x7, transformer.TransformerNUFFT)
+    terms = aa.util.inversion_interferometer.sparse_terms_from_chunks(
+        _chunks_of(dataset, [0, 40]), real_space_mask=mask_2d_7x7
+    )
+
+    other_mask = aa.Mask2D.circular(shape_native=(10, 10), pixel_scales=1.0, radius=3.0)
+
+    with pytest.raises(aa.exc.DatasetException):
+        aa.Interferometer.from_sparse_terms(terms, other_mask)
+
+
+def test__from_sparse_terms__mask_pixel_scales_and_origin_mismatch__raises(mask_2d_7x7):
+    pytest.importorskip("nufftax")
+
+    dataset = _random_interferometer(mask_2d_7x7, transformer.TransformerNUFFT)
+    terms = aa.util.inversion_interferometer.sparse_terms_from_chunks(
+        _chunks_of(dataset, [0, 40]), real_space_mask=mask_2d_7x7
+    )
+
+    # Same shape_native, different pixel_scales / origin.
+    for name, kwargs in (
+        ("pixel_scales", dict(pixel_scales=2.0 * mask_2d_7x7.pixel_scales[0])),
+        (
+            "origin",
+            dict(pixel_scales=mask_2d_7x7.pixel_scales, origin=(0.5, -0.5)),
+        ),
+    ):
+        other_mask = aa.Mask2D(mask=np.asarray(mask_2d_7x7), **kwargs)
+
+        with pytest.raises(aa.exc.DatasetException, match=name):
+            aa.Interferometer.from_sparse_terms(terms, other_mask)
+
+    # Unrecorded provenance skips the check.
+    terms_unrecorded = dataclasses.replace(terms, pixel_scales=None, origin=None)
+    aa.Interferometer.from_sparse_terms(
+        terms_unrecorded,
+        aa.Mask2D(mask=np.asarray(mask_2d_7x7), pixel_scales=5.0, origin=(1.0, 1.0)),
+    )
+
+
+def test__array_free__array_properties_raise_typed_exception(mask_2d_7x7):
+    pytest.importorskip("nufftax")
+
+    dataset = _random_interferometer(mask_2d_7x7, transformer.TransformerNUFFT)
+    dataset_stream = aa.Interferometer.from_stream(
+        _chunks_of(dataset, [0, 40]), mask_2d_7x7
+    )
+
+    for name in (
+        "amplitudes",
+        "phases",
+        "uv_distances",
+        "dirty_image",
+        "dirty_noise_map",
+        "signal_to_noise_map",
+        "dirty_signal_to_noise_map",
+    ):
+        with pytest.raises(aa.exc.DatasetException, match="array-free"):
+            getattr(dataset_stream, name)
+
+    with pytest.raises(aa.exc.DatasetException, match="array-free"):
+        dataset_stream.psf_precision_operator_from()
+
+    with pytest.raises(aa.exc.DatasetException, match="array-free"):
+        dataset_stream.apply_sparse_operator()
+
+    with pytest.raises(aa.exc.DatasetException, match="array-free"):
+        dataset_stream.apply_sparse_operator_from_chunks(_chunks_of(dataset, [0, 40]))
+
+
+def test__dirty_image_natural_and_dirty_beam__stream_and_in_memory_agree(
+    mask_2d_7x7,
+):
+    pytest.importorskip("nufftax")
+
+    for transformer_class in (transformer.TransformerNUFFT, transformer.TransformerDFT):
+        dataset = _random_interferometer(mask_2d_7x7, transformer_class)
+
+        dataset_stream = aa.Interferometer.from_stream(
+            _chunks_of(dataset, [0, 7, 40]),
+            mask_2d_7x7,
+            transformer_class=transformer_class,
+        )
+
+        weights = dataset.noise_map.array.real**-2.0
+
+        # The in-memory path computes the images from its arrays (no `sparse_terms`).
+        assert getattr(dataset, "sparse_terms", None) is None
+
+        for name in ("dirty_image_natural", "dirty_beam"):
+            in_memory = getattr(dataset, name)
+            streamed = getattr(dataset_stream, name)
+
+            assert streamed.shape_native == (7, 7)
+            np.testing.assert_allclose(
+                streamed.array,
+                in_memory.array,
+                rtol=1.0e-12,
+                atol=1.0e-12 * np.abs(in_memory.array).max(),
+                err_msg=name,
+            )
+
+        # The natural dirty image is the weighted adjoint normalised by sum(w), not the
+        # unweighted `dirty_image`, which is unchanged.
+        np.testing.assert_allclose(
+            dataset.dirty_image_natural.array * np.sum(weights),
+            dataset.apply_sparse_operator().sparse_operator.dirty_image,
+            rtol=1.0e-10,
+            atol=1.0e-10 * np.abs(dataset.dirty_image_natural.array).max() * np.sum(weights),
+        )
+        np.testing.assert_array_equal(
+            dataset.dirty_image.array,
+            dataset.transformer.image_from(visibilities=dataset.data).array,
+        )
+
+
+def test__apply_sparse_operator_from_chunks__result_carries_sparse_terms(mask_2d_7x7):
+    pytest.importorskip("nufftax")
+
+    dataset = _random_interferometer(mask_2d_7x7, transformer.TransformerNUFFT)
+
+    dataset_chunked = dataset.apply_sparse_operator_from_chunks(
+        _chunks_of(dataset, [0, 20, 40])
+    )
+
+    terms = dataset_chunked.sparse_terms
+
+    assert isinstance(terms, aa.SparseTerms)
+    assert terms.n_vis == 40
+    assert terms.transformer_class_name == "TransformerNUFFT"
+    assert terms.data_term == dataset_chunked.sparse_operator.data_term
+
+    # The in-memory `apply_sparse_operator` path records no terms.
+    assert dataset.apply_sparse_operator().sparse_terms is None

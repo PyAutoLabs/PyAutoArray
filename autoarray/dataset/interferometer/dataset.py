@@ -53,6 +53,9 @@ class Interferometer(AbstractDataset):
         transformer_class=TransformerNUFFT,
         sparse_operator: Optional[InterferometerSparseOperator] = None,
         raise_error_dft_visibilities_limit: bool = True,
+        sparse_terms: Optional[
+            "inversion_interferometer_util.SparseTerms"
+        ] = None,
     ):
         """
         An interferometer dataset, containing the visibilities data, noise-map, real-space msk, Fourier transformer and
@@ -106,6 +109,20 @@ class Interferometer(AbstractDataset):
             If `True`, an exception is raised if the dataset has more than 10,000 visibilities and
             `transformer_class=TransformerDFT`. The DFT is too slow for large datasets and `TransformerNUFFT`
             should be used instead. Set to `False` to suppress this check.
+        sparse_terms
+            The `SparseTerms` record the `sparse_operator` was accumulated from, if any (set by
+            `from_stream`, `from_sparse_terms` and `apply_sparse_operator_from_chunks`). It
+            carries the naturally weighted dirty image and beam and the provenance of the
+            accumulation.
+
+        Array-free datasets
+        -------------------
+        `data`, `noise_map` and `uv_wavelengths` may all be `None` with `transformer_class=None`
+        when a `sparse_operator` carrying its `data_term` and `noise_normalization` is given:
+        this is the dataset `from_stream` / `from_sparse_terms` build, on which a sparse
+        (w-tilde) pixelized inversion and its `log_evidence` need no visibility arrays. Its
+        `transformer` is `None`, and every quantity that needs the visibilities raises an
+        `exc.DatasetException` naming the missing input.
         """
         self.real_space_mask = real_space_mask
 
@@ -118,10 +135,13 @@ class Interferometer(AbstractDataset):
 
         self.uv_wavelengths = uv_wavelengths
 
-        self.transformer = transformer_class(
-            uv_wavelengths=uv_wavelengths,
-            real_space_mask=real_space_mask,
-        )
+        if uv_wavelengths is not None and transformer_class is not None:
+            self.transformer = transformer_class(
+                uv_wavelengths=uv_wavelengths,
+                real_space_mask=real_space_mask,
+            )
+        else:
+            self.transformer = None
 
         self.grids = GridsDataset(
             mask=self.real_space_mask,
@@ -130,8 +150,9 @@ class Interferometer(AbstractDataset):
         )
 
         self.sparse_operator = sparse_operator
+        self.sparse_terms = sparse_terms
 
-        if raise_error_dft_visibilities_limit:
+        if raise_error_dft_visibilities_limit and self.uv_wavelengths is not None:
             if (
                 self.uv_wavelengths.shape[0] > 10000
                 and transformer_class == TransformerDFT
@@ -226,6 +247,166 @@ class Interferometer(AbstractDataset):
             transformer_class=transformer_class,
             raise_error_dft_visibilities_limit=raise_error_dft_visibilities_limit,
         )
+
+    @classmethod
+    def from_sparse_terms(
+        cls,
+        terms: "inversion_interferometer_util.SparseTerms",
+        real_space_mask: Mask2D,
+        *,
+        batch_size: int = 128,
+    ) -> "Interferometer":
+        """
+        Build an array-free `Interferometer` from an accumulated `SparseTerms` record.
+
+        The returned dataset carries no visibility arrays: `data`, `noise_map`,
+        `uv_wavelengths` and `transformer` are all `None`. It carries the
+        `InterferometerSparseOperator` built from `terms` (with its cached `data_term` and
+        `noise_normalization`) and `terms` itself (as `sparse_terms`), which is everything a
+        sparse (w-tilde) pixelized inversion and its `log_evidence` read, so a fit on it
+        equals one on the in-memory `apply_sparse_operator()` dataset. Quantities that need
+        the visibilities (`amplitudes`, `dirty_image`, residual maps of a fit, ...) raise an
+        `exc.DatasetException`; the naturally weighted `dirty_image_natural` and `dirty_beam`
+        are available from the terms.
+
+        Parameters
+        ----------
+        terms
+            The accumulated sums of every visibility the dataset represents (e.g. from
+            `inversion_interferometer_util.sparse_terms_from_chunks`).
+        real_space_mask
+            The real-space `Mask2D` the terms were accumulated on.
+        batch_size
+            The number of source-pixel columns processed per batch by the sparse operator.
+        """
+        shape_native = getattr(terms, "shape_native", None)
+
+        if shape_native is not None and tuple(shape_native) != tuple(
+            real_space_mask.shape_native
+        ):
+            raise exc.DatasetException(
+                f"The SparseTerms were accumulated on a real-space mask of shape_native "
+                f"{tuple(shape_native)} but `from_sparse_terms` was given a mask of shape_native "
+                f"{tuple(real_space_mask.shape_native)}."
+            )
+
+        # Exact equality of the float tuples (as `SparseTerms.__add__` uses): the recorded
+        # values are copied from a `Mask2D`, so the same mask reproduces them bit-for-bit.
+        for name in ("pixel_scales", "origin"):
+            value_terms = getattr(terms, name, None)
+
+            if value_terms is None:
+                continue
+
+            value_terms = tuple(float(value) for value in value_terms)
+            value_mask = tuple(float(value) for value in getattr(real_space_mask, name))
+
+            if value_terms != value_mask:
+                raise exc.DatasetException(
+                    f"The SparseTerms were accumulated on a real-space mask of {name} "
+                    f"{value_terms} but `from_sparse_terms` was given a mask of {name} "
+                    f"{value_mask}."
+                )
+
+        sparse_operator = InterferometerSparseOperator.from_sparse_terms(
+            terms,
+            real_space_mask=real_space_mask,
+            batch_size=batch_size,
+        )
+
+        return cls(
+            data=None,
+            noise_map=None,
+            uv_wavelengths=None,
+            real_space_mask=real_space_mask,
+            transformer_class=None,
+            sparse_operator=sparse_operator,
+            sparse_terms=terms,
+        )
+
+    @classmethod
+    def from_stream(
+        cls,
+        chunks,
+        real_space_mask: Mask2D,
+        *,
+        transformer_class=TransformerNUFFT,
+        method: str = "nufft",
+        eps: Optional[float] = None,
+        chunk_size: Optional[int] = None,
+        chunk_k: int = 2048,
+        use_jax: bool = False,
+        show_progress: bool = False,
+        batch_size: int = 128,
+    ) -> "Interferometer":
+        """
+        Build an array-free `Interferometer` by accumulating a stream of visibility chunks,
+        never holding the full visibility arrays.
+
+        `chunks` is any iterable (a list, or a generator reading from disk) of
+        `(uv_wavelengths, data, noise_map)` triples, with the contract of
+        `apply_sparse_operator_from_chunks`. They are reduced one at a time by
+        `inversion_interferometer_util.sparse_terms_from_chunks` into a `SparseTerms` record,
+        which `from_sparse_terms` turns into the dataset; peak memory is set by the chunk size,
+        not the dataset size.
+
+        Parameters
+        ----------
+        chunks
+            The `(uv_wavelengths, data, noise_map)` chunks.
+        real_space_mask
+            The real-space `Mask2D` the terms are accumulated on.
+        transformer_class, method, eps, chunk_size, chunk_k, use_jax, show_progress
+            Passed to `sparse_terms_from_chunks`.
+        batch_size
+            The number of source-pixel columns processed per batch by the sparse operator.
+
+        Raises
+        ------
+        exc.DatasetException
+            If any chunk has unequal real and imaginary noise sigma.
+        """
+        if disable_jax():
+            use_jax = False
+
+        terms = inversion_interferometer_util.sparse_terms_from_chunks(
+            chunks,
+            real_space_mask=real_space_mask,
+            transformer_class=transformer_class,
+            method=method,
+            eps=eps,
+            chunk_size=chunk_size,
+            chunk_k=chunk_k,
+            use_jax=use_jax,
+            show_progress=show_progress,
+        )
+
+        return cls.from_sparse_terms(
+            terms, real_space_mask=real_space_mask, batch_size=batch_size
+        )
+
+    @property
+    def is_array_free(self) -> bool:
+        """
+        `True` for a dataset built by `from_stream` / `from_sparse_terms`, which carries no
+        visibility arrays (`data`, `noise_map`, `uv_wavelengths`) and no transformer.
+        """
+        return self.data is None and self.uv_wavelengths is None
+
+    def _require(self, quantity: str, *names: str):
+        """
+        Raise a typed `exc.DatasetException` if any of the named inputs of this dataset is
+        `None`, i.e. this is an array-free dataset and `quantity` cannot be computed.
+        """
+        missing = [name for name in names if getattr(self, name) is None]
+
+        if missing:
+            raise exc.DatasetException(
+                f"This Interferometer is array-free (built by from_stream / from_sparse_terms) "
+                f"and has no {' / '.join(missing)}; `{quantity}` is unavailable. Use the "
+                f"in-memory constructor (`Interferometer(data=..., noise_map=..., "
+                f"uv_wavelengths=..., ...)`) if you need it."
+            )
 
     def apply_sparse_operator(
         self,
@@ -333,6 +514,10 @@ class Interferometer(AbstractDataset):
         # `method="numpy"` to the JAX brute force under the kill switch.
         if disable_jax():
             use_jax = False
+
+        self._require(
+            "apply_sparse_operator", "data", "noise_map", "uv_wavelengths", "transformer"
+        )
 
         inversion_interferometer_util.check_noise_map_real_imag_equal(self.noise_map)
 
@@ -504,6 +689,8 @@ class Interferometer(AbstractDataset):
         if disable_jax() and accumulator_kwargs.get("use_jax", False):
             accumulator_kwargs["use_jax"] = False
 
+        self._require("apply_sparse_operator_from_chunks", "transformer")
+
         transformer = self.transformer
 
         if isinstance(transformer, TransformerNUFFT):
@@ -543,6 +730,7 @@ class Interferometer(AbstractDataset):
             uv_wavelengths=self.uv_wavelengths,
             transformer_class=lambda uv_wavelengths, real_space_mask: self.transformer,
             sparse_operator=sparse_operator,
+            sparse_terms=terms,
         )
 
     def psf_precision_operator_from(
@@ -599,6 +787,10 @@ class Interferometer(AbstractDataset):
             The NUFFT precision matrix of shape (total_pixels, total_pixels) where total_pixels
             is the number of unmasked real-space pixels.
         """
+        self._require(
+            "psf_precision_operator_from", "noise_map", "uv_wavelengths", "transformer"
+        )
+
         transformer = self.transformer
 
         # The NUFFT builder and `TransformerNUFFT` spread the same visibilities onto a mode grid
@@ -645,6 +837,7 @@ class Interferometer(AbstractDataset):
         The amplitudes of the complex visibilities, defined as the absolute value of each visibility:
         amplitude = sqrt(real^2 + imag^2).
         """
+        self._require("amplitudes", "data")
         return self.data.amplitudes
 
     @property
@@ -653,6 +846,7 @@ class Interferometer(AbstractDataset):
         The phases of the complex visibilities in radians, defined as arctan(imag / real) for
         each visibility.
         """
+        self._require("phases", "data")
         return self.data.phases
 
     @property
@@ -661,6 +855,7 @@ class Interferometer(AbstractDataset):
         The radial distance of each visibility baseline from the origin of the UV-plane, in units
         of wavelengths. Computed as sqrt(u^2 + v^2) for each (u, v) baseline pair.
         """
+        self._require("uv_distances", "uv_wavelengths")
         return np.sqrt(
             np.square(self.uv_wavelengths[:, 0]) + np.square(self.uv_wavelengths[:, 1])
         )
@@ -674,7 +869,71 @@ class Interferometer(AbstractDataset):
         It provides a quick visual representation of the data but is convolved with the synthesized
         beam (the Fourier transform of the UV-plane sampling function).
         """
+        self._require("dirty_image", "data", "transformer")
         return self.transformer.image_from(visibilities=self.data)
+
+    @property
+    def dirty_image_natural(self):
+        """
+        The naturally weighted, normalised dirty image `Re(F^H (w d)) / sum(w)`, with
+        `w = 1 / sigma^2` per visibility component.
+
+        Unlike `dirty_image` (the unweighted adjoint of the data), this is the image whose
+        peak for a unit point source at the phase centre is 1 -- the standard dirty image of
+        radio astronomy. It is available on both dataset types: an array-free dataset reads it
+        from its `sparse_terms` (`dirty_image_native / sum_weights`), an in-memory one computes
+        it from its visibilities and transformer.
+        """
+        from autoarray.structures.arrays.uniform_2d import Array2D
+
+        if getattr(self, "sparse_terms", None) is not None:
+            return Array2D(
+                values=np.asarray(self.sparse_terms.dirty_image_native)
+                / self.sparse_terms.sum_weights,
+                mask=self.real_space_mask,
+            )
+
+        self._require("dirty_image_natural", "data", "noise_map", "transformer")
+
+        noise_map = self.noise_map.array
+        data = self.data.array
+
+        weighted = Visibilities(
+            visibilities=data.real * noise_map.real**-2.0
+            + 1j * data.imag * noise_map.imag**-2.0
+        )
+
+        return self.transformer.image_from(visibilities=weighted) / float(
+            np.sum(noise_map.real**-2.0)
+        )
+
+    @property
+    def dirty_beam(self):
+        """
+        The naturally weighted, normalised dirty beam (synthesised beam) at the image pixels,
+        `Re(F^H w) / sum(w)` with `w = 1 / sigma_r^2`: the response of `dirty_image_natural`
+        to a unit point source at the phase centre (peak 1 at the phase-centre pixel).
+
+        An array-free dataset reads it from its `sparse_terms`
+        (`dirty_beam_native / sum_weights`); an in-memory one computes it from its noise-map
+        and transformer.
+        """
+        from autoarray.structures.arrays.uniform_2d import Array2D
+
+        if getattr(self, "sparse_terms", None) is not None:
+            return Array2D(
+                values=np.asarray(self.sparse_terms.dirty_beam_native)
+                / self.sparse_terms.sum_weights,
+                mask=self.real_space_mask,
+            )
+
+        self._require("dirty_beam", "noise_map", "transformer")
+
+        weights = self.noise_map.array.real**-2.0
+
+        return self.transformer.image_from(
+            visibilities=Visibilities(visibilities=weights.astype(np.complex128))
+        ) / float(np.sum(weights))
 
     @property
     def dirty_noise_map(self):
@@ -683,6 +942,7 @@ class Interferometer(AbstractDataset):
 
         Provides a real-space representation of the noise levels in the dirty image.
         """
+        self._require("dirty_noise_map", "noise_map", "transformer")
         return self.transformer.image_from(visibilities=self.noise_map)
 
     @property
@@ -691,6 +951,7 @@ class Interferometer(AbstractDataset):
         The dirty signal-to-noise map, computed as the inverse Fourier transform of the
         complex signal-to-noise visibility map.
         """
+        self._require("dirty_signal_to_noise_map", "data", "noise_map", "transformer")
         return self.transformer.image_from(visibilities=self.signal_to_noise_map)
 
     @property
@@ -705,6 +966,7 @@ class Interferometer(AbstractDataset):
         handles the complex nature of interferometric visibilities by treating the real and
         imaginary parts independently.
         """
+        self._require("signal_to_noise_map", "data", "noise_map")
         signal_to_noise_map_real = np.divide(
             np.real(self.data.array), np.real(self.noise_map.array)
         )

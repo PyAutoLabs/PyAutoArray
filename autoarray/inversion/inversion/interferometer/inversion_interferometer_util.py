@@ -1839,6 +1839,21 @@ class SparseTerms:
         `fit_util.noise_normalization_complex_from(noise_map)`.
     n_vis
         The number of visibilities summed.
+
+    Provenance
+    ----------
+    The trailing optional fields record what the terms were accumulated on, so terms built on
+    different geometries or accuracies cannot be silently summed (`__add__` raises), and so an
+    array-free `Interferometer` (built by `Interferometer.from_stream` /
+    `from_sparse_terms`) can say what produced it. `None` means "not recorded" and skips the
+    corresponding check.
+
+    shape_native, pixel_scales, origin
+        The real-space mask's native shape, pixel scales and origin.
+    eps
+        The NUFFT precision the precision operator was built with.
+    transformer_class_name
+        The class name of the transformer that formed the dirty image and beam.
     """
 
     nufft_precision_operator: np.ndarray
@@ -1848,8 +1863,26 @@ class SparseTerms:
     data_term: float
     noise_normalization: float
     n_vis: int
+    shape_native: Optional[tuple] = None
+    pixel_scales: Optional[tuple] = None
+    origin: Optional[tuple] = None
+    eps: Optional[float] = None
+    transformer_class_name: Optional[str] = None
 
     def __add__(self, other: "SparseTerms") -> "SparseTerms":
+        """
+        The field-wise sum of two `SparseTerms`.
+
+        Raises `exc.InversionException` if a provenance field (`shape_native`,
+        `pixel_scales`, `origin`, `eps`) is recorded on both sides with different values.
+        The result carries, for each provenance field, the recorded value from either side
+        (the left one when both are recorded), so an unrecorded operand never erases the
+        provenance of a recorded one.
+
+        Known limit: the mask itself is not carried, so terms accumulated on two masks with
+        the same `shape_native`, `pixel_scales` and `origin` but different masked pixels
+        cannot be distinguished by provenance and are summed without error.
+        """
         if not isinstance(other, SparseTerms):
             return NotImplemented
 
@@ -1859,6 +1892,26 @@ class SparseTerms:
                 f"precision operator shapes {self.nufft_precision_operator.shape} and "
                 f"{other.nufft_precision_operator.shape} differ."
             )
+
+        for name in ("shape_native", "pixel_scales", "origin", "eps"):
+            value_self = getattr(self, name)
+            value_other = getattr(other, name)
+
+            if value_self is None or value_other is None:
+                continue
+
+            if isinstance(value_self, float) or isinstance(value_other, float):
+                differ = float(value_self) != float(value_other)
+            else:
+                differ = tuple(value_self) != tuple(value_other)
+
+            if differ:
+                raise exc.InversionException(
+                    "SparseTerms can only be added when accumulated with the same provenance: "
+                    f"`{name}` is {value_self!r} on one and {value_other!r} on the other. "
+                    "Terms accumulated on different real-space masks or NUFFT accuracies do "
+                    "not describe the same operator."
+                )
 
         return SparseTerms(
             nufft_precision_operator=self.nufft_precision_operator
@@ -1871,7 +1924,24 @@ class SparseTerms:
                 self.noise_normalization + other.noise_normalization
             ),
             n_vis=int(self.n_vis + other.n_vis),
+            shape_native=_recorded(self.shape_native, other.shape_native),
+            pixel_scales=_recorded(self.pixel_scales, other.pixel_scales),
+            origin=_recorded(self.origin, other.origin),
+            eps=_recorded(self.eps, other.eps),
+            transformer_class_name=_recorded(
+                self.transformer_class_name, other.transformer_class_name
+            ),
         )
+
+
+def _recorded(value_left, value_right):
+    """
+    The provenance value a sum of two `SparseTerms` carries: the recorded (non-`None`) value
+    of either side, the left one when both are recorded (they are equal, or `__add__` has
+    already raised). Taking it from either side keeps `(U + A) + B` (with `U` unrecorded)
+    checking `B` against `A`'s provenance.
+    """
+    return value_left if value_left is not None else value_right
 
 
 def _complex_visibilities_from(values) -> np.ndarray:
@@ -2045,6 +2115,11 @@ def sparse_terms_from_chunks(
                 + np.sum(np.log(2 * np.pi * noise_map_imag**2.0))
             ),
             n_vis=int(uv_wavelengths.shape[0]),
+            shape_native=tuple(real_space_mask.shape_native),
+            pixel_scales=tuple(real_space_mask.pixel_scales),
+            origin=tuple(real_space_mask.origin),
+            eps=float(eps),
+            transformer_class_name=type(transformer).__name__,
         )
 
         terms = chunk_terms if terms is None else terms + chunk_terms

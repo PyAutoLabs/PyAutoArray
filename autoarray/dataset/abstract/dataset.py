@@ -94,7 +94,12 @@ class AbstractDataset:
 
         self.noise_covariance_matrix = noise_covariance_matrix
 
-        if noise_map is None:
+        # An array-free dataset (e.g. `Interferometer.from_stream`) carries neither data nor a
+        # noise-map: everything its likelihood needs was reduced into a sparse operator
+        # upstream, so there is no diagonal to take and nothing to check.
+        if noise_map is None and data is None and noise_covariance_matrix is None:
+            pass
+        elif noise_map is None:
             try:
                 noise_map = Array2D.no_mask(
                     values=np.diag(noise_covariance_matrix),
@@ -174,6 +179,10 @@ class AbstractDataset:
         """
         The 1D size of the dataset data array after masking, i.e. the number of unmasked pixels.
         """
+        # An array-free dataset has no data array; the mask's slim size is not a substitute
+        # (for an interferometer the data is visibilities, not image pixels).
+        if self.data is None:
+            return None
         return self.data.shape_slim
 
     @property

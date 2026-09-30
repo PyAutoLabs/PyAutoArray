@@ -1,3 +1,4 @@
+import functools
 import numpy as np
 
 from autoarray.dataset.interferometer.dataset import Interferometer
@@ -8,6 +9,7 @@ from autoarray.structures.visibilities import Visibilities
 from autoarray.fit.fit_dataset import FitDataset
 
 from autoarray.fit import fit_util
+from autoarray import exc
 from autoarray import type as ty
 
 
@@ -56,6 +58,26 @@ class FitInterferometer(FitDataset):
             xp=xp,
         )
 
+    def _require(self, quantity: str, *names: str):
+        """
+        Raise a typed `exc.DatasetException` when this fit's dataset is array-free (an
+        `Interferometer` built by `from_stream` / `from_sparse_terms`) and one of the named
+        inputs (`data`, `noise_map`, `transformer`) the requested `quantity` needs is `None`.
+
+        The `log_evidence` / `figure_of_merit` of a sparse inversion fit never reaches here:
+        it reads `inversion.fast_chi_squared` and the sparse operator's cached
+        `noise_normalization`, neither of which touches the visibility arrays.
+        """
+        missing = [name for name in names if getattr(self, name) is None]
+
+        if missing:
+            raise exc.DatasetException(
+                f"This FitInterferometer's dataset is array-free (built by from_stream / "
+                f"from_sparse_terms) and has no {' / '.join(missing)}; `{quantity}` is "
+                f"unavailable. Only the `log_evidence` / `figure_of_merit` of a sparse "
+                f"inversion can be computed; use the in-memory constructor if you need it."
+            )
+
     @property
     def mask(self) -> np.ndarray:
         """
@@ -64,6 +86,7 @@ class FitInterferometer(FitDataset):
         Interferometer data is not spatially masked in the same way as imaging data — all visibility measurements
         are included in the fit — so this always returns an unmasked array.
         """
+        self._require("mask", "data")
         return np.full(shape=self.data.shape, fill_value=False)
 
     @property
@@ -74,7 +97,26 @@ class FitInterferometer(FitDataset):
         This is taken directly from the interferometer dataset and is used internally to compute the
         `dirty_*` image-space representations of the fit quantities.
         """
-        return self.dataset.transformer
+        transformer = self.dataset.transformer
+
+        if transformer is None:
+            raise exc.DatasetException(
+                "This FitInterferometer's dataset is array-free (built by from_stream / "
+                "from_sparse_terms) and has no transformer; `transformer` is unavailable. "
+                "Use the in-memory constructor if you need it."
+            )
+
+        return transformer
+
+    @functools.cached_property
+    def residual_map(self):
+        """
+        Returns the residual-map between the visibility data and model data (data - model_data).
+
+        Raises an `exc.DatasetException` on an array-free dataset, which has no data.
+        """
+        self._require("residual_map", "data")
+        return super().residual_map
 
     @property
     def normalized_residual_map(self) -> np.ndarray:
@@ -83,6 +125,7 @@ class FitInterferometer(FitDataset):
 
         Normalized_Residual = (Data - Model_Data) / Noise
         """
+        self._require("normalized_residual_map", "data", "noise_map")
         return fit_util.normalized_residual_map_complex_from(
             residual_map=self.residual_map,
             noise_map=self.noise_map,
@@ -95,6 +138,7 @@ class FitInterferometer(FitDataset):
 
         Chi_Squared = ((Residuals) / (Noise)) ** 2.0 = ((Data - Model)**2.0)/(Variances)
         """
+        self._require("chi_squared_map", "data", "noise_map")
         return fit_util.chi_squared_map_complex_from(
             residual_map=self.residual_map,
             noise_map=self.noise_map,
@@ -104,6 +148,7 @@ class FitInterferometer(FitDataset):
     def signal_to_noise_map(self) -> np.ndarray:
         """
         The signal-to-noise_map of the dataset and noise-map which are fitted."""
+        self._require("signal_to_noise_map", "data", "noise_map")
         signal_to_noise_map_real = self.data.real / self.noise_map.real
 
         signal_to_noise_map_real[signal_to_noise_map_real < 0] = 0.0
@@ -118,6 +163,7 @@ class FitInterferometer(FitDataset):
         """
         Returns the chi-squared terms of the model data's fit to an dataset, by summing the chi-squared-map.
         """
+        self._require("chi_squared", "data", "noise_map")
         return fit_util.chi_squared_complex_from(
             chi_squared_map=self.chi_squared_map.array,
         )
