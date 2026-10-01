@@ -1369,6 +1369,210 @@ def test__fast_chi_squared__data_none__jax_matches_numpy():
     )
 
 
+def _profile_subtracted_from(dataset_sparse, seed=5):
+    """
+    A random real-space image `i_p` on the dataset's masked grid, the visibilities `d - F i_p` with its
+    Fourier transform subtracted, and the sparse dirty image / data term of those visibilities computed by
+    `sparse_profile_terms_from` without forming `F i_p`.
+    """
+    mask = dataset_sparse.real_space_mask
+
+    rng = np.random.default_rng(seed=seed)
+
+    image = aa.Array2D(values=rng.normal(size=mask.pixels_in_mask), mask=mask)
+
+    subtracted = aa.Visibilities(
+        visibilities=dataset_sparse.data.array
+        - dataset_sparse.transformer.visibilities_from(image=image).array
+    )
+
+    operated_image, sparse_dirty_image, data_term = (
+        aa.util.inversion_interferometer.sparse_profile_terms_from(
+            sparse_operator=dataset_sparse.sparse_operator,
+            image=image,
+            extent_index_for_masked_pixel=mask.extent_index_for_masked_pixel,
+        )
+    )
+
+    return image, subtracted, operated_image, sparse_dirty_image, data_term
+
+
+def test__sparse_profile_terms_from__matches_the_dense_subtracted_visibilities():
+    """
+    The identity `sum(|d - F i_p|^2 / sigma^2) = data_term - 2 i_p^T d~ + i_p^T W~ i_p` and the dirty image
+    `d~ - W~ i_p` of the subtracted visibilities, against the same quantities reduced from `d - F i_p`.
+    """
+    dataset_sparse, _ = _sparse_interface_setup()
+
+    image, subtracted, operated_image, sparse_dirty_image, data_term = (
+        _profile_subtracted_from(dataset_sparse)
+    )
+
+    noise_map = dataset_sparse.noise_map.array
+
+    data_term_dense = np.sum(
+        subtracted.array.real**2.0 / noise_map.real**2.0
+    ) + np.sum(subtracted.array.imag**2.0 / noise_map.imag**2.0)
+
+    assert data_term == pytest.approx(data_term_dense, rel=1.0e-10)
+
+    sparse_dirty_image_dense = dataset_sparse.transformer.image_from(
+        visibilities=aa.Visibilities(
+            visibilities=subtracted.array.real * noise_map.real**-2.0
+            + 1j * subtracted.array.imag * noise_map.imag**-2.0
+        )
+    ).array
+
+    np.testing.assert_allclose(
+        sparse_dirty_image, sparse_dirty_image_dense, rtol=1.0e-10, atol=1.0e-10
+    )
+    np.testing.assert_allclose(
+        operated_image,
+        np.asarray(dataset_sparse.sparse_operator.dirty_image) - sparse_dirty_image,
+        rtol=1.0e-12,
+        atol=1.0e-12,
+    )
+
+
+def test__sparse_profile_terms_from__no_operator_data_term__returns_none():
+    dataset_sparse, _ = _sparse_interface_setup()
+
+    operator = dataset_sparse.sparse_operator
+
+    operator_without_scalars = (
+        aa.InterferometerSparseOperator.from_nufft_precision_operator(
+            nufft_precision_operator=operator.nufft_precision_operator,
+            dirty_image=operator.dirty_image,
+        )
+    )
+
+    mask = dataset_sparse.real_space_mask
+
+    _, sparse_dirty_image, data_term = (
+        aa.util.inversion_interferometer.sparse_profile_terms_from(
+            sparse_operator=operator_without_scalars,
+            image=np.ones(mask.pixels_in_mask),
+            extent_index_for_masked_pixel=mask.extent_index_for_masked_pixel,
+        )
+    )
+
+    assert data_term is None
+    assert sparse_dirty_image.shape == (mask.pixels_in_mask,)
+
+
+def test__fast_chi_squared__data_none__interface_data_term_overrides_the_operator():
+    """
+    With `data=None` the interface's own `data_term` (that of profile-subtracted visibilities) takes precedence
+    over the operator's scalar (that of the raw visibilities), so the sparse inversion of the subtracted
+    visibilities passed as scalars equals the one passed the visibilities themselves; without it the
+    operator's scalar is used.
+    """
+    dataset_sparse, mapper = _sparse_interface_setup()
+
+    _, subtracted, _, sparse_dirty_image, data_term = _profile_subtracted_from(
+        dataset_sparse
+    )
+
+    def interface_from(data, data_term):
+        return aa.DatasetInterface(
+            data=data,
+            noise_map=dataset_sparse.noise_map,
+            grids=dataset_sparse.grids,
+            transformer=dataset_sparse.transformer,
+            sparse_operator=dataset_sparse.sparse_operator,
+            sparse_dirty_image=sparse_dirty_image,
+            data_term=data_term,
+        )
+
+    inversion_array = aa.Inversion(
+        dataset=interface_from(data=subtracted, data_term=None),
+        linear_obj_list=[mapper],
+    )
+    inversion_override = aa.Inversion(
+        dataset=interface_from(data=None, data_term=data_term),
+        linear_obj_list=[mapper],
+    )
+    inversion_operator = aa.Inversion(
+        dataset=interface_from(data=None, data_term=None),
+        linear_obj_list=[mapper],
+    )
+
+    assert isinstance(inversion_override, aa.InversionInterferometerSparse)
+
+    assert inversion_override.fast_chi_squared == pytest.approx(
+        inversion_array.fast_chi_squared, rel=1.0e-10
+    )
+
+    # Absent the override, term 3 is the operator's (unsubtracted) data term.
+    difference = (
+        inversion_operator.fast_chi_squared - inversion_override.fast_chi_squared
+    )
+
+    assert difference == pytest.approx(
+        dataset_sparse.sparse_operator.data_term - data_term, rel=1.0e-10
+    )
+    assert abs(difference) > 1.0e-3
+
+    # When the visibilities are passed, they are reduced over and the override is not read.
+    inversion_array_with_override = aa.Inversion(
+        dataset=interface_from(data=subtracted, data_term=0.0),
+        linear_obj_list=[mapper],
+    )
+
+    assert (
+        inversion_array_with_override.fast_chi_squared
+        == inversion_array.fast_chi_squared
+    )
+
+
+def test__fast_chi_squared__data_none__interface_data_term__jax_jit_matches_numpy():
+    jax = pytest.importorskip("jax")
+
+    import jax.numpy as jnp
+
+    dataset_sparse, mapper = _sparse_interface_setup()
+
+    mask = dataset_sparse.real_space_mask
+
+    image = np.random.default_rng(seed=5).normal(size=mask.pixels_in_mask)
+
+    def fast_chi_squared_from(image, xp):
+        _, sparse_dirty_image, data_term = (
+            aa.util.inversion_interferometer.sparse_profile_terms_from(
+                sparse_operator=dataset_sparse.sparse_operator,
+                image=image,
+                extent_index_for_masked_pixel=mask.extent_index_for_masked_pixel,
+                xp=xp,
+            )
+        )
+
+        inversion = aa.Inversion(
+            dataset=aa.DatasetInterface(
+                data=None,
+                noise_map=dataset_sparse.noise_map,
+                grids=dataset_sparse.grids,
+                transformer=dataset_sparse.transformer,
+                sparse_operator=dataset_sparse.sparse_operator,
+                sparse_dirty_image=sparse_dirty_image,
+                data_term=data_term,
+            ),
+            linear_obj_list=[mapper],
+            xp=xp,
+        )
+
+        return inversion.fast_chi_squared
+
+    fast_chi_squared_numpy = fast_chi_squared_from(image, xp=np)
+
+    fast_chi_squared_jax = jax.jit(lambda i: fast_chi_squared_from(i, xp=jnp))(
+        jnp.asarray(image)
+    )
+
+    assert float(fast_chi_squared_jax) == pytest.approx(
+        float(fast_chi_squared_numpy), rel=1.0e-8
+    )
+
+
 def _array_free_setup(n_visibilities=60, seed=3):
     """
     A NUFFT dataset with random data and non-uniform (equal real/imaginary) noise, its

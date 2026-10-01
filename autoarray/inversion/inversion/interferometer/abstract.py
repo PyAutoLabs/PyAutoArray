@@ -191,10 +191,14 @@ class AbstractInversionInterferometer(AbstractInversion):
         where `s` is the reconstruction vector, `F` is the curvature matrix, `D` is the data vector,
         and `d_r`/`d_i` are the real/imaginary parts of the observed visibilities.
 
-        When the dataset interface's `data` is `None` the third term is read from the scalar
-        `sparse_operator.data_term` cached when the operator was built, so no visibility array
-        is reduced over. That is only correct when the data fitted is the raw data the operator
-        was built from (nothing subtracted), which is the contract of passing `data=None`.
+        When the dataset interface's `data` is `None` the third term is a scalar, so no visibility
+        array is reduced over. It is the interface's own `data_term` when one is given (the data
+        term of profile-subtracted visibilities, computed via the identity in
+        `inversion_interferometer_util.sparse_profile_terms_from`), and otherwise the
+        `sparse_operator.data_term` cached when the operator was built -- which is only correct when
+        the data fitted is the raw data the operator was built from (nothing subtracted). The
+        interface's `data_term` always takes precedence, so a fit that subtracted light profiles can
+        never silently fall back to the unsubtracted scalar.
 
         This avoids computing the full mapped reconstructed visibilities and is faster than computing
         `chi_squared` via the residual visibilities when many source pixels are used.
@@ -217,12 +221,16 @@ class AbstractInversionInterferometer(AbstractInversion):
         )
 
         if self.dataset.data is None:
-            # The interface carries no visibilities (e.g. a pixelization-only fit on the sparse
-            # path, where nothing was subtracted from the data), so term 3 is the scalar
-            # `d^T N^-1 d` the sparse operator cached when it was built from the raw data.
-            chi_squared_term_3 = getattr(
-                self.dataset.sparse_operator, "data_term", None
-            )
+            # The interface carries no visibilities, so term 3 is a precomputed scalar: the
+            # interface's own `data_term` (that of profile-subtracted visibilities) when given,
+            # else the `d^T N^-1 d` the sparse operator cached when it was built from the raw data
+            # (e.g. a pixelization-only fit, where nothing was subtracted).
+            chi_squared_term_3 = getattr(self.dataset, "data_term", None)
+
+            if chi_squared_term_3 is None:
+                chi_squared_term_3 = getattr(
+                    self.dataset.sparse_operator, "data_term", None
+                )
 
             if chi_squared_term_3 is None:
                 raise exc.InversionException(

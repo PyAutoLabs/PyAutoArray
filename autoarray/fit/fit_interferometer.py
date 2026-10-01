@@ -1,5 +1,6 @@
 import functools
 import numpy as np
+from typing import Optional
 
 from autoarray.dataset.interferometer.dataset import Interferometer
 
@@ -207,10 +208,36 @@ class FitInterferometer(FitDataset):
         return signal_to_noise_map_real + 1.0j * signal_to_noise_map_imag
 
     @property
+    def sparse_chi_squared(self) -> Optional[float]:
+        """
+        The chi-squared of this fit computed from the dataset's `sparse_operator` without any visibility-sized
+        array, used by `chi_squared` when the dataset is array-free (built by `from_stream` /
+        `from_sparse_terms`, so `data` is `None`).
+
+        `None` by default: a bare `FitInterferometer` has no real-space model image to evaluate it from.
+        Subclasses whose model visibilities are the Fourier transform `p = F i_p` of a real-space image `i_p`
+        (e.g. the light-profile fits of PyAutoGalaxy and PyAutoLens without an inversion) override it with
+        `data_term - 2 i_p^T d~ + i_p^T W~ i_p`
+        (`inversion_interferometer_util.sparse_profile_terms_from`), so `log_likelihood` and
+        `figure_of_merit` work array-free. The residual and chi-squared *maps* still need the visibilities and
+        raise on such a dataset.
+        """
+        return None
+
+    @property
     def chi_squared(self) -> float:
         """
         Returns the chi-squared terms of the model data's fit to an dataset, by summing the chi-squared-map.
+
+        On an array-free dataset (no `data`) this is `sparse_chi_squared` when a subclass provides it, and
+        otherwise raises an `exc.DatasetException`.
         """
+        if self.data is None:
+            sparse_chi_squared = self.sparse_chi_squared
+
+            if sparse_chi_squared is not None:
+                return sparse_chi_squared
+
         self._require("chi_squared", "data", "noise_map")
         return fit_util.chi_squared_complex_from(
             chi_squared_map=self.chi_squared_map.array,

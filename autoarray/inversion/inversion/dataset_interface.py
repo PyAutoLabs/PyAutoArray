@@ -9,6 +9,7 @@ class DatasetInterface:
         sparse_operator=None,
         noise_covariance_matrix=None,
         sparse_dirty_image=None,
+        data_term=None,
     ):
         """
         Generic class which acts as an interface between a dataset and an inversion.
@@ -65,6 +66,16 @@ class DatasetInterface:
             visibilities of ordinary light profiles have been subtracted). If `None`, the operator's cached dirty
             image is used. This is distinct from `Interferometer.dirty_image`, the unweighted dirty image of the
             data used for visualization.
+        data_term
+            The chi-squared data term `sum(d_r^2/sigma_r^2) + sum(d_i^2/sigma_i^2)` of *this interface's*
+            (possibly profile-subtracted) visibilities, read by the sparse interferometer inversion's
+            `fast_chi_squared` when `data` is `None` in preference to the `sparse_operator`'s cached scalar (which
+            is the data term of the raw, unsubtracted visibilities). It is how a fit with ordinary light profiles
+            on an array-free dataset passes `data=None`: the light profiles' visibilities `F i_p` are never
+            formed, and the subtracted data term `data_term - 2 i_p^T d~ + i_p^T W~ i_p` is computed by
+            `inversion_interferometer_util.sparse_profile_terms_from` alongside the subtracted
+            `sparse_dirty_image`. If `None`, the operator's cached scalar is used. A scalar (traced under
+            `jax.jit` when the profile image is).
         """
         self.data = data
         self.noise_map = noise_map
@@ -74,6 +85,7 @@ class DatasetInterface:
         self.sparse_operator = sparse_operator
         self.noise_covariance_matrix = noise_covariance_matrix
         self.sparse_dirty_image = sparse_dirty_image
+        self.data_term = data_term
 
     @property
     def mask(self):

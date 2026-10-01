@@ -568,3 +568,67 @@ def test__dirty_model_image_natural_from__no_sparse_operator__raises(
 
     with pytest.raises(aa.exc.DatasetException, match="sparse_operator"):
         dirty_model_image_natural_from(dataset=interferometer_7, image=image)
+
+
+class _ProfileImageFit(aa.m.MockFitInterferometer):
+    """
+    A fit whose model visibilities are the Fourier transform of a real-space `image`, overriding the
+    `sparse_chi_squared` hook with the data-term identity as PyAutoGalaxy / PyAutoLens light-profile fits do.
+    """
+
+    def __init__(self, dataset, image):
+        super().__init__(dataset=dataset)
+        self.image = image
+
+    @property
+    def sparse_chi_squared(self):
+        return aa.util.inversion_interferometer.sparse_profile_terms_from(
+            sparse_operator=self.dataset.sparse_operator,
+            image=self.image,
+            extent_index_for_masked_pixel=self.dataset.real_space_mask.extent_index_for_masked_pixel,
+        )[2]
+
+
+def test__fit_interferometer__array_free_dataset__sparse_chi_squared_hook():
+    """
+    On an array-free dataset `chi_squared` (hence `log_likelihood`) is read from the `sparse_chi_squared` hook
+    when a subclass provides it, matching the in-memory fit of the same model visibilities; the maps still
+    raise. The hook is not consulted when the fit has data.
+    """
+    pytest.importorskip("nufftax")
+
+    dataset_memory, dataset_stream, _ = _array_free_fit_setup()
+
+    mask = dataset_memory.real_space_mask
+
+    image = aa.Array2D(
+        values=np.random.default_rng(seed=2).normal(size=mask.pixels_in_mask),
+        mask=mask,
+    )
+
+    fit_memory = aa.m.MockFitInterferometer(
+        dataset=dataset_memory,
+        model_data=dataset_memory.transformer.visibilities_from(image=image),
+    )
+    fit_stream = _ProfileImageFit(dataset=dataset_stream, image=image)
+
+    assert fit_stream.chi_squared == pytest.approx(fit_memory.chi_squared, rel=1.0e-8)
+    assert fit_stream.log_likelihood == pytest.approx(
+        fit_memory.log_likelihood, rel=1.0e-8
+    )
+    assert fit_stream.figure_of_merit == pytest.approx(
+        fit_memory.figure_of_merit, rel=1.0e-8
+    )
+
+    for name in ("residual_map", "chi_squared_map", "normalized_residual_map"):
+        with pytest.raises(aa.exc.DatasetException, match="array-free"):
+            getattr(fit_stream, name)
+
+    # With data present the hook is ignored and the chi-squared-map is summed.
+    fit_memory_hook = _ProfileImageFit(dataset=dataset_memory, image=None)
+    fit_memory_hook._model_data = fit_memory.model_data
+
+    assert fit_memory_hook.chi_squared == fit_memory.chi_squared
+
+    # The base class provides no hook.
+    assert aa.m.MockFitInterferometer(dataset=dataset_stream).sparse_chi_squared is None
