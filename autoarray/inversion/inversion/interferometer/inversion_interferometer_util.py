@@ -1804,6 +1804,78 @@ class InterferometerSparseOperator:
         return curvature_weights_0.T @ operated
 
 
+def sparse_profile_terms_from(
+    sparse_operator: "InterferometerSparseOperator",
+    image,
+    extent_index_for_masked_pixel,
+    xp=np,
+):
+    """
+    Returns the sparse-path quantities of fitting visibilities from which the visibilities `p = F i_p` of a
+    real-space image `i_p` (e.g. the summed image of a fit's ordinary light profiles) are subtracted, computed
+    without forming `p` or touching any visibility-sized array.
+
+    With `d` the visibilities the `sparse_operator` was built from, `W = 1 / sigma^2` their (equal real and
+    imaginary) inverse variances, `d~ = Re(F^H W d)` the operator's cached `dirty_image`, `W~ = Re(F^H W F)` the
+    operator itself and `data_term = sum(|d|^2 / sigma^2)` its cached scalar, linearity gives:
+
+        Re(F^H W (d - F i_p))       = d~ - W~ i_p
+        sum(|d - F i_p|^2 / sigma^2) = data_term - 2 i_p^T d~ + i_p^T W~ i_p
+
+    The first is the dirty image a sparse inversion of the profile-subtracted visibilities forms its data vector
+    from; the second is their chi-squared data term (term 3 of `fast_chi_squared`), and on its own the
+    chi-squared of a fit whose model is only `p`. Both reuse the single product `W~ i_p` (one FFT convolution on
+    the real-space grid), so the data term costs two dot products on top of the dirty image.
+
+    The data term is a difference of large numbers at high signal-to-noise (`data_term >> chi^2`); in float64
+    this is accurate to ~1e-15 relative to `data_term`, ample for likelihood comparisons.
+
+    Every operation is an `xp` array operation, so under `jax.jit` the returned scalar is traced with `i_p`.
+
+    Parameters
+    ----------
+    sparse_operator
+        The `InterferometerSparseOperator` of the dataset, carrying the `dirty_image` and `data_term` of the
+        visibilities it was built from.
+    image
+        The image `i_p` on the slim masked real-space grid (an `Array2D` or a plain array).
+    extent_index_for_masked_pixel
+        The `real_space_mask.extent_index_for_masked_pixel` mapping slim masked pixels to the operator's
+        rectangular extent grid.
+    xp
+        The array module (`numpy` or `jax.numpy`).
+
+    Returns
+    -------
+    operated_image
+        `W~ i_p` on the slim masked grid.
+    sparse_dirty_image
+        `d~ - W~ i_p`.
+    data_term
+        `data_term - 2 i_p^T d~ + i_p^T W~ i_p`, or `None` if the operator carries no `data_term`.
+    """
+    image = getattr(image, "array", image)
+
+    operated_image = sparse_operator.operated_matrix_slim_from(
+        matrix_slim=image[:, None],
+        extent_index_for_masked_pixel=extent_index_for_masked_pixel,
+        xp=xp,
+    )[:, 0]
+
+    dirty_image = xp.asarray(sparse_operator.dirty_image)
+
+    sparse_dirty_image = dirty_image - operated_image
+
+    data_term = getattr(sparse_operator, "data_term", None)
+
+    if data_term is not None:
+        data_term = (
+            data_term - 2.0 * xp.dot(image, dirty_image) + xp.dot(image, operated_image)
+        )
+
+    return operated_image, sparse_dirty_image, data_term
+
+
 @dataclass(frozen=True)
 class SparseTerms:
     """
