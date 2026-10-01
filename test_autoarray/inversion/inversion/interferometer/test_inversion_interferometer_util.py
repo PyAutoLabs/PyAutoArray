@@ -1490,12 +1490,35 @@ def _assert_terms_match_operator(terms, operator, mask, n_vis, sum_weights, rel)
     assert terms.n_vis == n_vis
 
 
-@pytest.mark.parametrize("use_jax", [False, True])
-def test__sparse_terms__sum_of_channels_equals_mfs(use_jax):
+@pytest.mark.parametrize(
+    "method, use_jax", [("nufft", False), ("numpy", False), ("numpy", True)]
+)
+def test__sparse_terms__sum_of_channels_equals_mfs(method, use_jax, monkeypatch):
+    """
+    `use_jax` only reaches the accumulator through `nufft_precision_operator_from`, which
+    ignores it under the default `method="nufft"` (already JAX). The JAX leg therefore uses
+    `method="numpy"`, which `use_jax=True` upgrades to the JAX brute force; a spy asserts that
+    builder actually runs.
+    """
     pytest.importorskip("nufftax")
+
+    util = aa.util.inversion_interferometer
+
+    jax_builder_calls = []
 
     if use_jax:
         pytest.importorskip("jax")
+
+        if util.disable_jax():
+            pytest.skip("PYAUTO_DISABLE_JAX demotes the JAX brute force to NumPy.")
+
+        jax_builder = util.nufft_precision_operator_via_jax_from
+
+        def spy(**kwargs):
+            jax_builder_calls.append(1)
+            return jax_builder(**kwargs)
+
+        monkeypatch.setattr(util, "nufft_precision_operator_via_jax_from", spy)
 
     channels = [
         _streaming_inputs(n_visibilities=n_visibilities, seed=seed)
@@ -1513,6 +1536,7 @@ def test__sparse_terms__sum_of_channels_equals_mfs(use_jax):
                 [0, uv_wavelengths.shape[0] // 2, uv_wavelengths.shape[0]],
             ),
             real_space_mask=mask,
+            method=method,
             use_jax=use_jax,
         )
         for _, uv_wavelengths, data, noise_map, _ in channels
@@ -1535,6 +1559,7 @@ def test__sparse_terms__sum_of_channels_equals_mfs(use_jax):
             for chunk in _chunks_from(uv_c, data_c, noise_c, [0, uv_c.shape[0]])
         ],
         real_space_mask=mask,
+        method=method,
         use_jax=use_jax,
     )
 
@@ -1545,7 +1570,12 @@ def test__sparse_terms__sum_of_channels_equals_mfs(use_jax):
         real_space_mask=mask,
         transformer_class=aa.TransformerNUFFT,
     )
-    operator_mfs = dataset_mfs.apply_sparse_operator(use_jax=use_jax).sparse_operator
+    operator_mfs = dataset_mfs.apply_sparse_operator(
+        method=method, use_jax=use_jax
+    ).sparse_operator
+
+    # 3 channels x 2 chunks, 3 chunks of the one accumulation, 1 in-memory build.
+    assert len(jax_builder_calls) == (10 if use_jax else 0)
 
     sum_weights = np.sum(noise_map.real**-2.0)
 
@@ -1639,15 +1669,21 @@ def test__sparse_terms_from_chunks__phase_centre__matches_in_memory_on_shifted_d
         terms_shifted.dirty_image_native, terms_unshifted.dirty_image_native
     )
 
-    # ... and leaves every other term bit-identical to the unshifted accumulation.
+    # ... leaves every (uv, sigma)-only term bit-identical to the unshifted accumulation ...
     np.testing.assert_array_equal(
         terms_shifted.nufft_precision_operator, terms_unshifted.nufft_precision_operator
     )
     np.testing.assert_array_equal(
         terms_shifted.dirty_beam_native, terms_unshifted.dirty_beam_native
     )
-    for name in ("sum_weights", "data_term", "noise_normalization", "n_vis"):
+    for name in ("sum_weights", "noise_normalization", "n_vis"):
         assert getattr(terms_shifted, name) == getattr(terms_unshifted, name)
+
+    # ... and `data_term`, formed from the shifted data, is phase-invariant (to rounding)
+    # because these sigmas are exactly equal in real and imaginary parts.
+    assert terms_shifted.data_term == pytest.approx(
+        terms_unshifted.data_term, rel=1.0e-12
+    )
 
 
 def test__sparse_terms_from_chunks__phase_centre__point_source_recentres():
@@ -1713,3 +1749,80 @@ def test__sparse_terms__add__unrecorded_left_operand_keeps_right_phase_centre():
 
     with pytest.raises(aa.exc.InversionException, match="phase_centre"):
         (unknown + a) + b
+
+
+def test__sparse_terms_from_chunks__phase_centre__data_term_uses_shifted_data():
+    """
+    `check_noise_map_real_imag_equal` accepts real and imaginary sigmas equal to a relative
+    tolerance, so `data_term` is not phase-invariant for slightly unequal sigmas. It must then
+    be formed from the shifted data, like the dirty image: a quarter-turn baseline moves
+    `d = 10000` wholly into the imaginary part, whose sigma is 1.000009.
+    """
+    from astropy import units
+
+    arcsec_to_rad = units.arcsec.to(units.rad)
+
+    mask = aa.Mask2D.all_false(shape_native=(3, 3), pixel_scales=1.0)
+    uv_wavelengths = np.array([[1.0 / (4.0 * arcsec_to_rad), 0.0]])
+    data = np.array([10000.0 + 0.0j])
+    noise_map = np.array([1.0 + 1.000009j])
+
+    terms = aa.util.inversion_interferometer.sparse_terms_from_chunks(
+        [(uv_wavelengths, data, noise_map)],
+        real_space_mask=mask,
+        transformer_class=aa.TransformerDFT,
+        phase_centre=(0.0, 1.0),
+    )
+
+    data_shifted = _phase_shifted(uv_wavelengths, data, (0.0, 1.0))
+
+    data_term_shifted = float(
+        np.sum(data_shifted.real**2.0 / noise_map.real**2.0)
+        + np.sum(data_shifted.imag**2.0 / noise_map.imag**2.0)
+    )
+
+    assert data_term_shifted == pytest.approx(99998200.0243, rel=1.0e-10)
+    assert terms.data_term == pytest.approx(data_term_shifted, rel=1.0e-12)
+
+    # The dirty image is formed from the same shifted data.
+    dataset_shifted = aa.Interferometer(
+        data=aa.Visibilities(visibilities=data_shifted),
+        noise_map=aa.VisibilitiesNoiseMap(visibilities=noise_map),
+        uv_wavelengths=uv_wavelengths,
+        real_space_mask=mask,
+        transformer_class=aa.TransformerDFT,
+    )
+    operator_shifted = dataset_shifted.apply_sparse_operator(
+        method="numpy"
+    ).sparse_operator
+
+    assert terms.data_term == pytest.approx(operator_shifted.data_term, rel=1.0e-12)
+    np.testing.assert_allclose(
+        aa.Array2D(values=terms.dirty_image_native, mask=mask).slim.array,
+        operator_shifted.dirty_image,
+        rtol=1.0e-12,
+        atol=1.0e-12 * np.abs(operator_shifted.dirty_image).max(),
+    )
+
+
+def test__sparse_terms__add__transformer_class_name_mismatch_raises():
+    with pytest.raises(aa.exc.InversionException, match="transformer_class_name"):
+        _terms_with_provenance(
+            transformer_class_name="TransformerNUFFT"
+        ) + _terms_with_provenance(transformer_class_name="TransformerDFT")
+
+    total = _terms_with_provenance(
+        transformer_class_name="TransformerDFT"
+    ) + _terms_with_provenance(transformer_class_name="TransformerDFT")
+
+    assert total.transformer_class_name == "TransformerDFT"
+
+    # Unrecorded on either side skips the check and carries the recorded value.
+    unknown = _terms_with_provenance()
+
+    assert (
+        unknown + _terms_with_provenance(transformer_class_name="TransformerDFT")
+    ).transformer_class_name == "TransformerDFT"
+    assert (
+        _terms_with_provenance(transformer_class_name="TransformerDFT") + unknown
+    ).transformer_class_name == "TransformerDFT"

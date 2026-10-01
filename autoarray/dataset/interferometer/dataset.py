@@ -678,9 +678,10 @@ class Interferometer(AbstractDataset):
             The number of source-pixel columns processed per batch by the sparse operator.
         accumulator_kwargs
             Passed to `sparse_terms_from_chunks` (`transformer_class`, `method`, `eps`,
-            `chunk_size`, `chunk_k`, `use_jax`, `show_progress`, `phase_centre`). A
-            `phase_centre` shifts only the operator's dirty image, not this dataset's retained
-            `data`, so the two then describe different phase centres. When not given,
+            `chunk_size`, `chunk_k`, `use_jax`, `show_progress`). `phase_centre` is rejected:
+            it would shift the operator's terms but not this dataset's retained `data`, so the
+            two would describe different phase centres; use `Interferometer.from_stream`
+            (array-free, no retained data) to stream with a phase-centre shift. When not given,
             `transformer_class`, `eps` and `chunk_size` follow this dataset's transformer (the
             same defaults `psf_precision_operator_from` takes), so the accumulated terms match
             `apply_sparse_operator()`.
@@ -694,8 +695,19 @@ class Interferometer(AbstractDataset):
         Raises
         ------
         exc.DatasetException
-            If any chunk has unequal real and imaginary noise sigma.
+            If any chunk has unequal real and imaginary noise sigma, or a `phase_centre` is
+            passed.
         """
+        if accumulator_kwargs.get("phase_centre") is not None:
+            raise exc.DatasetException(
+                "Interferometer.apply_sparse_operator_from_chunks does not take a "
+                "`phase_centre`: it would shift the sparse operator's dirty image and "
+                "`data_term` but not this dataset's retained `data`, so the two would describe "
+                "different phase centres and give contradictory likelihoods. Use "
+                "`Interferometer.from_stream(..., phase_centre=...)`, which builds an "
+                "array-free dataset with no retained visibilities."
+            )
+
         if disable_jax() and accumulator_kwargs.get("use_jax", False):
             accumulator_kwargs["use_jax"] = False
 

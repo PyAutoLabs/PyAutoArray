@@ -670,6 +670,29 @@ def test__apply_sparse_operator_from_chunks__unequal_real_imag_noise__raises(
         dataset.apply_sparse_operator_from_chunks(chunks)
 
 
+def test__apply_sparse_operator_from_chunks__phase_centre__raises(mask_2d_7x7):
+    """
+    A `phase_centre` would shift the operator's terms but not the retained `data`. Codex's
+    example: a quarter-turn baseline with `d = -1j` makes the shifted sparse chi-squared of a
+    unit point at the origin 0 while the residual against the retained data is 2.
+    """
+    dataset = _random_interferometer(mask_2d_7x7, transformer.TransformerDFT)
+
+    chunks = [
+        (dataset.uv_wavelengths, dataset.data.array, dataset.noise_map.array),
+    ]
+
+    with pytest.raises(aa.exc.DatasetException, match="from_stream"):
+        dataset.apply_sparse_operator_from_chunks(chunks, phase_centre=(0.0, 1.0))
+
+    # An explicit `phase_centre=None` (no shift) is accepted.
+    dataset_sparse = dataset.apply_sparse_operator_from_chunks(
+        chunks, phase_centre=None, method="numpy"
+    )
+
+    assert dataset_sparse.sparse_terms.phase_centre == (0.0, 0.0)
+
+
 def _chunks_of(dataset, edges):
     return [
         (

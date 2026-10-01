@@ -1953,7 +1953,8 @@ class SparseTerms:
         The field-wise sum of two `SparseTerms`.
 
         Raises `exc.InversionException` if a provenance field (`shape_native`,
-        `pixel_scales`, `origin`, `eps`, `phase_centre`) is recorded on both sides with different values.
+        `pixel_scales`, `origin`, `eps`, `phase_centre`, `transformer_class_name`) is recorded on
+        both sides with different values.
         The result carries, for each provenance field, the recorded value from either side
         (the left one when both are recorded), so an unrecorded operand never erases the
         provenance of a recorded one.
@@ -1972,14 +1973,23 @@ class SparseTerms:
                 f"{other.nufft_precision_operator.shape} differ."
             )
 
-        for name in ("shape_native", "pixel_scales", "origin", "eps", "phase_centre"):
+        for name in (
+            "shape_native",
+            "pixel_scales",
+            "origin",
+            "eps",
+            "phase_centre",
+            "transformer_class_name",
+        ):
             value_self = getattr(self, name)
             value_other = getattr(other, name)
 
             if value_self is None or value_other is None:
                 continue
 
-            if isinstance(value_self, float) or isinstance(value_other, float):
+            if isinstance(value_self, str) or isinstance(value_other, str):
+                differ = str(value_self) != str(value_other)
+            elif isinstance(value_self, float) or isinstance(value_other, float):
                 differ = float(value_self) != float(value_other)
             else:
                 differ = tuple(value_self) != tuple(value_other)
@@ -1988,8 +1998,8 @@ class SparseTerms:
                 raise exc.InversionException(
                     "SparseTerms can only be added when accumulated with the same provenance: "
                     f"`{name}` is {value_self!r} on one and {value_other!r} on the other. "
-                    "Terms accumulated on different real-space masks, NUFFT accuracies or "
-                    "phase centres do not describe the same operator."
+                    "Terms accumulated on different real-space masks, NUFFT accuracies, "
+                    "phase centres or transformers do not describe the same operator."
                 )
 
         return SparseTerms(
@@ -2106,13 +2116,16 @@ def sparse_terms_from_chunks(
 
         d' = d * exp(+2 pi i (u * l0 + v * m0)),   l0 = x0, m0 = y0 in radians,
 
-    before the dirty image is formed. The forward transform is
+    before any data-dependent term is formed. The forward transform is
     `V(u, v) = sum I exp(-2 pi i (u x + v y))`, so this re-centres the phase centre onto
-    `(y0, x0)`: a source at `(y0, x0)` lands at the image origin. Only `dirty_image_native`
-    changes. The precision operator, dirty beam, `sum_weights`, `noise_normalization` and
-    `n_vis` depend on the baselines and sigmas alone, and `data_term` is invariant under a unit
-    phase because the real and imaginary sigmas are equal; all are computed from the
-    unshifted chunk and are bit-identical to the unshifted accumulation. The shift is recorded
+    `(y0, x0)`: a source at `(y0, x0)` lands at the image origin. The shifted visibilities
+    form both the dirty image and `data_term`, so every data-dependent term describes the same
+    visibilities. The precision operator, dirty beam, `sum_weights`, `noise_normalization` and
+    `n_vis` depend on the baselines and sigmas alone and are bit-identical to the unshifted
+    accumulation. `data_term` is invariant under a unit phase only when the real and imaginary
+    sigmas are exactly equal; `check_noise_map_real_imag_equal` accepts them equal to a relative
+    tolerance, so with slightly unequal sigmas it differs from the unshifted value at that
+    tolerance (it is still the correct `data_term` of the shifted data). The shift is recorded
     as `SparseTerms.phase_centre` provenance (`(0.0, 0.0)` when no shift is applied), so terms
     with different phase centres -- including shifted and unshifted ones -- refuse to be
     summed.
@@ -2200,12 +2213,12 @@ def sparse_terms_from_chunks(
             uv_wavelengths=uv_wavelengths, real_space_mask=real_space_mask
         )
 
-        # The phase-centre shift only enters the dirty image; every other term is built from
-        # the unshifted chunk (they are invariant under a unit phase).
-        if not shift:
-            data_shifted = data
-        else:
-            data_shifted = data * np.exp(
+        # The phase-centre shift is applied to the data before every data-dependent term (the
+        # dirty image and `data_term`), so all of them describe the same shifted visibilities.
+        # The precision operator, dirty beam, `sum_weights` and `noise_normalization` depend on
+        # the baselines and sigmas alone.
+        if shift:
+            data = data * np.exp(
                 2j * np.pi * (uv_wavelengths[:, 0] * l0 + uv_wavelengths[:, 1] * m0)
             )
 
@@ -2231,8 +2244,8 @@ def sparse_terms_from_chunks(
         dirty_image_native = np.asarray(
             transformer.image_from(
                 visibilities=Visibilities(
-                    visibilities=data_shifted.real * noise_map_real**-2.0
-                    + 1j * data_shifted.imag * noise_map_imag**-2.0
+                    visibilities=data.real * noise_map_real**-2.0
+                    + 1j * data.imag * noise_map_imag**-2.0
                 ),
             ).native.array,
             dtype=np.float64,
