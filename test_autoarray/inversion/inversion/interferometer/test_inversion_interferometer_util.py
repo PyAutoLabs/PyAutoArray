@@ -1428,6 +1428,7 @@ def test__sparse_terms__add__unrecorded_plus_unrecorded_stays_unrecorded():
         "origin",
         "eps",
         "transformer_class_name",
+        "phase_centre",
     ):
         assert getattr(total, name) is None
 
@@ -1448,6 +1449,7 @@ def test__sparse_terms_from_chunks__records_provenance():
     assert terms.origin == (0.0, 0.0)
     assert terms.eps == 1.0e-10
     assert terms.transformer_class_name == "TransformerNUFFT"
+    assert terms.phase_centre == (0.0, 0.0)
 
     terms_dft = aa.util.inversion_interferometer.sparse_terms_from_chunks(
         _chunks_from(uv_wavelengths, data, noise_map, [0, 20]),
@@ -1461,3 +1463,253 @@ def test__sparse_terms_from_chunks__records_provenance():
     # Terms accumulated at different NUFFT accuracies cannot be summed.
     with pytest.raises(aa.exc.InversionException):
         terms + terms_dft
+
+
+def _assert_terms_match_operator(terms, operator, mask, n_vis, sum_weights, rel):
+    np.testing.assert_allclose(
+        terms.nufft_precision_operator,
+        operator.nufft_precision_operator,
+        rtol=rel,
+        atol=rel * np.abs(operator.nufft_precision_operator).max(),
+    )
+
+    dirty_image = aa.Array2D(values=terms.dirty_image_native, mask=mask).slim.array
+
+    np.testing.assert_allclose(
+        dirty_image,
+        operator.dirty_image,
+        rtol=rel,
+        atol=rel * np.abs(operator.dirty_image).max(),
+    )
+
+    assert terms.data_term == pytest.approx(operator.data_term, rel=rel)
+    assert terms.noise_normalization == pytest.approx(
+        operator.noise_normalization, rel=rel
+    )
+    assert terms.sum_weights == pytest.approx(sum_weights, rel=rel)
+    assert terms.n_vis == n_vis
+
+
+@pytest.mark.parametrize("use_jax", [False, True])
+def test__sparse_terms__sum_of_channels_equals_mfs(use_jax):
+    pytest.importorskip("nufftax")
+
+    if use_jax:
+        pytest.importorskip("jax")
+
+    channels = [
+        _streaming_inputs(n_visibilities=n_visibilities, seed=seed)
+        for n_visibilities, seed in ((40, 11), (25, 12), (57, 13))
+    ]
+
+    mask = channels[0][0]
+
+    per_channel_terms = [
+        aa.util.inversion_interferometer.sparse_terms_from_chunks(
+            _chunks_from(
+                uv_wavelengths,
+                data,
+                noise_map,
+                [0, uv_wavelengths.shape[0] // 2, uv_wavelengths.shape[0]],
+            ),
+            real_space_mask=mask,
+            use_jax=use_jax,
+        )
+        for _, uv_wavelengths, data, noise_map, _ in channels
+    ]
+
+    # `sum` starts from `0`, exercising `SparseTerms.__radd__`.
+    mfs_terms = sum(per_channel_terms)
+
+    assert isinstance(mfs_terms, aa.SparseTerms)
+
+    uv_wavelengths = np.concatenate([channel[1] for channel in channels])
+    data = np.concatenate([channel[2] for channel in channels])
+    noise_map = np.concatenate([channel[3] for channel in channels])
+    n_vis = uv_wavelengths.shape[0]
+
+    one_accumulation = aa.util.inversion_interferometer.sparse_terms_from_chunks(
+        [
+            chunk
+            for _, uv_c, data_c, noise_c, _ in channels
+            for chunk in _chunks_from(uv_c, data_c, noise_c, [0, uv_c.shape[0]])
+        ],
+        real_space_mask=mask,
+        use_jax=use_jax,
+    )
+
+    dataset_mfs = aa.Interferometer(
+        data=aa.Visibilities(visibilities=data),
+        noise_map=aa.VisibilitiesNoiseMap(visibilities=noise_map),
+        uv_wavelengths=uv_wavelengths,
+        real_space_mask=mask,
+        transformer_class=aa.TransformerNUFFT,
+    )
+    operator_mfs = dataset_mfs.apply_sparse_operator(use_jax=use_jax).sparse_operator
+
+    sum_weights = np.sum(noise_map.real**-2.0)
+
+    for terms in (mfs_terms, one_accumulation):
+        _assert_terms_match_operator(
+            terms, operator_mfs, mask, n_vis, sum_weights, rel=1.0e-12
+        )
+
+    np.testing.assert_allclose(
+        mfs_terms.dirty_beam_native,
+        one_accumulation.dirty_beam_native,
+        rtol=1.0e-12,
+        atol=1.0e-12 * np.abs(one_accumulation.dirty_beam_native).max(),
+    )
+
+
+def test__sparse_terms__radd__supports_zero_only():
+    terms = _terms_with_provenance(1.0, 3)
+
+    assert (0 + terms) is terms
+    assert sum([terms]) is terms
+
+    with pytest.raises(TypeError):
+        1 + terms
+
+    with pytest.raises(TypeError):
+        "a" + terms
+
+
+def _phase_shifted(uv_wavelengths, data, phase_centre):
+    m0, l0 = np.deg2rad(np.asarray(phase_centre) / 3600.0)
+
+    return data * np.exp(
+        2j * np.pi * (uv_wavelengths[:, 0] * l0 + uv_wavelengths[:, 1] * m0)
+    )
+
+
+@pytest.mark.parametrize("transformer_class", [aa.TransformerNUFFT, aa.TransformerDFT])
+def test__sparse_terms_from_chunks__phase_centre__matches_in_memory_on_shifted_data(
+    transformer_class,
+):
+    pytest.importorskip("nufftax")
+
+    mask, uv_wavelengths, data, noise_map, _ = _streaming_inputs()
+
+    phase_centre = (0.7, -1.3)
+
+    chunks = _chunks_from(uv_wavelengths, data, noise_map, [0, 17, 60])
+
+    terms_shifted = aa.util.inversion_interferometer.sparse_terms_from_chunks(
+        chunks,
+        real_space_mask=mask,
+        transformer_class=transformer_class,
+        phase_centre=phase_centre,
+    )
+    terms_unshifted = aa.util.inversion_interferometer.sparse_terms_from_chunks(
+        chunks,
+        real_space_mask=mask,
+        transformer_class=transformer_class,
+    )
+
+    assert terms_shifted.phase_centre == phase_centre
+    assert terms_unshifted.phase_centre == (0.0, 0.0)
+
+    # Shifted and unshifted terms describe different sky origins and cannot be summed.
+    with pytest.raises(aa.exc.InversionException, match="phase_centre"):
+        terms_shifted + terms_unshifted
+
+    dataset_shifted = aa.Interferometer(
+        data=aa.Visibilities(
+            visibilities=_phase_shifted(uv_wavelengths, data, phase_centre)
+        ),
+        noise_map=aa.VisibilitiesNoiseMap(visibilities=noise_map),
+        uv_wavelengths=uv_wavelengths,
+        real_space_mask=mask,
+        transformer_class=transformer_class,
+    )
+    operator_shifted = dataset_shifted.apply_sparse_operator().sparse_operator
+
+    _assert_terms_match_operator(
+        terms_shifted,
+        operator_shifted,
+        mask,
+        60,
+        np.sum(noise_map.real**-2.0),
+        rel=1.0e-12,
+    )
+
+    # The shift is a real change to the dirty image ...
+    assert not np.allclose(
+        terms_shifted.dirty_image_native, terms_unshifted.dirty_image_native
+    )
+
+    # ... and leaves every other term bit-identical to the unshifted accumulation.
+    np.testing.assert_array_equal(
+        terms_shifted.nufft_precision_operator, terms_unshifted.nufft_precision_operator
+    )
+    np.testing.assert_array_equal(
+        terms_shifted.dirty_beam_native, terms_unshifted.dirty_beam_native
+    )
+    for name in ("sum_weights", "data_term", "noise_normalization", "n_vis"):
+        assert getattr(terms_shifted, name) == getattr(terms_unshifted, name)
+
+
+def test__sparse_terms_from_chunks__phase_centre__point_source_recentres():
+    # An odd-shaped mask, so the image origin (0, 0) is the centre pixel (5, 5).
+    mask = aa.Mask2D.all_false(shape_native=(11, 11), pixel_scales=0.5)
+
+    # A point source at (y, x) = (1.0, -1.5) arcsec: native pixel (3, 2).
+    phase_centre = (1.0, -1.5)
+    image_native = np.zeros((11, 11))
+    image_native[3, 2] = 1.0
+
+    np.testing.assert_array_equal(
+        mask.derive_grid.all_false.native.array[3, 2], phase_centre
+    )
+
+    rng = np.random.default_rng(seed=1)
+    uv_wavelengths = rng.normal(size=(400, 2)) * 3.0e5
+
+    data = np.asarray(
+        aa.TransformerDFT(uv_wavelengths=uv_wavelengths, real_space_mask=mask)
+        .visibilities_from(image=aa.Array2D(values=image_native, mask=mask))
+        .array
+    )
+    noise_map = np.ones(400) + 1j * np.ones(400)
+
+    def peak_pixel(phase_centre):
+        terms = aa.util.inversion_interferometer.sparse_terms_from_chunks(
+            _chunks_from(uv_wavelengths, data, noise_map, [0, 150, 400]),
+            real_space_mask=mask,
+            transformer_class=aa.TransformerDFT,
+            phase_centre=phase_centre,
+        )
+        return np.unravel_index(np.argmax(terms.dirty_image_native), mask.shape_native)
+
+    assert peak_pixel(None) == (3, 2)
+    assert peak_pixel(phase_centre) == (5, 5)
+
+    # (x, y) order instead of (y, x) moves the source elsewhere, not to the centre.
+    assert peak_pixel((phase_centre[1], phase_centre[0])) != (5, 5)
+
+
+def test__sparse_terms__add__phase_centre_mismatch_raises():
+    with pytest.raises(aa.exc.InversionException, match="phase_centre"):
+        _terms_with_provenance(phase_centre=(0.0, 0.0)) + _terms_with_provenance(
+            phase_centre=(0.5, 0.0)
+        )
+
+    total = _terms_with_provenance(phase_centre=(0.5, 0.0)) + _terms_with_provenance(
+        phase_centre=(0.5, 0.0)
+    )
+
+    assert total.phase_centre == (0.5, 0.0)
+
+
+def test__sparse_terms__add__unrecorded_left_operand_keeps_right_phase_centre():
+    unknown = _terms_with_provenance()
+    a = _terms_with_provenance(phase_centre=(0.1, 0.2))
+    b = _terms_with_provenance(phase_centre=(0.3, 0.2))
+
+    assert (unknown + a).phase_centre == (0.1, 0.2)
+    assert (a + unknown).phase_centre == (0.1, 0.2)
+    assert (unknown + unknown).phase_centre is None
+
+    with pytest.raises(aa.exc.InversionException, match="phase_centre"):
+        (unknown + a) + b

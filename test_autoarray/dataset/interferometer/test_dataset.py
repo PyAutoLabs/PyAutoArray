@@ -861,3 +861,175 @@ def test__apply_sparse_operator_from_chunks__result_carries_sparse_terms(mask_2d
 
     # The in-memory `apply_sparse_operator` path records no terms.
     assert dataset.apply_sparse_operator().sparse_terms is None
+
+
+def _delaunay_mapper(mask):
+    grid = aa.Grid2D.from_mask(mask=mask, over_sample_size=1)
+    mesh = aa.mesh.Delaunay(pixels=9)
+    image_mesh_grid = aa.image_mesh.Overlay(shape=(3, 3)).image_plane_mesh_grid_from(
+        mask=mask, adapt_data=None
+    )
+    return aa.Mapper(
+        interpolator=mesh.interpolator_from(
+            source_plane_data_grid=grid, source_plane_mesh_grid=image_mesh_grid
+        ),
+        regularization=aa.reg.Constant(coefficient=1.0),
+    )
+
+
+def _assert_sparse_fits_match(dataset_a, dataset_b, mapper, rel):
+    inversion_a = aa.Inversion(dataset=dataset_a, linear_obj_list=[mapper])
+    inversion_b = aa.Inversion(dataset=dataset_b, linear_obj_list=[mapper])
+
+    assert isinstance(inversion_a, aa.InversionInterferometerSparse)
+    assert isinstance(inversion_b, aa.InversionInterferometerSparse)
+
+    for name in (
+        "fast_chi_squared",
+        "regularization_term",
+        "log_det_curvature_reg_matrix_term",
+        "log_det_regularization_matrix_term",
+    ):
+        assert float(getattr(inversion_a, name)) == pytest.approx(
+            float(getattr(inversion_b, name)), rel=rel
+        ), name
+
+    log_evidence_a = aa.m.MockFitInterferometer(
+        dataset=dataset_a, inversion=inversion_a
+    ).log_evidence
+    log_evidence_b = aa.m.MockFitInterferometer(
+        dataset=dataset_b, inversion=inversion_b
+    ).log_evidence
+
+    assert float(log_evidence_a) == pytest.approx(float(log_evidence_b), rel=rel)
+
+
+def test__from_stream__phase_centre__matches_pre_shifted_in_memory_dataset(
+    mask_2d_7x7,
+):
+    pytest.importorskip("nufftax")
+
+    dataset = _random_interferometer(mask_2d_7x7, transformer.TransformerNUFFT)
+
+    phase_centre = (0.4, -0.9)
+
+    dataset_stream = aa.Interferometer.from_stream(
+        _chunks_of(dataset, [0, 13, 40]), mask_2d_7x7, phase_centre=phase_centre
+    )
+
+    assert dataset_stream.is_array_free
+    assert dataset_stream.sparse_terms.phase_centre == phase_centre
+
+    uv_wavelengths = dataset.uv_wavelengths
+    m0, l0 = np.deg2rad(np.asarray(phase_centre) / 3600.0)
+    data_shifted = dataset.data.array * np.exp(
+        2j * np.pi * (uv_wavelengths[:, 0] * l0 + uv_wavelengths[:, 1] * m0)
+    )
+
+    dataset_shifted = aa.Interferometer(
+        data=aa.Visibilities(visibilities=data_shifted),
+        noise_map=dataset.noise_map,
+        uv_wavelengths=uv_wavelengths,
+        real_space_mask=mask_2d_7x7,
+        transformer_class=transformer.TransformerNUFFT,
+    ).apply_sparse_operator()
+
+    stream = dataset_stream.sparse_operator
+    shifted = dataset_shifted.sparse_operator
+
+    np.testing.assert_allclose(
+        stream.dirty_image,
+        shifted.dirty_image,
+        rtol=1.0e-12,
+        atol=1.0e-12 * np.abs(shifted.dirty_image).max(),
+    )
+    assert stream.data_term == pytest.approx(shifted.data_term, rel=1.0e-12)
+    assert stream.noise_normalization == pytest.approx(
+        shifted.noise_normalization, rel=1.0e-12
+    )
+
+    _assert_sparse_fits_match(
+        dataset_stream, dataset_shifted, _delaunay_mapper(mask_2d_7x7), rel=1.0e-10
+    )
+
+    # The unshifted stream records a zero phase centre, so the two cannot be summed.
+    dataset_unshifted = aa.Interferometer.from_stream(
+        _chunks_of(dataset, [0, 40]), mask_2d_7x7
+    )
+
+    assert dataset_unshifted.sparse_terms.phase_centre == (0.0, 0.0)
+
+    with pytest.raises(aa.exc.InversionException, match="phase_centre"):
+        dataset_stream.sparse_terms + dataset_unshifted.sparse_terms
+
+
+def test__from_sparse_terms__sum_of_per_channel_terms_matches_in_memory_mfs(
+    mask_2d_7x7,
+):
+    pytest.importorskip("nufftax")
+
+    channels = [
+        _random_interferometer(
+            mask_2d_7x7,
+            transformer.TransformerNUFFT,
+            n_visibilities=n_visibilities,
+            seed=seed,
+        )
+        for n_visibilities, seed in ((40, 21), (23, 22), (31, 23))
+    ]
+
+    per_channel_terms = [
+        aa.Interferometer.from_stream(
+            _chunks_of(channel, [0, 10, channel.uv_wavelengths.shape[0]]),
+            mask_2d_7x7,
+        ).sparse_terms
+        for channel in channels
+    ]
+
+    dataset_mfs_stream = aa.Interferometer.from_sparse_terms(
+        sum(per_channel_terms), real_space_mask=mask_2d_7x7
+    )
+
+    assert dataset_mfs_stream.is_array_free
+    assert dataset_mfs_stream.sparse_terms.n_vis == 94
+
+    dataset_mfs_memory = aa.Interferometer(
+        data=aa.Visibilities(
+            visibilities=np.concatenate([channel.data.array for channel in channels])
+        ),
+        noise_map=aa.VisibilitiesNoiseMap(
+            visibilities=np.concatenate(
+                [channel.noise_map.array for channel in channels]
+            )
+        ),
+        uv_wavelengths=np.concatenate([channel.uv_wavelengths for channel in channels]),
+        real_space_mask=mask_2d_7x7,
+        transformer_class=transformer.TransformerNUFFT,
+    ).apply_sparse_operator()
+
+    stream = dataset_mfs_stream.sparse_operator
+    memory = dataset_mfs_memory.sparse_operator
+
+    np.testing.assert_allclose(
+        stream.nufft_precision_operator,
+        memory.nufft_precision_operator,
+        rtol=1.0e-12,
+        atol=1.0e-12 * np.abs(memory.nufft_precision_operator).max(),
+    )
+    np.testing.assert_allclose(
+        stream.dirty_image,
+        memory.dirty_image,
+        rtol=1.0e-12,
+        atol=1.0e-12 * np.abs(memory.dirty_image).max(),
+    )
+    assert stream.data_term == pytest.approx(memory.data_term, rel=1.0e-12)
+    assert stream.noise_normalization == pytest.approx(
+        memory.noise_normalization, rel=1.0e-12
+    )
+
+    _assert_sparse_fits_match(
+        dataset_mfs_stream,
+        dataset_mfs_memory,
+        _delaunay_mapper(mask_2d_7x7),
+        rel=1.0e-10,
+    )

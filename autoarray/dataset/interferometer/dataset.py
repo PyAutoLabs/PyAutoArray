@@ -1,6 +1,6 @@
 import logging
 import numpy as np
-from typing import Optional
+from typing import Optional, Tuple
 
 from autonerves.fitsable import ndarray_via_fits_from
 from autonerves import cached_property
@@ -338,6 +338,7 @@ class Interferometer(AbstractDataset):
         use_jax: bool = False,
         show_progress: bool = False,
         batch_size: int = 128,
+        phase_centre: Optional[Tuple[float, float]] = None,
     ) -> "Interferometer":
         """
         Build an array-free `Interferometer` by accumulating a stream of visibility chunks,
@@ -360,6 +361,12 @@ class Interferometer(AbstractDataset):
             Passed to `sparse_terms_from_chunks`.
         batch_size
             The number of source-pixel columns processed per batch by the sparse operator.
+        phase_centre
+            The `(y, x)` phase-centre shift in arcseconds applied to every chunk's
+            visibilities, `d' = d * exp(+2 pi i (u * x0 + v * y0))` (radians), so a source at
+            `(y0, x0)` lands at the image origin; recorded as `sparse_terms.phase_centre`.
+            `None` applies no shift (recorded as `(0.0, 0.0)`). See
+            `sparse_terms_from_chunks`.
 
         Raises
         ------
@@ -379,6 +386,7 @@ class Interferometer(AbstractDataset):
             chunk_k=chunk_k,
             use_jax=use_jax,
             show_progress=show_progress,
+            phase_centre=phase_centre,
         )
 
         return cls.from_sparse_terms(
@@ -670,7 +678,9 @@ class Interferometer(AbstractDataset):
             The number of source-pixel columns processed per batch by the sparse operator.
         accumulator_kwargs
             Passed to `sparse_terms_from_chunks` (`transformer_class`, `method`, `eps`,
-            `chunk_size`, `chunk_k`, `use_jax`, `show_progress`). When not given,
+            `chunk_size`, `chunk_k`, `use_jax`, `show_progress`, `phase_centre`). A
+            `phase_centre` shifts only the operator's dirty image, not this dataset's retained
+            `data`, so the two then describe different phase centres. When not given,
             `transformer_class`, `eps` and `chunk_size` follow this dataset's transformer (the
             same defaults `psf_precision_operator_from` takes), so the accumulated terms match
             `apply_sparse_operator()`.
