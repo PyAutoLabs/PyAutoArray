@@ -238,6 +238,59 @@ def test__from_manual_adapt_radial_bin__centre_list_input():
     )
 
 
+@pytest.mark.parametrize(
+    "values, cut, lower, upper",
+    [
+        ([-2.0, 0.0, 2.999, 3.0, 3.001, 20.0], 3.0, 2, 4),
+        ([0.0, 0.5, 1.0, 2.0, 2.5, 2.9], 3.0, 2, 4),
+        ([-2.0, 0.0, 1.0, 1.5, 2.0, 3.0], 1.5, 1, 8),
+    ],
+)
+def test__from_snr(values, cut, lower, upper):
+    mask = aa.Mask2D(
+        mask=[[True, False, False], [False, False, True], [False, True, False]],
+        pixel_scales=(0.2, 0.3),
+        origin=(1.0, -2.0),
+    )
+    signal_to_noise_map = aa.Array2D(values=values, mask=mask)
+
+    sub_size = aa.util.over_sample.over_sample_size_via_snr_from(
+        signal_to_noise_map=signal_to_noise_map,
+        signal_to_noise_cut=cut,
+        sub_size_lower=lower,
+        sub_size_upper=upper,
+    )
+
+    np.testing.assert_array_equal(
+        sub_size.array, np.where(np.array(values) > cut, upper, lower)
+    )
+    assert np.issubdtype(sub_size.array.dtype, np.integer)
+    assert sub_size.mask is mask
+    assert sub_size.pixel_scales == (0.2, 0.3)
+    assert sub_size.origin == (1.0, -2.0)
+    assert sub_size.shape_native == (3, 3)
+    np.testing.assert_array_equal(signal_to_noise_map.array, values)
+
+
+def test__from_snr_defaults():
+    signal_to_noise_map = aa.Array2D.no_mask(
+        values=[[0.0, 3.0, 4.0]], pixel_scales=1.0
+    )
+
+    sub_size = aa.util.over_sample.over_sample_size_via_snr_from(signal_to_noise_map)
+
+    np.testing.assert_array_equal(sub_size.array, [2, 2, 4])
+
+
+def test__from_adapt_lowers_cut_and_divides_by_noise():
+    data = aa.Array2D.no_mask(values=[[2.0, 4.0, 6.0]], pixel_scales=1.0)
+    noise_map = aa.Array2D.no_mask(values=[[2.0, 2.0, 2.0]], pixel_scales=1.0)
+
+    sub_size = aa.util.over_sample.over_sample_size_via_adapt_from(data, noise_map)
+
+    np.testing.assert_array_equal(sub_size.array, [2, 4, 4])
+
+
 def test__from_adapt():
     mask = aa.Mask2D(
         mask=[[True, True, True], [True, False, False], [True, True, False]],
