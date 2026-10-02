@@ -471,7 +471,22 @@ def test__InterpolatorRectangular__mappings_sizes_weights_via_property():
     areas = geometry.areas_transformed
     assert areas.shape == (36,)
     assert np.all(np.isfinite(areas))
-    assert np.all(areas > 0.0)
+    assert np.all(areas >= 0.0)
+    edges = geometry.edges_transformed
+    # For six nodes, y midpoints start at 11/6, 3/2, 7/6;
+    # x midpoints start at -1/2, -1/6 and end at 7/6, 3/2.
+    # Clamping to [0, 1] collapses two top rows and the side columns.
+    np.testing.assert_allclose(edges[:3, 0], np.max(data_grid.array[:, 0]))
+    np.testing.assert_allclose(edges[-1, 0], np.min(data_grid.array[:, 0]))
+    np.testing.assert_allclose(edges[:2, 1], np.min(data_grid.array[:, 1]))
+    np.testing.assert_allclose(edges[-2:, 1], np.max(data_grid.array[:, 1]))
+    areas_native = areas.reshape(6, 6)
+    np.testing.assert_array_equal(areas_native[:2], 0.0)
+    np.testing.assert_array_equal(areas_native[:, [0, -1]], 0.0)
+    assert np.all(areas_native[2:, 1:-1] > 0.0)
+    expected = np.outer(-np.diff(edges[:, 0]), np.diff(edges[:, 1])).ravel()
+    np.testing.assert_allclose(areas, expected)
+    assert areas.sum() == pytest.approx(np.prod(np.ptp(data_grid.array, axis=0)))
 
 
 def test__InterpolatorRectangular__rank_transform_via_property():
@@ -514,7 +529,22 @@ def test__InterpolatorRectangular__rank_transform_via_property():
     areas = geometry.areas_transformed
     assert areas.shape == (36,)
     assert np.all(np.isfinite(areas))
-    assert np.all(areas > 0.0)
+    assert np.all(areas >= 0.0)
+    edges = geometry.edges_transformed
+    # For six nodes, y midpoints start at 11/6, 3/2, 7/6;
+    # x midpoints start at -1/2, -1/6 and end at 7/6, 3/2.
+    # Clamping to [0, 1] collapses two top rows and the side columns.
+    np.testing.assert_allclose(edges[:3, 0], np.max(data_grid.array[:, 0]))
+    np.testing.assert_allclose(edges[-1, 0], np.min(data_grid.array[:, 0]))
+    np.testing.assert_allclose(edges[:2, 1], np.min(data_grid.array[:, 1]))
+    np.testing.assert_allclose(edges[-2:, 1], np.max(data_grid.array[:, 1]))
+    areas_native = areas.reshape(6, 6)
+    np.testing.assert_array_equal(areas_native[:2], 0.0)
+    np.testing.assert_array_equal(areas_native[:, [0, -1]], 0.0)
+    assert np.all(areas_native[2:, 1:-1] > 0.0)
+    expected = np.outer(-np.diff(edges[:, 0]), np.diff(edges[:, 1])).ravel()
+    np.testing.assert_allclose(areas, expected)
+    assert areas.sum() == pytest.approx(np.prod(np.ptp(data_grid.array, axis=0)))
 
 
 # ---------------------------------------------------------------------------
