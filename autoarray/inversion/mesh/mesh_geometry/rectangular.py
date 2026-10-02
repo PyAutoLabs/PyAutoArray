@@ -437,36 +437,14 @@ class MeshGeometryRectangular(AbstractMeshGeometry):
         The source-plane area of every pixel in the rectangular pixelization,
         transformed through the kernel-density CDF the mapper adapts with.
 
-        ``kernel_bandwidth`` / ``kernel_knots`` of None (e.g. the uniform
-        mesh's interpolator, which passes no kernel arguments) fall back to
-        the kernel defaults.
+        Cell boundaries are the mapper's node-midpoint edges, including
+        clamped guard cells. Reusing ``edges_transformed`` also keeps the
+        slim data grid aligned with its adapt-image weights.
         """
-        from autoarray.inversion.mesh.interpolator.rectangular import (
-            KERNEL_CDF_DEFAULT_BANDWIDTH,
-            KERNEL_CDF_DEFAULT_KNOTS,
-            adaptive_rectangular_areas_from,
-        )
-
-        bandwidth = (
-            self.kernel_bandwidth
-            if self.kernel_bandwidth is not None
-            else KERNEL_CDF_DEFAULT_BANDWIDTH
-        )
-        n_knots = (
-            self.kernel_knots
-            if self.kernel_knots is not None
-            else KERNEL_CDF_DEFAULT_KNOTS
-        )
-
-        return adaptive_rectangular_areas_from(
-            source_grid_shape=self.shape_native,
-            data_grid=self.data_grid.over_sampled,
-            mesh_weight_map=self.mesh_weight_map,
-            bandwidth=bandwidth,
-            n_knots=n_knots,
-            transform=self.transform,
-            xp=self._xp,
-        )
+        edges = self.edges_transformed
+        heights = self._xp.abs(self._xp.diff(edges[:, 0]))
+        widths = self._xp.abs(self._xp.diff(edges[:, 1]))
+        return self._xp.outer(heights, widths).ravel()
 
     @property
     def areas_for_magnification(self):

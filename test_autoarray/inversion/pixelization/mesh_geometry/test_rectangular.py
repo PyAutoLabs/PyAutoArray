@@ -159,22 +159,20 @@ def test__areas_transformed(mask_2d_7x7):
     )
 
     areas = interpolator.mesh_geometry.areas_transformed
+    np.testing.assert_allclose(
+        interpolator.mesh_geometry.edges_transformed,
+        [[1.5, -1.5], [1.5, -1.5], [0.0, 0.0], [-1.5, 1.5]],
+        atol=1e-8,
+    )
 
     assert np.all(np.isfinite(areas))
-    assert np.all(areas > 0.0)
-
-    # The unit square maps exactly onto the data bounding box (3.0 x 3.0), so
-    # the per-axis edge differences telescope and the areas sum to its area.
+    assert np.all(areas >= 0.0)
+    # Node-midpoint edges clamp the guard cells to the data span. The
+    # degenerate 3x3 mesh therefore covers its 3x3 bounding box with four cells.
+    np.testing.assert_allclose(
+        areas.reshape(3, 3), [[0.0, 0.0, 0.0], [0.0, 2.25, 2.25], [0.0, 2.25, 2.25]]
+    )
     assert areas.sum() == pytest.approx(9.0, rel=1e-8)
-
-    # The input grid is 4-fold symmetric, so the transformed areas must be:
-    # equal corners, equal edge-midpoints, single centre value.
-    assert areas[0] == pytest.approx(areas[2], rel=1e-8)
-    assert areas[0] == pytest.approx(areas[6], rel=1e-8)
-    assert areas[0] == pytest.approx(areas[8], rel=1e-8)
-    assert areas[1] == pytest.approx(areas[3], rel=1e-8)
-    assert areas[1] == pytest.approx(areas[5], rel=1e-8)
-    assert areas[1] == pytest.approx(areas[7], rel=1e-8)
 
 
 def test__edges_transformed(mask_2d_7x7):
@@ -265,3 +263,35 @@ def test__edges_transformed__aligned_with_interpolation_node_convention():
     # missed by ~0.4 in y.
     assert centroid_y == pytest.approx(test_point[0, 0], abs=0.1)
     assert centroid_x == pytest.approx(test_point[0, 1], abs=0.1)
+
+
+@pytest.mark.parametrize("over_sample_size", [2, 1])
+def test__areas_transformed__adapt_image_matches_cell_edges(over_sample_size):
+    grid = aa.Grid2D.uniform(
+        shape_native=(5, 5), pixel_scales=0.4, over_sample_size=over_sample_size
+    )
+    adapt_data = aa.Array2D.no_mask(
+        values=np.arange(1.0, 26.0).reshape(5, 5) ** 2, pixel_scales=0.4
+    )
+    mesh = aa.mesh.RectangularBilinearAdaptImage(shape=(6, 6))
+    mapper = aa.Mapper(
+        interpolator=mesh.interpolator_from(
+            source_plane_data_grid=grid,
+            source_plane_mesh_grid=None,
+            adapt_data=adapt_data,
+        )
+    )
+    geometry = mapper.mesh_geometry
+    assert len(geometry.mesh_weight_map) == len(grid.array)
+    assert len(grid.over_sampled) == len(grid.array) * over_sample_size**2
+    assert np.ptp(geometry.mesh_weight_map) > 0.0
+
+    edges = geometry.edges_transformed
+    areas = geometry.areas_transformed
+    # Rows descend in y; columns ascend in x. Preserve the mapper's row order.
+    expected = np.outer(-np.diff(edges[:, 0]), np.diff(edges[:, 1])).ravel()
+    assert areas.shape == (36,)
+    assert np.all(np.isfinite(areas))
+    assert np.all(areas >= 0.0)
+    np.testing.assert_allclose(areas, expected, rtol=1e-12, atol=1e-12)
+    np.testing.assert_array_equal(geometry.areas_for_magnification, areas)
