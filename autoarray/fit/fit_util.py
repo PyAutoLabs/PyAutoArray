@@ -248,7 +248,9 @@ def chi_squared_map_with_mask_from(
     mask
         The mask applied to the residual-map, where `False` entries are included in the calculation.
     """
-    return xp.where(mask == 0, xp.square(residual_map / noise_map), 0)
+    included = mask == 0
+    safe_noise_map = xp.where(included, noise_map, 1.0)
+    return xp.where(included, xp.square(residual_map / safe_noise_map), 0)
 
 
 def chi_squared_with_mask_from(
@@ -449,7 +451,9 @@ def residual_flux_fraction_map_from(
     data
         The data of the dataset.
     """
-    return xp.where(data != 0, residual_map / data, 0)
+    included = data != 0
+    safe_data = xp.where(included, data, 1.0)
+    return xp.where(included, residual_map / safe_data, 0)
 
 
 def residual_flux_fraction_map_with_mask_from(
@@ -460,7 +464,8 @@ def residual_flux_fraction_map_with_mask_from(
 
     Residual_Flux_Fraction = Residuals / Data = (Data - Model)/Data
 
-    The residual flux fraction map values in masked pixels are returned as zero.
+    The residual flux fraction map values in masked pixels or pixels with zero data
+    are returned as zero, matching the unmasked helper.
 
     Parameters
     ----------
@@ -471,4 +476,6 @@ def residual_flux_fraction_map_with_mask_from(
     mask
         The mask applied to the residual-map, where `False` entries are included in the calculation.
     """
-    return xp.where(mask == 0, residual_map / data, 0)
+    included = (mask == 0) & (data != 0)
+    safe_data = xp.where(included, data, 1.0)
+    return xp.where(included, residual_map / safe_data, 0)

@@ -549,3 +549,47 @@ def test__residual_flux_fraction_map_with_mask_from__different_model__correct_un
     )
 
     assert (residual_flux_fraction_map == np.array([0.0, 0.1, 0.2, 0.0])).all()
+
+
+@pytest.mark.parametrize(
+    "mask", [np.array([False, False, True, True]), np.ones(4, dtype=bool)]
+)
+def test__chi_squared_masked_zero_noise__safe_excluded_divisions(mask):
+    residual = np.array([2.0, -3.0, 4.0, 5.0])
+    noise = np.array([1.0, 2.0, 0.0, 0.0])
+    with np.errstate(divide="raise", invalid="raise"):
+        result = aa.util.fit.chi_squared_map_with_mask_from(
+            residual_map=residual, noise_map=noise, mask=mask
+        )
+    np.testing.assert_allclose(result, np.where(mask, 0.0, [4.0, 2.25, 0.0, 0.0]))
+
+
+@pytest.mark.parametrize("masked", [False, True])
+@pytest.mark.parametrize(
+    "mask", [np.array([False, False, True, True]), np.ones(4, dtype=bool)]
+)
+def test__residual_fraction_zero_data__safe_divisions(masked, mask):
+    residual = np.array([2.0, -3.0, 4.0, 5.0])
+    data = np.array([1.0, 0.0, -2.0, 0.0])
+    expected = np.array([2.0, 0.0, -2.0, 0.0])
+    with np.errstate(divide="raise", invalid="raise"):
+        if masked:
+            result = aa.util.fit.residual_flux_fraction_map_with_mask_from(
+                residual_map=residual, data=data, mask=mask
+            )
+            expected = np.where(mask, 0.0, expected)
+        else:
+            result = aa.util.fit.residual_flux_fraction_map_from(
+                residual_map=residual, data=data
+            )
+    np.testing.assert_allclose(result, expected)
+
+
+def test__chi_squared_included_zero_noise__remains_undefined():
+    with np.errstate(divide="ignore"):
+        result = aa.util.fit.chi_squared_map_with_mask_from(
+            residual_map=np.array([2.0]),
+            noise_map=np.array([0.0]),
+            mask=np.array([False]),
+        )
+    assert np.isinf(result[0])
