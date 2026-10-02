@@ -528,6 +528,42 @@ def over_sample_size_via_radial_bins_from(
     return Array2D(values=sub_size, mask=grid.mask)
 
 
+def over_sample_size_via_snr_from(
+    signal_to_noise_map: Array2D,
+    signal_to_noise_cut: float = 3.0,
+    sub_size_lower: int = 2,
+    sub_size_upper: int = 4,
+) -> Array2D:
+    """
+    Return integer sub-grid sizes by thresholding an existing signal-to-noise map.
+
+    Pixels strictly above the cut receive the upper size; all other pixels receive
+    the lower size. The input is already signal-to-noise, so no noise division is
+    performed and the cut is never lowered for low signal-to-noise data.
+
+    Parameters
+    ----------
+    signal_to_noise_map
+        The signal-to-noise of each unmasked pixel.
+    signal_to_noise_cut
+        The fixed threshold separating the lower and upper sub-grid sizes.
+    sub_size_lower
+        The sub-grid size for pixels at or below the cut.
+    sub_size_upper
+        The sub-grid size for pixels strictly above the cut.
+
+    Returns
+    -------
+    Array2D
+        The sub-grid sizes, preserving the input mask and its pixel metadata.
+    """
+    sub_size = np.where(
+        signal_to_noise_map.array > signal_to_noise_cut, sub_size_upper, sub_size_lower
+    )
+
+    return Array2D(values=sub_size, mask=signal_to_noise_map.mask)
+
+
 def over_sample_size_via_adapt_from(
     data: Array2D,
     noise_map: Array2D,
