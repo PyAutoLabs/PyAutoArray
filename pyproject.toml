@@ -30,6 +30,7 @@ dependencies = [
     # 1. JAX in base dependencies (PyAutoLens#702) — the floor must name a
     #    release carrying `jax`/`jaxlib` in autonerves' *base* Requires-Dist, so
     #    backtracking cannot pair this autoarray with a jax-optional autonerves.
+    #    The newer floor also requires the CPU LAPACK exclusions (Heart#274).
     #    Satisfied since 2026.8.22.1; every later release keeps them there.
     # 2. The SMALLDAT regime stamp (PyAutoNerves#153/#154) — `should_simulate`
     #    prefers the header card that autonerves' writer stamps, and 2026.8.23.1
@@ -39,7 +40,7 @@ dependencies = [
     #    shape-identical to full-resolution ones — go undetected. That is the
     #    case the stamp exists for, so the floor is what makes it reachable for
     #    an installed autoarray rather than a checkout.
-    "autonerves>=2026.8.23.1",
+    "autonerves>2026.10.4.1",
     "astropy>=5.0",
     "decorator>=4.0.0",
     "dill>=0.3.1.1",
