@@ -385,8 +385,9 @@ def reconstruction_positive_only_from(
     produced the returned reconstruction started from a memo seed, ``"dense"`` if it started from the
     sign of the unconstrained dense solve) and ``warm_start_fallback`` (`True` if a memo seed breached
     `Settings.nnls_warm_start_error_tolerance` and its entry was dropped, so the next solve for that key
-    restarts dense). They are set after `fnnls_cholesky` returns, so a diagnostic wrapping the solver
-    must read the dict it handed in *after* the evaluation, not at the point the solver returns.
+    restarts dense), and ``warm_start_backoff`` (`True` if the memo seed was skipped because the key's
+    seeds kept falling back -- see the back-off in `nnls_memo`). They are set after `fnnls_cholesky`
+    returns, so a diagnostic wrapping the solver must read the dict it handed in *after* the evaluation, not at the point the solver returns.
 
     Returns
     -------
@@ -564,8 +565,19 @@ def reconstruction_positive_only_from(
 
         entry = nnls_memo.passive_set_get(key=key, n=n) if use_memo else None
 
+        # A key whose seeds keep falling back is backed off (see `nnls_memo`):
+        # this solve starts dense, but still refreshes the entry below. Only a
+        # solve that would otherwise have been seeded consumes a skip.
+        backoff = entry is not None and nnls_memo.backoff_should_skip(key=key)
+
+        skipped_entry = entry if backoff else None
+
+        if backoff:
+            entry = None
+
         stats["seed_source"] = "dense"
         stats["warm_start_fallback"] = False
+        stats["warm_start_backoff"] = backoff
 
         if entry is not None:
             try:
@@ -600,6 +612,12 @@ def reconstruction_positive_only_from(
         if use_memo:
             error_fraction = stats["warm_start_errors"] / max(n, 1)
 
+            tolerance = settings.nnls_warm_start_error_tolerance
+
+            guard_active = (
+                tolerance is not None and np.isfinite(tolerance) and tolerance > 0.0
+            )
+
             if stats["seed_source"] == "memo":
                 # A memo seed is judged against the dense-sign start it
                 # replaced, not against an absolute error count: the absolute
@@ -609,19 +627,15 @@ def reconstruction_positive_only_from(
                 # next solve for this key restarts dense and refreshes the
                 # reference -- no stale seed can be dragged through a run in a
                 # regime the reference was never measured in.
-                tolerance = settings.nnls_warm_start_error_tolerance
-
-                guard_active = (
-                    tolerance is not None and np.isfinite(tolerance) and tolerance > 0.0
-                )
-
                 if (
                     guard_active
                     and error_fraction > tolerance * entry.dense_error_fraction
                 ):
                     nnls_memo.memo_drop(key=key)
+                    nnls_memo.backoff_record_fallback(key=key)
                     stats["warm_start_fallback"] = True
                 else:
+                    nnls_memo.backoff_record_accept(key=key)
                     # The reference describes the dense-sign start, so it is
                     # carried forward unchanged; only a dense solve refreshes it.
                     nnls_memo.passive_set_put(
@@ -630,6 +644,22 @@ def reconstruction_positive_only_from(
                         dense_error_fraction=entry.dense_error_fraction,
                     )
             else:
+                if (
+                    skipped_entry is not None
+                    and guard_active
+                    and nnls_memo.seed_error_fraction(
+                        seed_passive_set=skipped_entry.passive_set,
+                        passive_set=stats["passive_set"],
+                        n=n,
+                    )
+                    <= tolerance * error_fraction
+                ):
+                    # The seed this backed-off solve skipped would have passed
+                    # the guard against it, so the stream has turned local
+                    # again: cancel the remaining skips and seed the next
+                    # solve (whose own verdict decides whether the streak ends).
+                    nnls_memo.backoff_end_skip(key=key)
+
                 nnls_memo.passive_set_put(
                     key=key,
                     passive_set=stats["passive_set"],

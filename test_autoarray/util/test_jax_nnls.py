@@ -60,11 +60,16 @@ def test__reconstruction_positive_only_from__numpy_path_ignores_knobs():
 
 @pytest.fixture(autouse=True)
 def _clear_nnls_memo():
-    from autoarray.inversion.inversion.nnls_memo import _nnls_passive_set_memo
+    from autoarray.inversion.inversion.nnls_memo import (
+        _nnls_backoff,
+        _nnls_passive_set_memo,
+    )
 
     _nnls_passive_set_memo.clear()
+    _nnls_backoff.clear()
     yield
     _nnls_passive_set_memo.clear()
+    _nnls_backoff.clear()
 
 
 def _small_positive_only_system():
