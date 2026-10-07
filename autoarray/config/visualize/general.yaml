@@ -1,7 +1,7 @@
 general:
   backend: default                      # The matplotlib backend used for visualization. `default` uses the system default, can specify specific backend (e.g. TKAgg, Qt5Agg, WXAgg).
   dpi: 150                              # Resolution in dots per inch used when saving figures. Lower values reduce file size (e.g. 150 gives ~50% smaller files than 300 with negligible quality loss for diagnostic subplots).
-  imshow_origin: upper                  # The `origin` input of `imshow`, determining if pixel values are ascending or descending on the y-axis.
+  imshow_origin: upper                  # The `origin` input of `imshow`, determining if pixel values are ascending or descending on the y-axis. Presentation only: overlays are reflected with the image so they stay registered, but under `lower` the displayed y axis and reported model y parameters (e.g. centres) disagree in sign. Flipping the data itself at load time is a different operation.
   log10_min_value: 1.0e-4               # If negative values are being plotted on a log10 scale, values below this value are rounded up to it (e.g. to remove negative values).
   log10_max_value: 1.0e99               # If positive values are being plotted on a log10 scale, values above this value are rounded down to it.
   zoom_around_mask: true                # If True, plots of data structures with a mask automatically zoom in the masked region.

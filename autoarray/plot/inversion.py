@@ -16,6 +16,8 @@ from autoarray.plot.utils import (
     save_figure,
     norm_from,
     _conf_imshow_origin,
+    _overlay_yx_for_origin,
+    numpy_grid,
     plot_regions,
 )
 
@@ -130,10 +132,15 @@ def plot_inversion_reconstruction(
 
     is_subplot = not owns_figure
 
+    # Extent of an ``imshow`` raster drawn on *ax* (uniform rectangular meshes
+    # only); ``None`` for ``pcolormesh`` / ``tripcolor`` panels, which are drawn
+    # in data coordinates and need no origin handling.
+    raster_extent = None
+
     if isinstance(
         mapper.interpolator, (InterpolatorRectangular, InterpolatorRectangularUniform)
     ):
-        _plot_rectangular(
+        raster_extent = _plot_rectangular(
             ax, pixel_values, mapper, norm, colormap, extent, is_subplot=is_subplot
         )
     elif isinstance(
@@ -144,6 +151,39 @@ def plot_inversion_reconstruction(
         )
 
     # --- overlays --------------------------------------------------------------
+    # Over an ``imshow`` raster drawn with ``origin="lower"`` the (y, x)
+    # overlays are reflected for display so they stay registered to the
+    # pixels (PyAutoArray#565); every other case is left unchanged.
+    origin_imshow = _conf_imshow_origin() if raster_extent is not None else None
+    if origin_imshow == "lower":
+
+        def _for_origin(yx):
+            return _overlay_yx_for_origin(yx, raster_extent, origin_imshow)
+
+        if lines is not None:
+            lines = [
+                (
+                    _for_origin(np.asarray(line).reshape(-1, 2))
+                    if line is not None and len(line) > 0
+                    else line
+                )
+                for line in lines
+            ]
+        if regions is not None:
+            regions = [
+                (
+                    None
+                    if region is None
+                    else (
+                        _for_origin(region)
+                        if isinstance(region, np.ndarray) and region.ndim == 2
+                        else [_for_origin(polygon) for polygon in region]
+                    )
+                )
+                for region in regions
+            ]
+        grid = _for_origin(numpy_grid(grid))
+
     if lines is not None:
         for i, line in enumerate(lines):
             if line is not None and len(line) > 0:
@@ -217,6 +257,12 @@ def _plot_rectangular(
     is_subplot
         When ``True`` uses ``labelsize_subplot`` from config for the colorbar
         tick labels (matches the behaviour of :func:`~autoarray.plot.array.plot_array`).
+
+    Returns
+    -------
+    tuple or None
+        The ``imshow`` extent when the uniform path draws a raster (so callers
+        can register overlays to its origin), else ``None``.
     """
     from autoarray.inversion.mesh.interpolator.rectangular_uniform import (
         InterpolatorRectangularUniform,
@@ -258,6 +304,7 @@ def _plot_rectangular(
             origin=_conf_imshow_origin(),
         )
         _apply_colorbar(im, ax, is_subplot=is_subplot)
+        return pix_array.geometry.extent
     else:
         y_edges, x_edges = mapper.mesh_geometry.edges_transformed.T
         Y, X = np.meshgrid(y_edges, x_edges, indexing="ij")
@@ -270,6 +317,7 @@ def _plot_rectangular(
             cmap=colormap,
         )
         _apply_colorbar(im, ax, is_subplot=is_subplot)
+        return None
 
 
 def _plot_delaunay(ax, pixel_values, mapper, norm, colormap, extent, is_subplot=False):
