@@ -2350,6 +2350,8 @@ def test__sparse_terms_from_chunks__oversample__default_none_carries_no_fine_gri
 def test__sparse_terms_from_chunks__oversample__not_a_positive_even_integer__raises(
     oversample,
 ):
+    pytest.importorskip("nufftax")
+
     mask, uv_wavelengths, data, noise_map, _ = _streaming_inputs()
 
     with pytest.raises(ValueError, match="oversample"):
@@ -2361,6 +2363,8 @@ def test__sparse_terms_from_chunks__oversample__not_a_positive_even_integer__rai
 
 
 def test__sparse_terms_from_chunks__oversample__negative_pad__raises():
+    pytest.importorskip("nufftax")
+
     mask, uv_wavelengths, data, noise_map, _ = _streaming_inputs()
 
     with pytest.raises(ValueError, match="oversample_pad"):
