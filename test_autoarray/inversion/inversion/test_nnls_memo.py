@@ -16,20 +16,31 @@ import autoarray as aa
 
 from autoarray.inversion.inversion import nnls_memo
 from autoarray.inversion.inversion.nnls_memo import (
+    _NNLS_BACKOFF_AFTER_FALLBACKS,
+    _NNLS_BACKOFF_MAX_SKIP,
     _NNLS_PASSIVE_SET_MEMO_MAX_ENTRIES,
+    _nnls_backoff,
     _nnls_passive_set_memo,
+    backoff_end_skip,
+    backoff_record_accept,
+    backoff_record_fallback,
+    backoff_should_skip,
     memo_drop,
+    memo_clear,
     memo_key,
     passive_set_get,
     passive_set_put,
+    seed_error_fraction,
 )
 
 
 @pytest.fixture(autouse=True)
 def _clean_memo():
     _nnls_passive_set_memo.clear()
+    _nnls_backoff.clear()
     yield
     _nnls_passive_set_memo.clear()
+    _nnls_backoff.clear()
 
 
 def _normal_equations(seed, n=8, n_data=20):
@@ -203,3 +214,232 @@ def test__memo_enabled__reads_the_environment(monkeypatch):
 
 def test__memo_key__separates_solve_sizes():
     assert memo_key(n=3, fingerprint="mesh") != memo_key(n=4, fingerprint="mesh")
+
+
+
+# ===================================================================
+# Per-key back-off on scattered evaluation streams (PyAutoArray#613)
+# ===================================================================
+
+
+def _skips_until_probe(key):
+    """How many consecutive would-be-seeded solves the back-off skips for `key`."""
+    skipped = 0
+
+    while backoff_should_skip(key):
+        skipped += 1
+
+    return skipped
+
+
+def test__backoff__engages_after_consecutive_fallbacks_and_grows_to_the_cap():
+    assert _NNLS_BACKOFF_AFTER_FALLBACKS == 2
+
+    backoff_record_fallback("key")
+    assert _skips_until_probe("key") == 0
+
+    skips = []
+    for _ in range(9):
+        backoff_record_fallback("key")
+        skips.append(_skips_until_probe("key"))
+
+    assert skips == [1, 2, 4, 8, 16, 32, 32, 32, 32]
+    assert max(skips) == _NNLS_BACKOFF_MAX_SKIP
+
+
+def test__backoff__accept_resets_the_streak_and_end_skip_keeps_it():
+    for _ in range(3):
+        backoff_record_fallback("key")
+
+    backoff_end_skip("key")
+    assert _skips_until_probe("key") == 0
+
+    # end_skip kept the streak: the next fallback escalates rather than restarting.
+    backoff_record_fallback("key")
+    assert _skips_until_probe("key") == 4
+
+    backoff_record_accept("key")
+    assert "key" not in _nnls_backoff
+
+    backoff_record_fallback("key")
+    assert _skips_until_probe("key") == 0
+
+    # Unknown keys are no-ops.
+    backoff_end_skip("other")
+    backoff_record_accept("other")
+    assert backoff_should_skip("other") is False
+
+
+def test__backoff__table_is_bounded():
+    for i in range(_NNLS_PASSIVE_SET_MEMO_MAX_ENTRIES + 3):
+        backoff_record_fallback(f"key{i}")
+
+    assert len(_nnls_backoff) == _NNLS_PASSIVE_SET_MEMO_MAX_ENTRIES
+
+
+def test__memo_clear__forgets_entries_and_backoff():
+    passive_set_put(key="key", passive_set=np.array([0]), dense_error_fraction=0.1)
+    for _ in range(3):
+        backoff_record_fallback("key")
+
+    memo_clear()
+
+    assert _nnls_passive_set_memo == {}
+    assert _nnls_backoff == {}
+
+
+def test__seed_error_fraction__counts_the_symmetric_difference():
+    assert seed_error_fraction(np.array([0, 2]), np.array([2, 0]), n=5) == 0.0
+    assert seed_error_fraction(np.array([0, 1]), np.array([0, 2, 3]), n=5) == 0.6
+    assert seed_error_fraction(np.array([], dtype=int), np.array([4]), n=5) == 0.2
+
+
+_N_STREAM = 40
+
+
+def _stream_system(Z, coeffs):
+    """Normal equations whose NNLS passive set follows the signs of `coeffs`."""
+    x = Z @ coeffs
+    return Z.T @ Z + 0.1 * np.eye(Z.shape[1]), Z.T @ x
+
+
+def _scattered_stream(seed, length=40):
+    """iid draws: every solve is an unrelated system, so no seed is any good."""
+    rng = np.random.default_rng(seed)
+    return [
+        _stream_system(rng.normal(size=(90, _N_STREAM)), rng.normal(size=_N_STREAM))
+        for _ in range(length)
+    ]
+
+
+def _walk_stream(seed, length=40, step=1e-3):
+    """A local walk: each system is a small perturbation of the previous one."""
+    rng = np.random.default_rng(seed)
+    Z = rng.normal(size=(90, _N_STREAM))
+    coeffs = rng.normal(size=_N_STREAM)
+    systems = []
+    for _ in range(length):
+        systems.append(_stream_system(Z, coeffs))
+        Z = Z + step * rng.normal(size=Z.shape)
+        coeffs = coeffs + step * rng.normal(size=coeffs.shape)
+    return systems
+
+
+def _replay(monkeypatch, systems, memo=True):
+    """
+    Solve `systems` in order through `reconstruction_positive_only_from` with one
+    memo key, returning the reconstructions and each solve's stats dict.
+    """
+    import autoarray.util.fnnls as fnnls_mod
+
+    original = fnnls_mod.fnnls_cholesky
+    captured = []
+
+    def _wrapped(ZTZ, ZTx, P_initial=np.zeros(0, dtype=int), stats=None, factor=None):
+        captured.append(stats)
+        return original(ZTZ, ZTx, P_initial, stats=stats, factor=factor)
+
+    monkeypatch.setattr(fnnls_mod, "fnnls_cholesky", _wrapped)
+
+    settings = aa.Settings(
+        use_positive_only_solver=True,
+        nnls_warm_start_memo=memo,
+        nnls_warm_start_error_tolerance=1.5,
+    )
+
+    reconstructions = [
+        aa.util.inversion.reconstruction_positive_only_from(
+            data_vector=q,
+            curvature_reg_matrix=Q,
+            settings=settings,
+            fingerprint="stream",
+        )
+        for Q, q in systems
+    ]
+
+    monkeypatch.setattr(fnnls_mod, "fnnls_cholesky", original)
+
+    # One stats dict per solve: the seeded attempt and the solve that returned
+    # share the dict (a raising seeded attempt never reaches the end).
+    stats = list({id(d): d for d in captured}.values())
+
+    return reconstructions, stats
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 3])
+def test__backoff__scattered_stream_stops_reseeding_and_keeps_the_answer(
+    monkeypatch, seed
+):
+    systems = _scattered_stream(seed)
+
+    expected, _ = _replay(monkeypatch, systems, memo=False)
+
+    def bad_seeds(stats):
+        return sum(s["warm_start_fallback"] for s in stats)
+
+    # Reference: the same replay with the back-off switched off. Every other
+    # solve is seeded and (bar a chance hit) every seed falls back.
+    with monkeypatch.context() as m:
+        m.setattr(nnls_memo, "_NNLS_BACKOFF_AFTER_FALLBACKS", 10**9)
+        _, stats_without = _replay(monkeypatch, systems)
+
+    _nnls_passive_set_memo.clear()
+    _nnls_backoff.clear()
+
+    reconstructions, stats = _replay(monkeypatch, systems)
+
+    for reconstruction, reference in zip(reconstructions, expected):
+        assert reconstruction == pytest.approx(reference, rel=1e-9, abs=1e-11)
+
+    assert bad_seeds(stats_without) >= 18
+    assert not any(s["warm_start_backoff"] for s in stats_without)
+
+    # With the back-off the probes thin out exponentially (solves 1, 3, 6, 10,
+    # 16, 26 on a stream with no chance hits): far fewer bad seeds are paid for.
+    assert bad_seeds(stats) <= 0.6 * bad_seeds(stats_without)
+    assert sum(s["warm_start_backoff"] for s in stats) >= 10
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 3])
+def test__backoff__local_walk_is_untouched_bit_for_bit(monkeypatch, seed):
+    systems = _walk_stream(seed)
+
+    reconstructions, stats = _replay(monkeypatch, systems)
+
+    # The walk is what the memo is for: every solve after the first is seeded,
+    # no seed falls back, and the back-off never engages.
+    assert [s["seed_source"] for s in stats] == ["dense"] + ["memo"] * (
+        len(systems) - 1
+    )
+    assert not any(s["warm_start_fallback"] for s in stats)
+    assert not any(s["warm_start_backoff"] for s in stats)
+    assert _nnls_backoff == {}
+
+    # Bit-identical to the same replay with the back-off switched off entirely.
+    _nnls_passive_set_memo.clear()
+    monkeypatch.setattr(nnls_memo, "_NNLS_BACKOFF_AFTER_FALLBACKS", 10**9)
+
+    reference, _ = _replay(monkeypatch, systems)
+
+    for reconstruction, expected in zip(reconstructions, reference):
+        assert np.array_equal(reconstruction, expected)
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test__backoff__scattered_then_local_regains_the_memo_after_one_solve(
+    monkeypatch, seed
+):
+    scattered = _scattered_stream(seed, length=30)
+    systems = scattered + _walk_stream(seed + 100, length=20)
+
+    # The walk starts from an unrelated system, so its first solve is dense
+    # (backed off or fallen back); the free check on that dense solve sees the
+    # skipped seed would have passed, and from the second walk solve on every
+    # solve is seeded again -- the long skip scheduled by the scattered phase is
+    # not waited out.
+    reconstructions, stats = _replay(monkeypatch, systems)
+
+    walk_stats = stats[len(scattered) :]
+
+    assert all(s["seed_source"] == "memo" for s in walk_stats[2:])
+    assert not any(s["warm_start_fallback"] for s in walk_stats[2:])
