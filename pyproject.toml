@@ -58,6 +58,7 @@ Homepage = "https://github.com/PyAutoLabs/PyAutoArray"
 include-package-data = true
 
 [tool.setuptools.packages.find]
+include = ["autoarray*"]
 exclude = ["docs", "test_autoarray", "test_autoarray*"]
 
 [tool.setuptools_scm]
