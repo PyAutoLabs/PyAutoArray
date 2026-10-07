@@ -21,6 +21,8 @@ from autoarray.plot.utils import (
     norm_from,
     _apply_contours,
     _conf_imshow_origin,
+    _overlay_yx_for_origin,
+    _vector_yx_for_origin,
     plot_regions,
 )
 
@@ -233,6 +235,45 @@ def plot_array(
         _apply_colorbar(im, ax, cb_unit=cb_unit, is_subplot=not owns_figure)
 
     # --- overlays --------------------------------------------------------------
+    # Every (y, x) overlay is reflected for display when ``origin_imshow`` is
+    # ``"lower"`` so it stays registered to the raster (PyAutoArray#565). When
+    # ``extent`` is ``None`` the raster is drawn in pixel-index coordinates,
+    # where matplotlib already places row ``i`` at ``y = i`` under either
+    # origin, so no reflection is applied.
+    def _for_origin(yx):
+        return _overlay_yx_for_origin(yx, extent, origin_imshow)
+
+    mask = _for_origin(mask)
+    border = _for_origin(border)
+    origin = _for_origin(origin)
+    grid = _for_origin(grid)
+    mesh_grid = _for_origin(mesh_grid)
+    if positions is not None:
+        positions = [_for_origin(np.asarray(pos).reshape(-1, 2)) for pos in positions]
+    if lines is not None:
+        lines = [
+            (
+                _for_origin(np.asarray(line).reshape(-1, 2))
+                if line is not None and len(line) > 0
+                else line
+            )
+            for line in lines
+        ]
+    if regions is not None:
+        regions = [
+            (
+                None
+                if region is None
+                else (
+                    _for_origin(region)
+                    if isinstance(region, np.ndarray) and region.ndim == 2
+                    else [_for_origin(polygon) for polygon in region]
+                )
+            )
+            for region in regions
+        ]
+    vector_yx = _vector_yx_for_origin(vector_yx, extent, origin_imshow)
+
     if array_overlay is not None:
         ax.imshow(
             array_overlay,
@@ -299,6 +340,7 @@ def plot_array(
             vector_yx[:, 2],
         )
 
+    # Patches are drawn as given: they are not origin-aware.
     if patches is not None:
         for patch in patches:
             import copy

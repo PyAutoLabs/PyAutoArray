@@ -1030,6 +1030,60 @@ def _conf_imshow_origin() -> str:
     return origin
 
 
+def _overlay_yx_for_origin(yx, extent, origin_imshow):
+    """
+    Map ``(y, x)`` overlay coordinates so they stay registered to an ``imshow``
+    raster drawn with ``origin=origin_imshow`` over ``extent``.
+
+    PyAutoArray stores native arrays with row 0 at ``ymax``, which is exactly
+    what ``imshow(origin="upper")`` renders, so under ``"upper"`` the input is
+    returned unchanged. Under ``"lower"`` matplotlib draws row 0 at ``ymin``,
+    reflecting the raster about the extent's y midpoint; overlays given in data
+    ``(y, x)`` coordinates are reflected the same way
+    (``y -> ymin + ymax - y``) so that they sit on the pixels they describe.
+
+    This is a display-only reflection: the internal y convention of the data
+    structures is unchanged, and nothing outside the drawn figure is affected.
+
+    Parameters
+    ----------
+    yx
+        Array of shape ``(..., 2+)`` whose column 0 is ``y`` and column 1 is
+        ``x`` (extra trailing columns are carried through untouched). ``None``
+        passes straight through.
+    extent
+        ``(xmin, xmax, ymin, ymax)`` of the raster the overlay is drawn on.
+        ``None`` means no reflection can be defined and the input is returned
+        unchanged.
+    origin_imshow
+        The ``origin`` passed to ``imshow`` (``"upper"`` or ``"lower"``).
+    """
+    if yx is None or extent is None or origin_imshow != "lower":
+        return yx
+
+    yx = np.array(yx, dtype=float)
+    yx[..., 0] = extent[2] + extent[3] - yx[..., 0]
+    return yx
+
+
+def _vector_yx_for_origin(vector_yx, extent, origin_imshow):
+    """
+    Quiver sibling of :func:`_overlay_yx_for_origin` for ``(y, x, dy, dx)`` rows.
+
+    Under ``"lower"`` the anchor ``y`` is reflected about the extent's y
+    midpoint and the ``dy`` component (column 2) is negated, so each arrow
+    keeps pointing at the same pixels of the reflected raster. Under
+    ``"upper"`` (or with ``vector_yx`` / ``extent`` ``None``) the input is
+    returned unchanged. Display-only, like :func:`_overlay_yx_for_origin`.
+    """
+    if vector_yx is None or extent is None or origin_imshow != "lower":
+        return vector_yx
+
+    vector_yx = _overlay_yx_for_origin(vector_yx, extent, origin_imshow)
+    vector_yx[..., 2] = -vector_yx[..., 2]
+    return vector_yx
+
+
 def _conf_output_format() -> str:
     """Return the default output_format from config (``"show"``, ``"png"``, etc.).
 
