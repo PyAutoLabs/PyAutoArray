@@ -42,6 +42,13 @@ def check_noise_map_real_imag_equal(noise_map) -> None:
     It is shared by `Interferometer.apply_sparse_operator`, which checks the whole resident
     noise-map, and `sparse_terms_from_chunks`, which checks every chunk as it streams past.
 
+    With per-visibility weights `w_r = 1 / sigma_real^2`, `w_i = 1 / sigma_imag^2` the exact
+    curvature is `sum_k wbar cos(a - b) + dw cos(a + b)` with `wbar = (w_r + w_i) / 2` and
+    `dw = (w_r - w_i) / 2`; only the `cos(a - b)` (lag-only, Toeplitz) part is representable by
+    `W~`, so no equal-sigma substitute is exact when the sigmas genuinely differ. When they
+    differ only by noise-estimator scatter, pool them in quadrature with `pool_noise_map=True`
+    (or `noise_map_pooled_from`), which skips this check.
+
     Parameters
     ----------
     noise_map
@@ -79,11 +86,181 @@ def check_noise_map_real_imag_equal(noise_map) -> None:
         "visibilities where the real and imaginary sigma differ (maximum relative difference "
         f"{np.max(relative_difference):.3e}), so the sparse curvature matrix would silently "
         "disagree with the dense path.\n\n"
-        "Either equalise the real and imaginary noise sigma of every visibility, or fit "
-        "without calling `apply_sparse_operator()` — the dense "
+        "For thermal noise the real and imaginary parts of one visibility have the same "
+        "variance, so a small difference (typically 1-2 % when the noise is estimated by "
+        "differencing adjacent visibilities) is estimator scatter. Pool the two sigmas in "
+        "quadrature, sigma^2 = (sigma_real^2 + sigma_imag^2) / 2, which preserves the total "
+        "variance: pass `pool_noise_map=True` to `apply_sparse_operator`, `from_stream` or "
+        "`sparse_terms_from_chunks`, or pool the noise-map yourself with "
+        "`inversion_interferometer_util.noise_map_pooled_from(noise_map)` before building the "
+        "dataset or chunks. Pooling is an approximation when the sigmas genuinely differ: the "
+        "exact curvature is `sum wbar cos(a - b) + dw cos(a + b)` (`wbar`, `dw` the mean and "
+        "half-difference of the real and imaginary weights) and `W~` can only hold the "
+        "`cos(a - b)` part.\n\n"
+        "Alternatively fit without calling `apply_sparse_operator()` — the dense "
         "`InversionInterferometerMapping` path handles unequal real and imaginary sigmas "
-        "correctly."
+        "exactly."
     )
+
+
+# The median fractional real/imag sigma difference above which pooling logs a warning rather
+# than an info line: a difference this large may be real rather than noise-estimator scatter
+# (the threshold pyuvimage uses, Discussion #13).
+NOISE_MAP_POOLING_WARNING_FRACTION = 0.25
+
+
+def noise_map_pooled_from(noise_map) -> np.ndarray:
+    """
+    Return `noise_map` with the real and imaginary sigma of every visibility pooled in
+    quadrature, `sigma = sqrt((sigma_real^2 + sigma_imag^2) / 2)`, as the complex array
+    `sigma + 1j * sigma`.
+
+    The sparse operator assumes equal real and imaginary sigma per visibility (see
+    `check_noise_map_real_imag_equal`). For thermal noise the two parts of one visibility have
+    the same variance, so a measured difference usually comes from the noise estimator (1-2 %
+    when estimated by differencing adjacent visibilities); quadrature pooling preserves the
+    total variance `sigma_real^2 + sigma_imag^2` (and so the chi-squared expectation) and is
+    the better estimate of both. It differs from the arithmetic mean of the two weights
+    `1 / sigma^2` only at second order in the fractional asymmetry (4e-4 at 2 %).
+
+    Visibilities whose real and imaginary sigma are already exactly equal are returned
+    unchanged (bit for bit), so pooling a pooled noise-map is a no-op.
+
+    Parameters
+    ----------
+    noise_map
+        The noise-map, in any form `sparse_terms_from_chunks` accepts: a
+        `VisibilitiesNoiseMap`, a complex `(K,)` array or a real `(K, 2)` array of
+        (real, imag) columns.
+
+    Returns
+    -------
+    np.ndarray
+        The pooled complex128 `(K,)` noise-map, with equal real and imaginary parts.
+    """
+    noise_map = _complex_visibilities_from(noise_map)
+
+    noise_map_real = noise_map.real
+    noise_map_imag = noise_map.imag
+
+    sigma = np.where(
+        noise_map_real == noise_map_imag,
+        noise_map_real,
+        np.sqrt((noise_map_real**2.0 + noise_map_imag**2.0) / 2.0),
+    )
+
+    return sigma + 1j * sigma
+
+
+def _noise_map_real_imag_fraction_from(noise_map) -> np.ndarray:
+    """
+    The per-visibility fractional real/imag sigma difference `|re - im| / max(|re|, |im|)`
+    (0 where both are 0).
+    """
+    noise_map = _complex_visibilities_from(noise_map)
+
+    noise_map_real = np.abs(noise_map.real)
+    noise_map_imag = np.abs(noise_map.imag)
+
+    denominator = np.maximum(noise_map_real, noise_map_imag)
+
+    return np.abs(noise_map_real - noise_map_imag) / np.where(
+        denominator == 0.0, 1.0, denominator
+    )
+
+
+def noise_map_real_imag_asymmetry_from(noise_map) -> Tuple[float, float]:
+    """
+    Return the median and maximum fractional difference between the real and imaginary sigma
+    of `noise_map`, `|sigma_real - sigma_imag| / max(sigma_real, sigma_imag)` per visibility.
+
+    The median is what `pool_noise_map=True` judges a noise-map by (so one bad baseline does
+    not escalate the message); the maximum is reported beside it.
+
+    Parameters
+    ----------
+    noise_map
+        The noise-map, in any form `noise_map_pooled_from` accepts.
+
+    Returns
+    -------
+    (float, float)
+        The `(median, max)` fractional asymmetry, e.g. `(0.02, 0.05)` for a 2 % median and a
+        5 % maximum difference.
+    """
+    fraction = _noise_map_real_imag_fraction_from(noise_map)
+
+    return float(np.median(fraction)), float(np.max(fraction))
+
+
+class _NoiseMapPoolingRecord:
+    """
+    Accumulates the real/imag sigma asymmetry of every noise-map pooled by one
+    `pool_noise_map=True` call -- one chunk at a time for `sparse_terms_from_chunks` -- so one
+    message is logged per call, not per chunk.
+
+    The median is taken from a fixed histogram of the fractional asymmetry (bins of `1e-5`, so
+    a resolution of 0.001 %) rather than from the per-visibility values, so the record's memory
+    does not grow with the number of visibilities streamed; the maximum is exact.
+    """
+
+    _bin_edges = np.linspace(0.0, 1.0, 100_001)
+
+    def __init__(self):
+        self.counts = np.zeros(self._bin_edges.size - 1, dtype=np.int64)
+        self.maximum = 0.0
+        self.unequal = False
+
+    def add(self, noise_map: np.ndarray):
+        """
+        Record the asymmetry of a complex noise-map about to be pooled.
+        """
+        if np.allclose(noise_map.real, noise_map.imag, atol=0.0):
+            return
+
+        self.unequal = True
+
+        fraction = _noise_map_real_imag_fraction_from(noise_map)
+
+        self.counts += np.histogram(fraction, bins=self._bin_edges)[0]
+        self.maximum = max(self.maximum, float(np.max(fraction)))
+
+    @property
+    def median(self) -> float:
+        cumulative = np.cumsum(self.counts)
+        index = int(np.searchsorted(cumulative, 0.5 * cumulative[-1]))
+
+        return float(0.5 * (self._bin_edges[index] + self._bin_edges[index + 1]))
+
+    def log(self):
+        """
+        Log one line describing the pooling: nothing when every pooled noise-map already had
+        equal real and imaginary sigma (to the relative tolerance of
+        `check_noise_map_real_imag_equal`), an info line for a median difference up to
+        `NOISE_MAP_POOLING_WARNING_FRACTION`, a warning above it.
+        """
+        if not self.unequal:
+            return
+
+        median = self.median
+
+        summary = (
+            f"INTERFEROMETER - pooled sigma_re / sigma_im in quadrature, "
+            f"sigma^2 = (sigma_re^2 + sigma_im^2) / 2, for the sparse operator: median "
+            f"difference {100.0 * median:.2f} %, max {100.0 * self.maximum:.2f} %"
+        )
+
+        if median <= NOISE_MAP_POOLING_WARNING_FRACTION:
+            logger.info(f"{summary} (consistent with noise-estimator scatter).")
+            return
+
+        logger.warning(
+            f"{summary}. A difference this large may be real: pooling weights the real and "
+            f"imaginary parts equally, which the noise-map does not, so the sparse curvature "
+            f"matrix drops the cos(a + b) term the unequal weights carry. The dense "
+            f"`InversionInterferometerMapping` path (fit without `apply_sparse_operator`) "
+            f"is exact for unequal real and imaginary sigmas."
+        )
 
 
 def data_vector_via_transformed_mapping_matrix_from(
@@ -2075,6 +2252,7 @@ def sparse_terms_from_chunks(
     use_jax: bool = False,
     show_progress: bool = False,
     phase_centre: Optional[Tuple[float, float]] = None,
+    pool_noise_map: bool = False,
 ) -> SparseTerms:
     """
     Accumulate the `SparseTerms` of an interferometer dataset one chunk of visibilities at a
@@ -2097,6 +2275,12 @@ def sparse_terms_from_chunks(
       real `(K, 2)` array of (real, imag) columns);
     - `noise_map` is the `K` complex noise sigmas in the same forms, with equal real and
       imaginary sigma per visibility (checked per chunk; the first offending chunk raises).
+      The sparse terms assume this equality: the precision operator and dirty beam are built
+      from the real-part sigma alone (see `check_noise_map_real_imag_equal`). With
+      `pool_noise_map=True` the check is replaced by quadrature pooling,
+      `sigma^2 = (sigma_real^2 + sigma_imag^2) / 2`, of each chunk's noise-map before any
+      term is formed (see "Unequal real and imaginary sigma" below); alternatively pool
+      before handing the chunks over, with `noise_map_pooled_from`.
 
     `K` may differ between chunks; empty chunks are skipped. Chunks are consumed once, in
     order, and only one is referenced at a time.
@@ -2108,6 +2292,27 @@ def sparse_terms_from_chunks(
     of all of them accumulated together: `sum(per_channel_terms)` (via `SparseTerms.__add__`
     / `__radd__`) is the multi-frequency-synthesis (MFS) terms, equal to one accumulation
     over every channel's chunks to summation order.
+
+    Unequal real and imaginary sigma
+    --------------------------------
+    For thermal noise the real and imaginary parts of one visibility have the same variance,
+    so a measured difference usually comes from the noise estimator (1-2 % when the noise is
+    estimated by differencing adjacent visibilities). By default such a chunk raises. With
+    `pool_noise_map=True` each chunk's noise-map is replaced by `noise_map_pooled_from` --
+    `sigma^2 = (sigma_real^2 + sigma_imag^2) / 2`, which preserves the total variance --
+    before every term (precision operator, dirty image, dirty beam, `sum_weights`,
+    `data_term`, `noise_normalization`), so all of them describe one noise model; the result
+    is bit-identical to the default call on chunks pooled beforehand. One message is logged
+    per call, from the asymmetry accumulated over every chunk: none when every chunk already
+    had equal sigmas, an info line with the median and maximum difference when the median is
+    at most 25 %, and a warning above that, where the difference may be real.
+
+    Pooling is an approximation when the sigmas genuinely differ: the exact curvature is
+    `sum wbar cos(a - b) + dw cos(a + b)` (`wbar`, `dw` the mean and half-difference of the
+    real and imaginary weights) and the precision operator holds only the `cos(a - b)` part;
+    the dense `InversionInterferometerMapping` path is exact. The pooled `noise_normalization`
+    differs from the unpooled one at second order in the asymmetry per visibility, so do not
+    compare the log-evidences of a pooled and an unpooled fit of the same data.
 
     Phase-centre shift
     ------------------
@@ -2125,7 +2330,9 @@ def sparse_terms_from_chunks(
     accumulation. `data_term` is invariant under a unit phase only when the real and imaginary
     sigmas are exactly equal; `check_noise_map_real_imag_equal` accepts them equal to a relative
     tolerance, so with slightly unequal sigmas it differs from the unshifted value at that
-    tolerance (it is still the correct `data_term` of the shifted data). The shift is recorded
+    tolerance (it is still the correct `data_term` of the shifted data). With
+    `pool_noise_map=True` the sigmas are exactly equal after pooling, so `data_term` is
+    exactly phase-invariant. The shift is recorded
     as `SparseTerms.phase_centre` provenance (`(0.0, 0.0)` when no shift is applied), so terms
     with different phase centres -- including shifted and unshifted ones -- refuse to be
     summed.
@@ -2148,6 +2355,10 @@ def sparse_terms_from_chunks(
         The `(y, x)` phase-centre shift in arcseconds applied to every chunk's visibilities
         before forming the dirty image (see "Phase-centre shift" above). `None` applies no
         shift and records `(0.0, 0.0)`.
+    pool_noise_map
+        If `True`, pool every chunk's real and imaginary sigma in quadrature before forming
+        any term, instead of raising on unequal sigmas (see "Unequal real and imaginary
+        sigma" above). `False` (the default) keeps the equal-sigma check.
 
     Returns
     -------
@@ -2157,7 +2368,8 @@ def sparse_terms_from_chunks(
     Raises
     ------
     exc.DatasetException
-        If any chunk's noise-map has unequal real and imaginary sigma.
+        If any chunk's noise-map has unequal real and imaginary sigma and `pool_noise_map`
+        is `False`.
     ValueError
         If `chunks` yields no visibilities.
     """
@@ -2183,6 +2395,8 @@ def sparse_terms_from_chunks(
         m0 = phase_centre[0] * arcsec_to_rad
         l0 = phase_centre[1] * arcsec_to_rad
 
+    pooling_record = _NoiseMapPoolingRecord() if pool_noise_map else None
+
     terms = None
 
     for uv_wavelengths, data, noise_map in chunks:
@@ -2204,7 +2418,13 @@ def sparse_terms_from_chunks(
                 f"{noise_map.shape[0]}."
             )
 
-        check_noise_map_real_imag_equal(noise_map)
+        # Pooling replaces the noise-map before every term below, so the precision operator,
+        # dirty image, beam and both scalars all describe the same (pooled) noise model.
+        if pool_noise_map:
+            pooling_record.add(noise_map)
+            noise_map = noise_map_pooled_from(noise_map)
+        else:
+            check_noise_map_real_imag_equal(noise_map)
 
         noise_map_real = noise_map.real
         noise_map_imag = noise_map.imag
@@ -2289,5 +2509,8 @@ def sparse_terms_from_chunks(
             "sparse_terms_from_chunks: `chunks` yielded no visibilities, so there is nothing "
             "to accumulate."
         )
+
+    if pool_noise_map:
+        pooling_record.log()
 
     return terms
