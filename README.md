@@ -49,13 +49,17 @@ convolver.kernel.shape_native       # (11, 11)
 convolver.kernel.array.sum()        # 1.0
 ```
 
-## Community & Support
+## Community & Contributing
 
 Questions, help with your code or your analysis, and ideas: the
 [PyAutoLabs Discussions](https://github.com/orgs/PyAutoLabs/discussions).
 Bug reports with a reproducer (a snippet, the traceback, your versions):
 an issue on the library's tracker. The Slack is for collaborators, by
 invitation.
+
+Community-built tools, tutorials and how to contribute are on the [**PyAutoFit** community page](https://pyautofit.readthedocs.io/en/latest/general/community.html).
+
+Contribution guidelines: [CONTRIBUTING.md](https://github.com/PyAutoLabs/PyAutoArray/blob/main/CONTRIBUTING.md).
 
 ## Links
 
