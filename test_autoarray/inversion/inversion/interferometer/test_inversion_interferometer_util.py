@@ -1296,7 +1296,9 @@ def _asymmetric_noise_map(n_visibilities, fraction, seed=11):
     sigma = rng.uniform(0.5, 2.0, size=n_visibilities)
     sign = rng.choice([-1.0, 1.0], size=n_visibilities)
 
-    return sigma + 1j * sigma * np.where(sign > 0, 1.0 / (1.0 - fraction), 1.0 - fraction)
+    return sigma + 1j * sigma * np.where(
+        sign > 0, 1.0 / (1.0 - fraction), 1.0 - fraction
+    )
 
 
 def test__noise_map_pooled_from__preserves_total_variance_with_equal_parts():
@@ -1338,8 +1340,8 @@ def test__noise_map_real_imag_asymmetry_from__two_percent_map():
     sigma = np.array([1.0, 2.0, 0.5, 1.5])
     noise_map = sigma + 1j * sigma * np.array([1.0, 0.98, 1.0, 1.0 / 0.98])
 
-    median, maximum = aa.util.inversion_interferometer.noise_map_real_imag_asymmetry_from(
-        noise_map
+    median, maximum = (
+        aa.util.inversion_interferometer.noise_map_real_imag_asymmetry_from(noise_map)
     )
 
     # Fractions 0, 2 %, 0, 2 % (the difference over the larger of the two sigmas).
@@ -1398,7 +1400,9 @@ def test__sparse_terms_from_chunks__pool_noise_map__matches_pre_pooled_chunks_bi
         )
 
 
-_IIU_LOGGER = "autoarray.inversion.inversion.interferometer.inversion_interferometer_util"
+_IIU_LOGGER = (
+    "autoarray.inversion.inversion.interferometer.inversion_interferometer_util"
+)
 
 
 def _pooled_terms_log(caplog, noise_map):
@@ -1548,7 +1552,9 @@ def test__sparse_terms__add__provenance_matching_sums_and_is_carried():
         assert getattr(total, name) == value
 
     # `None` on either side skips that check (the recorded value is carried).
-    total = _terms_with_provenance(1.0, 1, **provenance) + _terms_with_provenance(1.0, 1)
+    total = _terms_with_provenance(1.0, 1, **provenance) + _terms_with_provenance(
+        1.0, 1
+    )
 
     assert total.eps == 1.0e-12
     assert total.n_vis == 2
@@ -2000,3 +2006,483 @@ def test__sparse_terms__add__transformer_class_name_mismatch_raises():
     assert (
         _terms_with_provenance(transformer_class_name="TransformerDFT") + unknown
     ).transformer_class_name == "TransformerDFT"
+
+
+# ---------------------------------------------------------------------------------------------
+# `oversample=q`: the fine precision-operator and dirty-image grids (Discussion #13, item 1).
+# ---------------------------------------------------------------------------------------------
+
+
+def _nufft_precision_operator_via_nufft_reference_from(
+    noise_map_real, uv_wavelengths, shape_masked_pixels_2d, grid_radians_2d, chunk_size
+):
+    """
+    The type-1 loop `nufft_precision_operator_via_nufft_from` ran inline before it was lifted
+    into `_type1_real_grid_from`, copied verbatim, so the refactor can be pinned bit for bit.
+    """
+    import jax.numpy as jnp
+    import nufftax
+
+    y_shape, x_shape = (int(s) for s in shape_masked_pixels_2d)
+
+    pixel_scale_radians = aa.util.inversion_interferometer._pixel_scale_radians_from(
+        np.asarray(grid_radians_2d, dtype=np.float64)
+    )
+
+    x = 2.0 * np.pi * uv_wavelengths[:, 0] * pixel_scale_radians
+    y = 2.0 * np.pi * uv_wavelengths[:, 1] * pixel_scale_radians
+
+    w = 1.0 / (noise_map_real**2)
+
+    n_modes = (2 * x_shape, 2 * y_shape)
+    total_visibilities = int(x.shape[0])
+
+    if chunk_size is None or chunk_size >= total_visibilities:
+        chunk_size = total_visibilities
+
+    real_modes = np.zeros((2 * y_shape, 2 * x_shape), dtype=np.float64)
+
+    for k0 in range(0, total_visibilities, chunk_size):
+        k1 = min(total_visibilities, k0 + chunk_size)
+
+        f = nufftax.nufft2d1(
+            jnp.asarray(-x[k0:k1]),
+            jnp.asarray(y[k0:k1]),
+            jnp.asarray(w[k0:k1], dtype=jnp.complex128),
+            n_modes,
+            1.0e-12,
+            1,
+        )
+
+        real_modes += np.asarray(np.real(f), dtype=np.float64)
+
+    operator = np.ascontiguousarray(np.fft.ifftshift(real_modes))
+
+    operator[y_shape, :] = 0.0
+    operator[:, x_shape] = 0.0
+
+    return operator
+
+
+def test__nufft_precision_operator_via_nufft__type1_core_refactor_is_bit_for_bit():
+    pytest.importorskip("nufftax")
+
+    for inputs in (_nufft_pin_inputs_7x7(), _nufft_pin_inputs_16x16()):
+        for chunk_size in (None, 64):
+            np.testing.assert_array_equal(
+                aa.util.inversion_interferometer.nufft_precision_operator_via_nufft_from(
+                    **inputs, chunk_size=chunk_size
+                ),
+                _nufft_precision_operator_via_nufft_reference_from(
+                    **inputs, chunk_size=chunk_size
+                ),
+            )
+
+
+_OVERSAMPLE = 4
+
+
+def _fine_terms_from(edges=(0, 60), oversample=_OVERSAMPLE, **kwargs):
+    mask, uv_wavelengths, data, noise_map, _ = _streaming_inputs()
+
+    terms = aa.util.inversion_interferometer.sparse_terms_from_chunks(
+        _chunks_from(uv_wavelengths, data, noise_map, list(edges)),
+        real_space_mask=mask,
+        oversample=oversample,
+        **kwargs,
+    )
+
+    return terms, mask, uv_wavelengths, data, noise_map
+
+
+def _signed(index, length):
+    """The signed lag of a wraparound-ordered index."""
+    return index - length if index >= length // 2 else index
+
+
+def test__sparse_terms_from_chunks__oversample__fine_operator_at_native_lags_is_the_operator():
+    """
+    Witness (i): the fine precision operator sampled every `q` fine pixels is the native
+    operator `W~` within the masked extent, at the builder's own mixed tolerance.
+    """
+    pytest.importorskip("nufftax")
+
+    terms, mask, *_ = _fine_terms_from()
+
+    q = _OVERSAMPLE
+    n_y, n_x = mask.shape_native
+    pad = int(np.ceil(0.25 * max(n_y, n_x)))
+    y_ext, x_ext = (int(s) for s in mask.shape_native_masked_pixels)
+
+    assert terms.oversample == q
+    assert terms.oversample_pad == 0.25
+    assert terms.precision_operator_fine.shape == (
+        2 * (n_y + pad) * q,
+        2 * (n_x + pad) * q,
+    )
+    assert terms.precision_operator_fine.dtype == np.float64
+
+    operator = terms.nufft_precision_operator
+
+    for i in range(-(y_ext - 1), y_ext):
+        for j in range(-(x_ext - 1), x_ext):
+            assert terms.precision_operator_fine[i * q, j * q] == pytest.approx(
+                operator[i, j], rel=1.0e-10, abs=1.0e-10 * abs(operator[0, 0])
+            ), (i, j)
+
+
+def test__sparse_terms_from_chunks__oversample__fine_operator_matches_brute_force_everywhere():
+    """
+    Every entry of the fine operator -- the 25 % lag pad and the Nyquist row and column, which
+    are **not** zeroed (a spline reads across them) -- is `sum_k w_k cos(2 pi u_k . lag)`.
+    """
+    pytest.importorskip("nufftax")
+
+    terms, mask, uv_wavelengths, _, noise_map = _fine_terms_from()
+
+    fine = terms.precision_operator_fine
+    n_rows, n_cols = fine.shape
+
+    delta = mask.pixel_scales[0] * np.pi / 180.0 / 3600.0 / _OVERSAMPLE
+    x = 2.0 * np.pi * uv_wavelengths[:, 0] * delta
+    y = 2.0 * np.pi * uv_wavelengths[:, 1] * delta
+    w = noise_map.real**-2.0
+
+    rows = np.array([_signed(a, n_rows) for a in range(n_rows)])
+    cols = np.array([_signed(b, n_cols) for b in range(n_cols)])
+
+    brute = np.einsum(
+        "k,abk->ab",
+        w,
+        np.cos(
+            -cols[None, :, None] * x[None, None, :]
+            + rows[:, None, None] * y[None, None, :]
+        ),
+    )
+
+    np.testing.assert_allclose(fine, brute, rtol=1.0e-10, atol=1.0e-10 * brute[0, 0])
+
+    assert np.abs(fine[n_rows // 2, :]).max() > 0.0
+    assert np.abs(fine[:, n_cols // 2]).max() > 0.0
+
+
+def _fine_index_of_native_centres(shape_native, q):
+    """
+    The fine-grid (row, column) indices of the native pixel centres: `dirty_image_fine` is
+    centred with the origin at `[Ny q, Nx q]`, `y` decreasing down the rows.
+    """
+    n_y, n_x = shape_native
+
+    rows = n_y * q - (n_y - 1) * q // 2 + q * np.arange(n_y)
+    cols = n_x * q - (n_x - 1) * q // 2 + q * np.arange(n_x)
+
+    return rows, cols
+
+
+def test__sparse_terms_from_chunks__oversample__fine_dirty_image_at_native_centres_is_the_dirty_image():
+    """
+    Witness (ii): the fine dirty image sampled at the native pixel centres (grid points
+    because `q` is even) is `dirty_image_native` on every unmasked pixel.
+    """
+    pytest.importorskip("nufftax")
+
+    terms, mask, *_ = _fine_terms_from()
+
+    q = _OVERSAMPLE
+    n_y, n_x = mask.shape_native
+
+    assert terms.dirty_image_fine.shape == (2 * n_y * q, 2 * n_x * q)
+    assert terms.dirty_image_fine.dtype == np.float64
+
+    rows, cols = _fine_index_of_native_centres(mask.shape_native, q)
+
+    sampled = terms.dirty_image_fine[np.ix_(rows, cols)]
+    unmasked = ~np.asarray(mask)
+
+    np.testing.assert_allclose(
+        sampled[unmasked],
+        terms.dirty_image_native[unmasked],
+        rtol=1.0e-10,
+        atol=1.0e-10 * np.abs(terms.dirty_image_native).max(),
+    )
+
+
+def test__sparse_terms_from_chunks__oversample__fine_dirty_image_matches_brute_force_everywhere():
+    pytest.importorskip("nufftax")
+
+    terms, mask, uv_wavelengths, data, noise_map = _fine_terms_from()
+
+    fine = terms.dirty_image_fine
+    n_rows, n_cols = fine.shape
+
+    delta = mask.pixel_scales[0] * np.pi / 180.0 / 3600.0 / _OVERSAMPLE
+
+    y_pos = (n_rows // 2 - np.arange(n_rows)) * delta
+    x_pos = (np.arange(n_cols) - n_cols // 2) * delta
+
+    c = data.real * noise_map.real**-2.0 + 1j * data.imag * noise_map.imag**-2.0
+
+    brute = np.real(
+        np.einsum(
+            "k,abk->ab",
+            c,
+            np.exp(
+                2j
+                * np.pi
+                * (
+                    uv_wavelengths[None, None, :, 0] * x_pos[None, :, None]
+                    + uv_wavelengths[None, None, :, 1] * y_pos[:, None, None]
+                )
+            ),
+        )
+    )
+
+    np.testing.assert_allclose(
+        fine, brute, rtol=1.0e-10, atol=1.0e-10 * np.abs(brute).max()
+    )
+
+
+def test__sparse_terms_from_chunks__oversample__chunked_matches_one_shot():
+    pytest.importorskip("nufftax")
+
+    one_shot, *_ = _fine_terms_from(edges=(0, 60))
+
+    for edges in ((0, 30, 60), (0, 1, 17, 59, 60)):
+        chunked, *_ = _fine_terms_from(edges=edges)
+
+        for name in ("precision_operator_fine", "dirty_image_fine"):
+            expected = getattr(one_shot, name)
+
+            np.testing.assert_allclose(
+                getattr(chunked, name),
+                expected,
+                rtol=1.0e-12,
+                atol=1.0e-12 * np.abs(expected).max(),
+                err_msg=name,
+            )
+
+        assert chunked.n_vis == 60
+
+
+def test__sparse_terms_from_chunks__oversample__phase_centre_shifts_dirty_image_not_operator():
+    """
+    Witness (iv): a phase-centre shift moves the fine dirty image by exactly the shift and
+    leaves the fine operator (baselines and weights only) bit-identical.
+    """
+    pytest.importorskip("nufftax")
+
+    unshifted, mask, *_ = _fine_terms_from(edges=(0, 17, 60))
+
+    # (y0, x0) = (+1, -2) native pixels of 0.5", i.e. (+4, -8) fine pixels at q = 4.
+    shifted, *_ = _fine_terms_from(edges=(0, 17, 60), phase_centre=(0.5, -1.0))
+
+    np.testing.assert_array_equal(
+        shifted.precision_operator_fine, unshifted.precision_operator_fine
+    )
+
+    # D'(x) = D(x + x0): D'[a, b] = D[a - 4, b - 8] (y decreases down the rows).
+    d_shift = shifted.dirty_image_fine
+    d = unshifted.dirty_image_fine
+
+    np.testing.assert_allclose(
+        d_shift[4:, 8:],
+        d[:-4, :-8],
+        rtol=1.0e-10,
+        atol=1.0e-10 * np.abs(d).max(),
+    )
+
+    assert not np.allclose(d_shift, d)
+
+
+def test__sparse_terms_from_chunks__oversample__pool_noise_map_matches_pre_pooled_chunks():
+    pytest.importorskip("nufftax")
+
+    mask, uv_wavelengths, data, _, _ = _streaming_inputs()
+
+    noise_map = _asymmetric_noise_map(n_visibilities=60, fraction=0.02)
+
+    edges = [0, 20, 40, 60]
+
+    pooled = aa.util.inversion_interferometer.sparse_terms_from_chunks(
+        _chunks_from(uv_wavelengths, data, noise_map, edges),
+        real_space_mask=mask,
+        pool_noise_map=True,
+        oversample=2,
+    )
+
+    pre_pooled = aa.util.inversion_interferometer.sparse_terms_from_chunks(
+        _chunks_from(
+            uv_wavelengths,
+            data,
+            aa.util.inversion_interferometer.noise_map_pooled_from(noise_map),
+            edges,
+        ),
+        real_space_mask=mask,
+        oversample=2,
+    )
+
+    np.testing.assert_array_equal(
+        pooled.precision_operator_fine, pre_pooled.precision_operator_fine
+    )
+    np.testing.assert_array_equal(pooled.dirty_image_fine, pre_pooled.dirty_image_fine)
+
+    # Unequal sigmas still raise when not pooling, fine grids or not.
+    with pytest.raises(aa.exc.DatasetException):
+        aa.util.inversion_interferometer.sparse_terms_from_chunks(
+            _chunks_from(uv_wavelengths, data, noise_map, edges),
+            real_space_mask=mask,
+            oversample=2,
+        )
+
+
+def test__sparse_terms_from_chunks__oversample__default_none_carries_no_fine_grids():
+    pytest.importorskip("nufftax")
+
+    terms, *_ = _fine_terms_from(oversample=None)
+
+    assert terms.precision_operator_fine is None
+    assert terms.dirty_image_fine is None
+    assert terms.oversample is None
+    assert terms.oversample_pad is None
+
+
+@pytest.mark.parametrize("oversample", [3, 1, 0, -2, 2.0, True])
+def test__sparse_terms_from_chunks__oversample__not_a_positive_even_integer__raises(
+    oversample,
+):
+    pytest.importorskip("nufftax")
+
+    mask, uv_wavelengths, data, noise_map, _ = _streaming_inputs()
+
+    with pytest.raises(ValueError, match="oversample"):
+        aa.util.inversion_interferometer.sparse_terms_from_chunks(
+            _chunks_from(uv_wavelengths, data, noise_map, [0, 60]),
+            real_space_mask=mask,
+            oversample=oversample,
+        )
+
+
+def test__sparse_terms_from_chunks__oversample__negative_pad__raises():
+    pytest.importorskip("nufftax")
+
+    mask, uv_wavelengths, data, noise_map, _ = _streaming_inputs()
+
+    with pytest.raises(ValueError, match="oversample_pad"):
+        aa.util.inversion_interferometer.sparse_terms_from_chunks(
+            _chunks_from(uv_wavelengths, data, noise_map, [0, 60]),
+            real_space_mask=mask,
+            oversample=2,
+            oversample_pad=-0.1,
+        )
+
+
+def test__sparse_terms_from_chunks__oversample__dft_transformer__raises():
+    pytest.importorskip("nufftax")
+
+    mask, uv_wavelengths, data, noise_map, _ = _streaming_inputs()
+
+    with pytest.raises(aa.exc.InversionException, match="TransformerNUFFT"):
+        aa.util.inversion_interferometer.sparse_terms_from_chunks(
+            _chunks_from(uv_wavelengths, data, noise_map, [0, 60]),
+            real_space_mask=mask,
+            transformer_class=aa.TransformerDFT,
+            oversample=2,
+        )
+
+
+def test__sparse_terms_from_chunks__oversample__logs_a_memory_estimate(caplog):
+    pytest.importorskip("nufftax")
+
+    with caplog.at_level(logging.INFO, logger=_IIU_LOGGER):
+        _fine_terms_from(oversample=2)
+
+    records = [r for r in caplog.records if "oversample" in r.getMessage()]
+
+    assert len(records) == 1
+    assert "MB" in records[0].getMessage()
+
+
+def _fine_terms(value=1.0, oversample=2, oversample_pad=0.25, fine=True, **provenance):
+    terms = _terms_with_provenance(value, **provenance)
+
+    if not fine:
+        return terms
+
+    return dataclasses.replace(
+        terms,
+        precision_operator_fine=np.full((8, 8), value),
+        dirty_image_fine=np.full((6, 6), value),
+        oversample=oversample,
+        oversample_pad=oversample_pad,
+    )
+
+
+def test__sparse_terms__add__sums_fine_grids_and_carries_oversample():
+    total = _fine_terms(1.0) + _fine_terms(10.0)
+
+    np.testing.assert_array_equal(total.precision_operator_fine, np.full((8, 8), 11.0))
+    np.testing.assert_array_equal(total.dirty_image_fine, np.full((6, 6), 11.0))
+    assert total.oversample == 2
+    assert total.oversample_pad == 0.25
+
+    assert sum([_fine_terms(1.0), _fine_terms(2.0)]).dirty_image_fine[0, 0] == 3.0
+
+
+def test__sparse_terms__add__mismatched_oversample__raises():
+    with pytest.raises(aa.exc.InversionException, match="oversample"):
+        _fine_terms(oversample=2) + _fine_terms(oversample=4)
+
+    with pytest.raises(aa.exc.InversionException, match="oversample_pad"):
+        _fine_terms(oversample_pad=0.25) + _fine_terms(oversample_pad=0.5)
+
+
+def test__sparse_terms__add__fine_grids_on_one_side_only__raises():
+    with pytest.raises(aa.exc.InversionException, match="fine grids"):
+        _fine_terms() + _fine_terms(fine=False)
+
+    with pytest.raises(aa.exc.InversionException, match="fine grids"):
+        _fine_terms(fine=False) + _fine_terms()
+
+    # Neither side: unchanged behaviour.
+    total = _fine_terms(fine=False) + _fine_terms(fine=False)
+
+    assert total.precision_operator_fine is None
+    assert total.oversample is None
+
+
+def test__sparse_terms__add__fine_grid_shape_mismatch__raises():
+    other = dataclasses.replace(
+        _fine_terms(), precision_operator_fine=np.full((10, 10), 1.0)
+    )
+
+    with pytest.raises(ValueError, match="fine"):
+        _fine_terms() + other
+
+
+def test__interferometer__from_stream_and_apply_sparse_operator_from_chunks__pass_oversample_through():
+    pytest.importorskip("nufftax")
+
+    mask, uv_wavelengths, data, noise_map, dataset = _streaming_inputs()
+
+    chunks = _chunks_from(uv_wavelengths, data, noise_map, [0, 25, 60])
+
+    reference, *_ = _fine_terms_from(edges=(0, 25, 60), oversample=2)
+
+    streamed = aa.Interferometer.from_stream(chunks, real_space_mask=mask, oversample=2)
+
+    from_chunks = dataset.apply_sparse_operator_from_chunks(chunks, oversample=2)
+
+    for built in (streamed, from_chunks):
+        assert built.sparse_terms.oversample == 2
+        np.testing.assert_allclose(
+            built.sparse_terms.precision_operator_fine,
+            reference.precision_operator_fine,
+            rtol=1.0e-12,
+            atol=1.0e-12 * np.abs(reference.precision_operator_fine).max(),
+        )
+        np.testing.assert_allclose(
+            built.sparse_terms.dirty_image_fine,
+            reference.dirty_image_fine,
+            rtol=1.0e-12,
+            atol=1.0e-12 * np.abs(reference.dirty_image_fine).max(),
+        )

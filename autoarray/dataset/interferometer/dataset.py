@@ -53,9 +53,7 @@ class Interferometer(AbstractDataset):
         transformer_class=TransformerNUFFT,
         sparse_operator: Optional[InterferometerSparseOperator] = None,
         raise_error_dft_visibilities_limit: bool = True,
-        sparse_terms: Optional[
-            "inversion_interferometer_util.SparseTerms"
-        ] = None,
+        sparse_terms: Optional["inversion_interferometer_util.SparseTerms"] = None,
     ):
         """
         An interferometer dataset, containing the visibilities data, noise-map, real-space msk, Fourier transformer and
@@ -340,6 +338,8 @@ class Interferometer(AbstractDataset):
         batch_size: int = 128,
         phase_centre: Optional[Tuple[float, float]] = None,
         pool_noise_map: bool = False,
+        oversample: Optional[int] = None,
+        oversample_pad: float = 0.25,
     ) -> "Interferometer":
         """
         Build an array-free `Interferometer` by accumulating a stream of visibility chunks,
@@ -386,6 +386,13 @@ class Interferometer(AbstractDataset):
             forming the terms instead of raising on unequal sigmas, logging the median and
             maximum difference once (a warning when the median exceeds 25 %). See
             `sparse_terms_from_chunks`.
+        oversample, oversample_pad
+            If `oversample=q` (a positive even integer) is set, also accumulate the fine
+            precision-operator and dirty-image grids `q` times finer than the image pixel, for
+            components analytic in the uv-plane (points, small Gaussians); they are carried on
+            `sparse_terms` (`precision_operator_fine`, `dirty_image_fine`) and need the NUFFT
+            transformer. Memory grows as `q^2` (~5-6 GB peak at 400 pixels, `q = 8`); see
+            `sparse_terms_from_chunks`, "Fine grids".
 
         Raises
         ------
@@ -408,6 +415,8 @@ class Interferometer(AbstractDataset):
             show_progress=show_progress,
             phase_centre=phase_centre,
             pool_noise_map=pool_noise_map,
+            oversample=oversample,
+            oversample_pad=oversample_pad,
         )
 
         return cls.from_sparse_terms(
@@ -571,7 +580,11 @@ class Interferometer(AbstractDataset):
             use_jax = False
 
         self._require(
-            "apply_sparse_operator", "data", "noise_map", "uv_wavelengths", "transformer"
+            "apply_sparse_operator",
+            "data",
+            "noise_map",
+            "uv_wavelengths",
+            "transformer",
         )
 
         if pool_noise_map:
@@ -766,7 +779,9 @@ class Interferometer(AbstractDataset):
             The number of source-pixel columns processed per batch by the sparse operator.
         accumulator_kwargs
             Passed to `sparse_terms_from_chunks` (`transformer_class`, `method`, `eps`,
-            `chunk_size`, `chunk_k`, `use_jax`, `show_progress`). `phase_centre` is rejected:
+            `chunk_size`, `chunk_k`, `use_jax`, `show_progress`, and `oversample` /
+            `oversample_pad`, which also accumulate the fine grids onto the returned dataset's
+            `sparse_terms`). `phase_centre` is rejected:
             it would shift the operator's terms but not this dataset's retained `data`, so the
             two would describe different phase centres; use `Interferometer.from_stream`
             (array-free, no retained data) to stream with a phase-centre shift.
