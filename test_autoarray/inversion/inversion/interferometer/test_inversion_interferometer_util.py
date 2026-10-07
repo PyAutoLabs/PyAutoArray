@@ -1,3 +1,5 @@
+import dataclasses
+import logging
 import os
 
 import autoarray as aa
@@ -1275,6 +1277,175 @@ def test__sparse_terms_from_chunks__unequal_real_imag_noise_in_a_later_chunk__ra
             _chunks_from(uv_wavelengths, data, noise_map, [0, 20, 40, 60]),
             real_space_mask=mask,
         )
+
+
+def test__check_noise_map_real_imag_equal__error_names_pooling():
+    with pytest.raises(aa.exc.DatasetException, match="pool_noise_map=True"):
+        aa.util.inversion_interferometer.check_noise_map_real_imag_equal(
+            np.array([1.0 + 1.02j])
+        )
+
+
+def _asymmetric_noise_map(n_visibilities, fraction, seed=11):
+    """
+    A noise-map whose imaginary sigma is the real sigma times `1 - fraction` or
+    `1 / (1 - fraction)` (random choice), so every visibility has a fractional real/imag
+    asymmetry `|re - im| / max(re, im)` of exactly `fraction`, of either sign.
+    """
+    rng = np.random.default_rng(seed=seed)
+    sigma = rng.uniform(0.5, 2.0, size=n_visibilities)
+    sign = rng.choice([-1.0, 1.0], size=n_visibilities)
+
+    return sigma + 1j * sigma * np.where(sign > 0, 1.0 / (1.0 - fraction), 1.0 - fraction)
+
+
+def test__noise_map_pooled_from__preserves_total_variance_with_equal_parts():
+    noise_map = _asymmetric_noise_map(n_visibilities=30, fraction=0.02)
+    noise_map[4] = 1.3 + 1.3j
+
+    pooled = aa.util.inversion_interferometer.noise_map_pooled_from(noise_map)
+
+    assert pooled.dtype == np.complex128
+    np.testing.assert_array_equal(pooled.real, pooled.imag)
+    np.testing.assert_allclose(
+        pooled.real**2 + pooled.imag**2,
+        noise_map.real**2 + noise_map.imag**2,
+        rtol=1.0e-14,
+    )
+
+    # Exactly equal sigmas are returned bit for bit, so pooling is idempotent.
+    assert pooled[4] == 1.3 + 1.3j
+    np.testing.assert_array_equal(
+        aa.util.inversion_interferometer.noise_map_pooled_from(pooled), pooled
+    )
+
+    # The same forms `sparse_terms_from_chunks` accepts.
+    np.testing.assert_array_equal(
+        aa.util.inversion_interferometer.noise_map_pooled_from(
+            aa.VisibilitiesNoiseMap(visibilities=noise_map)
+        ),
+        pooled,
+    )
+    np.testing.assert_array_equal(
+        aa.util.inversion_interferometer.noise_map_pooled_from(
+            np.stack([noise_map.real, noise_map.imag], axis=-1)
+        ),
+        pooled,
+    )
+
+
+def test__noise_map_real_imag_asymmetry_from__two_percent_map():
+    sigma = np.array([1.0, 2.0, 0.5, 1.5])
+    noise_map = sigma + 1j * sigma * np.array([1.0, 0.98, 1.0, 1.0 / 0.98])
+
+    median, maximum = aa.util.inversion_interferometer.noise_map_real_imag_asymmetry_from(
+        noise_map
+    )
+
+    # Fractions 0, 2 %, 0, 2 % (the difference over the larger of the two sigmas).
+    assert median == pytest.approx(0.01, rel=1.0e-12)
+    assert maximum == pytest.approx(0.02, rel=1.0e-12)
+
+    assert aa.util.inversion_interferometer.noise_map_real_imag_asymmetry_from(
+        sigma + 1j * sigma
+    ) == (0.0, 0.0)
+
+
+def test__sparse_terms_from_chunks__pool_noise_map__matches_pre_pooled_chunks_bit_identically():
+    """
+    The witness of the pooling option: pooling inside the accumulator is the same as pooling
+    each chunk beforehand with `noise_map_pooled_from` and calling the default (checking)
+    accumulator, field by field and bit for bit; the default call on the unpooled chunks
+    still raises.
+    """
+    pytest.importorskip("nufftax")
+
+    mask, uv_wavelengths, data, _, _ = _streaming_inputs()
+
+    noise_map = _asymmetric_noise_map(n_visibilities=60, fraction=0.02)
+
+    edges = [0, 20, 40, 60]
+
+    terms_pooled = aa.util.inversion_interferometer.sparse_terms_from_chunks(
+        _chunks_from(uv_wavelengths, data, noise_map, edges),
+        real_space_mask=mask,
+        pool_noise_map=True,
+    )
+
+    terms_pre_pooled = aa.util.inversion_interferometer.sparse_terms_from_chunks(
+        _chunks_from(
+            uv_wavelengths,
+            data,
+            aa.util.inversion_interferometer.noise_map_pooled_from(noise_map),
+            edges,
+        ),
+        real_space_mask=mask,
+    )
+
+    for field in dataclasses.fields(terms_pooled):
+        value_pooled = getattr(terms_pooled, field.name)
+        value_pre_pooled = getattr(terms_pre_pooled, field.name)
+
+        if isinstance(value_pooled, np.ndarray):
+            np.testing.assert_array_equal(value_pooled, value_pre_pooled, field.name)
+        else:
+            assert value_pooled == value_pre_pooled, field.name
+
+    with pytest.raises(aa.exc.DatasetException):
+        aa.util.inversion_interferometer.sparse_terms_from_chunks(
+            _chunks_from(uv_wavelengths, data, noise_map, edges),
+            real_space_mask=mask,
+        )
+
+
+_IIU_LOGGER = "autoarray.inversion.inversion.interferometer.inversion_interferometer_util"
+
+
+def _pooled_terms_log(caplog, noise_map):
+    """
+    Run `sparse_terms_from_chunks(pool_noise_map=True)` on a NumPy-only setup (DFT
+    transformer, brute-force builder) over three chunks and return the pooling log records.
+    """
+    mask, uv_wavelengths, data, _, _ = _streaming_inputs()
+
+    caplog.clear()
+
+    with caplog.at_level(logging.INFO, logger=_IIU_LOGGER):
+        aa.util.inversion_interferometer.sparse_terms_from_chunks(
+            _chunks_from(uv_wavelengths, data, noise_map, [0, 20, 40, 60]),
+            real_space_mask=mask,
+            transformer_class=aa.TransformerDFT,
+            method="numpy",
+            pool_noise_map=True,
+        )
+
+    return [record for record in caplog.records if "pooled" in record.getMessage()]
+
+
+def test__sparse_terms_from_chunks__pool_noise_map__logs_once_per_call(caplog):
+    # 2 % estimator scatter: one info line for the whole stream, not one per chunk.
+    records = _pooled_terms_log(
+        caplog, _asymmetric_noise_map(n_visibilities=60, fraction=0.02)
+    )
+
+    assert len(records) == 1
+    assert records[0].levelno == logging.INFO
+    assert "median difference 2.00 %" in records[0].getMessage()
+
+    # 30 %: the difference may be real, so a warning naming the exact dense path.
+    records = _pooled_terms_log(
+        caplog, _asymmetric_noise_map(n_visibilities=60, fraction=0.3)
+    )
+
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    assert "median difference 30.00 %" in records[0].getMessage()
+    assert "InversionInterferometerMapping" in records[0].getMessage()
+
+    # Already equal: pooling is a no-op and nothing is logged.
+    sigma = np.random.default_rng(seed=2).uniform(0.5, 2.0, size=60)
+
+    assert _pooled_terms_log(caplog, sigma + 1j * sigma) == []
 
 
 def test__sparse_terms_from_chunks__no_visibilities__raises():

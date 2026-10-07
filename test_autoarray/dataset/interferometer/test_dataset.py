@@ -1056,3 +1056,200 @@ def test__from_sparse_terms__sum_of_per_channel_terms_matches_in_memory_mfs(
         _delaunay_mapper(mask_2d_7x7),
         rel=1.0e-10,
     )
+
+
+def _asymmetric_interferometer(mask, transformer_class, fraction, n_visibilities=40):
+    """
+    `_random_interferometer` with the imaginary sigma of every visibility set to the real
+    sigma times `1 - fraction` or `1 / (1 - fraction)` (random choice), so every visibility has
+    a fractional real/imag asymmetry of exactly `fraction` -- noise-estimator scatter at 2 %.
+    """
+    dataset = _random_interferometer(
+        mask, transformer_class, n_visibilities=n_visibilities
+    )
+
+    sigma = dataset.noise_map.array.real
+    sign = np.random.default_rng(seed=7).choice([-1.0, 1.0], size=n_visibilities)
+    factor = np.where(sign > 0, 1.0 / (1.0 - fraction), 1.0 - fraction)
+
+    return aa.Interferometer(
+        data=dataset.data,
+        noise_map=aa.VisibilitiesNoiseMap(visibilities=sigma + 1j * sigma * factor),
+        uv_wavelengths=dataset.uv_wavelengths,
+        real_space_mask=mask,
+        transformer_class=transformer_class,
+    )
+
+
+def _log_evidence_of(dataset, mapper):
+    inversion = aa.Inversion(dataset=dataset, linear_obj_list=[mapper])
+
+    return inversion, float(
+        aa.m.MockFitInterferometer(dataset=dataset, inversion=inversion).log_evidence
+    )
+
+
+def test__apply_sparse_operator__pool_noise_map__returns_pooled_dataset_matching_mapping(
+    mask_2d_7x7,
+):
+    dataset = _asymmetric_interferometer(
+        mask_2d_7x7, transformer.TransformerDFT, fraction=0.02
+    )
+
+    # The default still refuses unequal sigmas.
+    with pytest.raises(aa.exc.DatasetException, match="pool_noise_map=True"):
+        dataset.apply_sparse_operator(use_jax=False)
+
+    dataset_sparse = dataset.apply_sparse_operator(use_jax=False, pool_noise_map=True)
+
+    noise_map_pooled = aa.util.inversion_interferometer.noise_map_pooled_from(
+        dataset.noise_map
+    )
+
+    # The returned dataset carries the pooled noise-map, so its dense statistics describe the
+    # same noise model as the cached sparse scalars.
+    np.testing.assert_array_equal(dataset_sparse.noise_map.array, noise_map_pooled)
+    assert dataset_sparse.sparse_operator.noise_normalization == (
+        aa.util.fit.noise_normalization_complex_from(noise_map=noise_map_pooled)
+    )
+
+    dataset_pooled = aa.Interferometer(
+        data=dataset.data,
+        noise_map=aa.VisibilitiesNoiseMap(visibilities=noise_map_pooled),
+        uv_wavelengths=dataset.uv_wavelengths,
+        real_space_mask=mask_2d_7x7,
+        transformer_class=transformer.TransformerDFT,
+    )
+
+    mapper = _delaunay_mapper(mask_2d_7x7)
+
+    inversion_sparse, log_evidence_sparse = _log_evidence_of(dataset_sparse, mapper)
+    inversion_mapping, log_evidence_mapping = _log_evidence_of(dataset_pooled, mapper)
+
+    assert isinstance(inversion_sparse, aa.InversionInterferometerSparse)
+    assert isinstance(inversion_mapping, aa.InversionInterferometerMapping)
+
+    assert log_evidence_sparse == pytest.approx(log_evidence_mapping, rel=1.0e-8)
+
+
+def test__apply_sparse_operator__pool_noise_map__approximation_size_at_two_percent(
+    mask_2d_7x7,
+):
+    """
+    Documentation pin of what pooling costs when the sigmas really are unequal: the pooled
+    sparse fit against the exact dense `InversionInterferometerMapping` fit of the unpooled
+    data, at a 2 % real/imag asymmetry on 40 visibilities.
+
+    Measured (2026-10-07, test config): the pooled log-evidence is 9.9e-3 nats (7.7e-5
+    relative) above the unpooled one. Redrawing which visibilities have the larger imaginary
+    sigma (sign seeds 0-7) spreads it over 0.010-0.096 nats in magnitude (at most 7.4e-4
+    relative), because most of it is chi-squared and image-dependent: each visibility's real
+    and imaginary residuals are weighted by the pooled rather than their own sigma, an error
+    first order in the asymmetry and random in sign. The pooled `noise_normalization` adds a
+    fixed second-order shift (8.2e-3 nats here). This is why the log-evidences of a pooled and
+    an unpooled fit of the same data must not be compared; the bounds below only pin the order
+    of magnitude.
+    """
+    dataset = _asymmetric_interferometer(
+        mask_2d_7x7, transformer.TransformerDFT, fraction=0.02
+    )
+
+    mapper = _delaunay_mapper(mask_2d_7x7)
+
+    _, log_evidence_unpooled_mapping = _log_evidence_of(dataset, mapper)
+    _, log_evidence_pooled_sparse = _log_evidence_of(
+        dataset.apply_sparse_operator(use_jax=False, pool_noise_map=True), mapper
+    )
+
+    difference = abs(log_evidence_pooled_sparse - log_evidence_unpooled_mapping)
+
+    assert 1.0e-3 < difference < 1.0e-1
+
+
+def test__apply_sparse_operator__pool_noise_map__equal_sigmas_unchanged_and_silent(
+    mask_2d_7x7, caplog
+):
+    dataset = _random_interferometer(mask_2d_7x7, transformer.TransformerDFT)
+
+    with caplog.at_level("INFO"):
+        dataset_pooled = dataset.apply_sparse_operator(
+            use_jax=False, pool_noise_map=True
+        )
+
+    assert not any("pooled" in record.getMessage() for record in caplog.records)
+
+    dataset_default = dataset.apply_sparse_operator(use_jax=False)
+
+    np.testing.assert_array_equal(
+        dataset_pooled.noise_map.array, dataset.noise_map.array
+    )
+    np.testing.assert_array_equal(
+        dataset_pooled.sparse_operator.dirty_image,
+        dataset_default.sparse_operator.dirty_image,
+    )
+    assert (
+        dataset_pooled.sparse_operator.data_term
+        == dataset_default.sparse_operator.data_term
+    )
+    assert (
+        dataset_pooled.sparse_operator.noise_normalization
+        == dataset_default.sparse_operator.noise_normalization
+    )
+
+
+def test__from_stream__pool_noise_map__matches_pre_pooled_stream(mask_2d_7x7):
+    dataset = _asymmetric_interferometer(
+        mask_2d_7x7, transformer.TransformerDFT, fraction=0.02
+    )
+
+    kwargs = dict(transformer_class=transformer.TransformerDFT, method="numpy")
+
+    with pytest.raises(aa.exc.DatasetException):
+        aa.Interferometer.from_stream(
+            _chunks_of(dataset, [0, 13, 40]), mask_2d_7x7, **kwargs
+        )
+
+    dataset_stream = aa.Interferometer.from_stream(
+        _chunks_of(dataset, [0, 13, 40]), mask_2d_7x7, pool_noise_map=True, **kwargs
+    )
+
+    noise_map_pooled = aa.util.inversion_interferometer.noise_map_pooled_from(
+        dataset.noise_map
+    )
+
+    chunks_pre_pooled = [
+        (uv_wavelengths, data, noise_map_pooled[k0:k1])
+        for (uv_wavelengths, data, _), (k0, k1) in zip(
+            _chunks_of(dataset, [0, 13, 40]), ((0, 13), (13, 40))
+        )
+    ]
+
+    dataset_pre_pooled = aa.Interferometer.from_stream(
+        chunks_pre_pooled, mask_2d_7x7, **kwargs
+    )
+
+    np.testing.assert_array_equal(
+        dataset_stream.sparse_terms.nufft_precision_operator,
+        dataset_pre_pooled.sparse_terms.nufft_precision_operator,
+    )
+    np.testing.assert_array_equal(
+        dataset_stream.sparse_terms.dirty_image_native,
+        dataset_pre_pooled.sparse_terms.dirty_image_native,
+    )
+    assert dataset_stream.sparse_terms.data_term == (
+        dataset_pre_pooled.sparse_terms.data_term
+    )
+    assert dataset_stream.sparse_terms.noise_normalization == (
+        dataset_pre_pooled.sparse_terms.noise_normalization
+    )
+
+
+def test__apply_sparse_operator_from_chunks__pool_noise_map__raises(mask_2d_7x7):
+    dataset = _asymmetric_interferometer(
+        mask_2d_7x7, transformer.TransformerDFT, fraction=0.02
+    )
+
+    with pytest.raises(aa.exc.DatasetException, match="noise_map_pooled_from"):
+        dataset.apply_sparse_operator_from_chunks(
+            _chunks_of(dataset, [0, 40]), pool_noise_map=True, method="numpy"
+        )

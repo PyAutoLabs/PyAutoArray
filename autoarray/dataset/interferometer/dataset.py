@@ -339,6 +339,7 @@ class Interferometer(AbstractDataset):
         show_progress: bool = False,
         batch_size: int = 128,
         phase_centre: Optional[Tuple[float, float]] = None,
+        pool_noise_map: bool = False,
     ) -> "Interferometer":
         """
         Build an array-free `Interferometer` by accumulating a stream of visibility chunks,
@@ -350,6 +351,19 @@ class Interferometer(AbstractDataset):
         `inversion_interferometer_util.sparse_terms_from_chunks` into a `SparseTerms` record,
         which `from_sparse_terms` turns into the dataset; peak memory is set by the chunk size,
         not the dataset size.
+
+        The sparse terms assume every visibility has equal real and imaginary noise sigma: the
+        precision operator and dirty beam are built from the real-part sigma alone. By default
+        a chunk with unequal sigmas raises. For thermal noise a difference usually comes from
+        the noise estimator (1-2 % when estimated by differencing adjacent visibilities); pass
+        `pool_noise_map=True` to pool each chunk's sigmas in quadrature,
+        `sigma^2 = (sigma_real^2 + sigma_imag^2) / 2` (which preserves the total variance),
+        or pool them yourself before handing the chunks over with
+        `inversion_interferometer_util.noise_map_pooled_from`. Pooling is approximate when the
+        sigmas genuinely differ (the sparse curvature then drops the `cos(a + b)` term of the
+        unequal weights; see `sparse_terms_from_chunks`), and the pooled `noise_normalization`
+        differs from the unpooled one, so do not compare log-evidences of a pooled and an
+        unpooled fit.
 
         Parameters
         ----------
@@ -367,11 +381,17 @@ class Interferometer(AbstractDataset):
             `(y0, x0)` lands at the image origin; recorded as `sparse_terms.phase_centre`.
             `None` applies no shift (recorded as `(0.0, 0.0)`). See
             `sparse_terms_from_chunks`.
+        pool_noise_map
+            If `True`, pool every chunk's real and imaginary noise sigma in quadrature before
+            forming the terms instead of raising on unequal sigmas, logging the median and
+            maximum difference once (a warning when the median exceeds 25 %). See
+            `sparse_terms_from_chunks`.
 
         Raises
         ------
         exc.DatasetException
-            If any chunk has unequal real and imaginary noise sigma.
+            If any chunk has unequal real and imaginary noise sigma and `pool_noise_map` is
+            `False`.
         """
         if disable_jax():
             use_jax = False
@@ -387,6 +407,7 @@ class Interferometer(AbstractDataset):
             use_jax=use_jax,
             show_progress=show_progress,
             phase_centre=phase_centre,
+            pool_noise_map=pool_noise_map,
         )
 
         return cls.from_sparse_terms(
@@ -427,6 +448,7 @@ class Interferometer(AbstractDataset):
         show_progress: bool = False,
         show_memory: bool = False,
         use_jax: bool = False,
+        pool_noise_map: bool = False,
     ):
         """
         Precompute the NUFFT precision operator for efficient pixelized source reconstruction.
@@ -493,6 +515,11 @@ class Interferometer(AbstractDataset):
             the harness pays 2.3-3.2 s of compile for a backend it asked to disable. (The
             same switch demotes the `"nufft"` builder to the NumPy brute force inside
             `nufft_precision_operator_from`.)
+        pool_noise_map
+            If `True`, pool the real and imaginary noise sigma of every visibility in
+            quadrature, `sigma^2 = (sigma_real^2 + sigma_imag^2) / 2`, before building the
+            operator, instead of raising on unequal sigmas (see "Precondition" below). The
+            returned dataset carries the pooled `noise_map`.
 
         Precondition
         ------------
@@ -502,19 +529,39 @@ class Interferometer(AbstractDataset):
         `psf_precision_operator_from`, which passes `noise_map_real` to
         `nufft_precision_operator_from`), a reduction that is exact only under that
         equality. With unequal sigmas the sparse curvature matrix silently disagrees with
-        the dense `InversionInterferometerMapping` path, so this method raises a
+        the dense `InversionInterferometerMapping` path, so by default this method raises a
         `DatasetException` rather than returning a wrong operator.
+
+        For thermal noise the real and imaginary parts of one visibility have the same
+        variance, so a measured difference usually comes from the noise estimator (1-2 % when
+        the noise is estimated by differencing adjacent visibilities). `pool_noise_map=True`
+        pools the two in quadrature (which preserves the total variance) and logs the median
+        and maximum difference once: an info line up to a 25 % median difference, a warning
+        above it, where the difference may be real. The equivalent by hand is building the
+        dataset with `noise_map=inversion_interferometer_util.noise_map_pooled_from(noise_map)`.
+
+        Pooling is approximate when the sigmas genuinely differ: with per-visibility weights
+        `w_r`, `w_i` the exact curvature is `sum wbar cos(a - b) + dw cos(a + b)`
+        (`wbar = (w_r + w_i) / 2`, `dw = (w_r - w_i) / 2`) and `W~` holds only the
+        `cos(a - b)` part, so the dense `InversionInterferometerMapping` path (no
+        `apply_sparse_operator`) remains the exact one. The returned dataset carries the pooled
+        `noise_map`, so the dense residual and chi-squared maps and the cached sparse
+        `data_term` / `noise_normalization` describe the same noise model. The pooled
+        `noise_normalization` differs from the unpooled one, so do not compare the
+        log-evidences of a pooled and an unpooled fit of the same data.
 
         Returns
         -------
         Interferometer
             A new `Interferometer` dataset with the precomputed `InterferometerSparseOperator` attached,
             enabling efficient pixelized source reconstruction via the sparse linear algebra formalism.
+            With `pool_noise_map=True` its `noise_map` is the pooled one.
 
         Raises
         ------
         exc.DatasetException
-            If any visibility has unequal real and imaginary noise sigma.
+            If any visibility has unequal real and imaginary noise sigma and `pool_noise_map`
+            is `False`.
         """
 
         # `use_jax` now only selects between the two brute forces (the `"nufft"` builder
@@ -526,6 +573,41 @@ class Interferometer(AbstractDataset):
         self._require(
             "apply_sparse_operator", "data", "noise_map", "uv_wavelengths", "transformer"
         )
+
+        if pool_noise_map:
+            # Every term is built from the pooled dataset, and it is the pooled dataset that is
+            # returned, so the dense residual / chi-squared maps and the cached sparse
+            # `data_term` / `noise_normalization` describe the same noise model.
+            noise_map = np.asarray(self.noise_map.array, dtype=np.complex128)
+
+            pooling_record = inversion_interferometer_util._NoiseMapPoolingRecord()
+            pooling_record.add(noise_map)
+
+            dataset_pooled = Interferometer(
+                real_space_mask=self.real_space_mask,
+                data=self.data,
+                noise_map=VisibilitiesNoiseMap(
+                    visibilities=inversion_interferometer_util.noise_map_pooled_from(
+                        noise_map
+                    )
+                ),
+                uv_wavelengths=self.uv_wavelengths,
+                transformer_class=lambda uv_wavelengths, real_space_mask: self.transformer,
+            )
+
+            pooling_record.log()
+
+            return dataset_pooled.apply_sparse_operator(
+                nufft_precision_operator=nufft_precision_operator,
+                batch_size=batch_size,
+                method=method,
+                eps=eps,
+                nufft_chunk_size=nufft_chunk_size,
+                chunk_k=chunk_k,
+                show_progress=show_progress,
+                show_memory=show_memory,
+                use_jax=use_jax,
+            )
 
         inversion_interferometer_util.check_noise_map_real_imag_equal(self.noise_map)
 
@@ -639,9 +721,15 @@ class Interferometer(AbstractDataset):
         differ per chunk: `uv_wavelengths` a real `(K, 2)` array in wavelengths, `data` and
         `noise_map` a `Visibilities`, a complex `(K,)` array or a real `(K, 2)` array of
         (real, imag) columns. Every chunk must have equal real and imaginary noise sigma
-        (checked per chunk). The chunks must together be exactly this dataset's visibilities
-        (in any order) for the returned dataset to be self-consistent -- this method does not
-        check that.
+        (checked per chunk), the assumption the sparse operator rests on (see
+        `apply_sparse_operator`, "Precondition"). `pool_noise_map=True` is refused here: the
+        returned dataset retains this dataset's unpooled `noise_map`, which would then describe
+        a different noise model from the operator. Pool the dataset itself first (build it
+        with `noise_map=inversion_interferometer_util.noise_map_pooled_from(noise_map)` and
+        take the chunks from it), or use `Interferometer.from_stream(..., pool_noise_map=True)`
+        (array-free, no retained noise-map). The chunks must together be exactly this
+        dataset's visibilities (in any order) for the returned dataset to be self-consistent
+        -- this method does not check that.
 
         Memory
         ------
@@ -681,10 +769,11 @@ class Interferometer(AbstractDataset):
             `chunk_size`, `chunk_k`, `use_jax`, `show_progress`). `phase_centre` is rejected:
             it would shift the operator's terms but not this dataset's retained `data`, so the
             two would describe different phase centres; use `Interferometer.from_stream`
-            (array-free, no retained data) to stream with a phase-centre shift. When not given,
-            `transformer_class`, `eps` and `chunk_size` follow this dataset's transformer (the
-            same defaults `psf_precision_operator_from` takes), so the accumulated terms match
-            `apply_sparse_operator()`.
+            (array-free, no retained data) to stream with a phase-centre shift.
+            `pool_noise_map=True` is rejected for the same reason (see "Chunk contract").
+            When not given, `transformer_class`, `eps` and `chunk_size` follow this dataset's
+            transformer (the same defaults `psf_precision_operator_from` takes), so the
+            accumulated terms match `apply_sparse_operator()`.
 
         Returns
         -------
@@ -695,8 +784,8 @@ class Interferometer(AbstractDataset):
         Raises
         ------
         exc.DatasetException
-            If any chunk has unequal real and imaginary noise sigma, or a `phase_centre` is
-            passed.
+            If any chunk has unequal real and imaginary noise sigma, or a `phase_centre` or
+            `pool_noise_map=True` is passed.
         """
         if accumulator_kwargs.get("phase_centre") is not None:
             raise exc.DatasetException(
@@ -706,6 +795,19 @@ class Interferometer(AbstractDataset):
                 "different phase centres and give contradictory likelihoods. Use "
                 "`Interferometer.from_stream(..., phase_centre=...)`, which builds an "
                 "array-free dataset with no retained visibilities."
+            )
+
+        if accumulator_kwargs.get("pool_noise_map", False):
+            raise exc.DatasetException(
+                "Interferometer.apply_sparse_operator_from_chunks does not take "
+                "`pool_noise_map=True`: it would build the sparse operator from the pooled "
+                "noise-map but retain this dataset's unpooled `noise_map`, so the two would "
+                "describe different noise models and give contradictory likelihoods. Pool the "
+                "dataset first -- `Interferometer(..., noise_map="
+                "inversion_interferometer_util.noise_map_pooled_from(noise_map))`, with the "
+                "chunks taken from it -- or use `Interferometer.from_stream(..., "
+                "pool_noise_map=True)`, which builds an array-free dataset with no retained "
+                "noise-map."
             )
 
         if disable_jax() and accumulator_kwargs.get("use_jax", False):
