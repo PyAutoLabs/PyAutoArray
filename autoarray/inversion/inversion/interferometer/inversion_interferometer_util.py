@@ -1,6 +1,8 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cached_property
 import logging
+import math
+import numbers
 import numpy as np
 import time
 from pathlib import Path
@@ -628,6 +630,171 @@ def _pixel_scale_radians_from(grid_radians_2d: np.ndarray) -> float:
     return delta_x
 
 
+def _add_ifftshifted(out: np.ndarray, block: np.ndarray) -> None:
+    """
+    `out += np.fft.ifftshift(block)` for a 2D `block` with even axis lengths, without
+    materialising the shifted copy.
+
+    For an even length `L` the shift moves index `n` to `(n + L / 2) % L`, i.e. it swaps the
+    two halves of each axis, so the sum is four quadrant-wise in-place adds. This is what lets
+    a fine grid of hundreds of MB be accumulated across chunks with no second full-size
+    buffer per chunk.
+    """
+    n_rows, n_cols = block.shape
+
+    if n_rows % 2 or n_cols % 2:
+        raise ValueError(
+            f"_add_ifftshifted needs even axis lengths; got {block.shape}."
+        )
+
+    h, c = n_rows // 2, n_cols // 2
+
+    out[:h, :c] += block[h:, c:]
+    out[:h, c:] += block[h:, :c]
+    out[h:, :c] += block[:h, c:]
+    out[h:, c:] += block[:h, :c]
+
+
+def _type1_real_grid_from(
+    uv_wavelengths: np.ndarray,
+    values: np.ndarray,
+    n_modes: Tuple[int, int],
+    pixel_scale_radians: float,
+    *,
+    eps: float = 1.0e-12,
+    chunk_size: Optional[int] = None,
+    centred: bool = False,
+    zero_nyquist: bool = False,
+    out: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """
+    The real part of a **type-1 (adjoint) NUFFT** of per-visibility `values` onto a regular
+    grid of spacing `pixel_scale_radians`:
+
+        G[m2, m1] = Re sum_k c_k exp(i(-m1 * x_k + m2 * y_k)),
+        x_k = 2 pi u_k pixel_scale_radians,  y_k = 2 pi v_k pixel_scale_radians,
+
+    on the `(n_modes[1], n_modes[0])` mode grid (`nufftax.nufft2d1` argument order,
+    `(N_x, N_y)`). This is the core of `nufft_precision_operator_via_nufft_from` (where
+    `c = w`, the real weights, and the `(-x, +y)` sign is pinned against the brute force), lifted
+    out so that the same transform can be evaluated on grids finer than the image pixel
+    (`sparse_terms_from_chunks(oversample=q)` passes `pixel_scale_radians / q`).
+
+    For a real `c` (the weights) `G` is `sum_k w_k cos(...)`, even in `(m1, m2)`, so its sign
+    convention is immaterial. For a complex `c` it is not: passing `conj(c)` gives
+    `Re sum_k c_k exp(i(m1 * x_k - m2 * y_k))`, i.e. the dirty image at `x = +m1 * delta`,
+    `y = -m2 * delta` -- autoarray's native orientation (`x` along the columns, `y` decreasing
+    down the rows).
+
+    Parameters
+    ----------
+    uv_wavelengths
+        `[K, 2]` `(u, v)` baselines in wavelengths.
+    values
+        `[K]` real or complex per-visibility values `c_k`.
+    n_modes
+        `(N_x, N_y)`, the grid's column and row counts.
+    pixel_scale_radians
+        The grid spacing in radians.
+    eps
+        The requested NUFFT precision (peak-scaled; see `nufft_precision_operator_via_nufft_from`).
+    chunk_size
+        Cap on the visibilities passed to `nufft2d1` in one call (a memory ceiling), or `None`
+        for one shot. The transform is linear in `c`, so the chunks' transforms are summed.
+    centred
+        If `True` the grid is returned in the centred order `nufft2d1` produces (mode 0 at
+        index `N // 2`); if `False` it is `ifftshift`-ed to wraparound order (mode 0 at index 0,
+        negative modes at negative indices), which needs even `N_x`, `N_y`.
+    zero_nyquist
+        If `True` the Nyquist row and column (mode `-N / 2`, at index `N / 2` in wraparound order
+        and `0` in centred order) are set to zero, as `W~` requires.
+    out
+        If given, the grid is **added** in place into this float64 array (shape `(N_y, N_x)`),
+        which is returned; nothing of the grid's size is allocated beyond `nufft2d1`'s own output
+        and its real part per chunk. This is how `sparse_terms_from_chunks` accumulates the
+        fine grids across a stream. If `None` a new array is returned.
+
+    Returns
+    -------
+    np.ndarray
+        `[N_y, N_x]` float64.
+    """
+    nufftax = _load_nufftax()
+
+    if nufftax is None:
+        nufftax_exception()
+
+    import jax.numpy as jnp
+
+    uv_wavelengths = np.asarray(uv_wavelengths, dtype=np.float64)
+
+    # The transformer's own scaled frequencies.
+    x = 2.0 * np.pi * uv_wavelengths[:, 0] * pixel_scale_radians
+    y = 2.0 * np.pi * uv_wavelengths[:, 1] * pixel_scale_radians
+
+    n_x, n_y = (int(n) for n in n_modes)
+    n_modes = (n_x, n_y)
+    total_visibilities = int(x.shape[0])
+
+    if chunk_size is None or chunk_size >= total_visibilities:
+        chunk_size = total_visibilities
+
+    if chunk_size <= 0:
+        raise ValueError(
+            f"chunk_size must be a positive integer or None, got {chunk_size}."
+        )
+
+    if out is not None and out.shape != (n_y, n_x):
+        raise ValueError(
+            f"_type1_real_grid_from: out has shape {out.shape}, expected {(n_y, n_x)}."
+        )
+
+    if out is None:
+        # Only Re(f) is ever used, so each chunk's real part is accumulated in float64 and the
+        # complex block is released before the next one is spread.
+        real_modes = np.zeros((n_y, n_x), dtype=np.float64)
+    elif centred:
+        real_modes = out
+    else:
+        real_modes = None
+
+    for k0 in range(0, total_visibilities, chunk_size):
+        k1 = min(total_visibilities, k0 + chunk_size)
+
+        f = nufftax.nufft2d1(
+            jnp.asarray(-x[k0:k1]),
+            jnp.asarray(y[k0:k1]),
+            jnp.asarray(values[k0:k1], dtype=jnp.complex128),
+            n_modes,
+            eps,
+            1,
+        )
+
+        if real_modes is not None:
+            real_modes += np.asarray(np.real(f), dtype=np.float64)
+        else:
+            _add_ifftshifted(out, np.asarray(np.real(f), dtype=np.float64))
+
+        del f
+
+    if out is None:
+        grid = (
+            real_modes
+            if centred
+            else np.ascontiguousarray(np.fft.ifftshift(real_modes))
+        )
+    else:
+        grid = out
+
+    if zero_nyquist:
+        row, col = (0, 0) if centred else (n_y // 2, n_x // 2)
+
+        grid[row, :] = 0.0
+        grid[:, col] = 0.0
+
+    return grid
+
+
 def nufft_precision_operator_via_nufft_from(
     noise_map_real: np.ndarray,
     uv_wavelengths: np.ndarray,
@@ -741,13 +908,6 @@ def nufft_precision_operator_via_nufft_from(
     np.ndarray
         `[2Ny, 2Nx]` float64, wraparound-ordered, with the padding row / column zero.
     """
-    nufftax = _load_nufftax()
-
-    if nufftax is None:
-        nufftax_exception()
-
-    import jax.numpy as jnp
-
     noise_map_real = np.asarray(noise_map_real, dtype=np.float64)
     uv_wavelengths = np.asarray(uv_wavelengths, dtype=np.float64)
     grid_radians_2d = np.asarray(grid_radians_2d, dtype=np.float64)
@@ -756,49 +916,18 @@ def nufft_precision_operator_via_nufft_from(
 
     pixel_scale_radians = _pixel_scale_radians_from(grid_radians_2d)
 
-    # The transformer's own scaled frequencies.
-    x = 2.0 * np.pi * uv_wavelengths[:, 0] * pixel_scale_radians
-    y = 2.0 * np.pi * uv_wavelengths[:, 1] * pixel_scale_radians
-
     w = 1.0 / (noise_map_real**2)
 
-    n_modes = (2 * x_shape, 2 * y_shape)
-    total_visibilities = int(x.shape[0])
-
-    if chunk_size is None or chunk_size >= total_visibilities:
-        chunk_size = total_visibilities
-
-    if chunk_size <= 0:
-        raise ValueError(
-            f"chunk_size must be a positive integer or None, got {chunk_size}."
-        )
-
-    # Only Re(f) is ever used, so each chunk's real part is accumulated in float64 and the
-    # complex block is released before the next one is spread.
-    real_modes = np.zeros((2 * y_shape, 2 * x_shape), dtype=np.float64)
-
-    for k0 in range(0, total_visibilities, chunk_size):
-        k1 = min(total_visibilities, k0 + chunk_size)
-
-        f = nufftax.nufft2d1(
-            jnp.asarray(-x[k0:k1]),
-            jnp.asarray(y[k0:k1]),
-            jnp.asarray(w[k0:k1], dtype=jnp.complex128),
-            n_modes,
-            eps,
-            1,
-        )
-
-        real_modes += np.asarray(np.real(f), dtype=np.float64)
-
-        del f
-
-    nufft_precision_operator = np.ascontiguousarray(np.fft.ifftshift(real_modes))
-
-    nufft_precision_operator[y_shape, :] = 0.0
-    nufft_precision_operator[:, x_shape] = 0.0
-
-    return nufft_precision_operator
+    return _type1_real_grid_from(
+        uv_wavelengths,
+        w,
+        (2 * x_shape, 2 * y_shape),
+        pixel_scale_radians,
+        eps=eps,
+        chunk_size=chunk_size,
+        centred=False,
+        zero_nyquist=True,
+    )
 
 
 def nufft_precision_operator_via_np_from(
@@ -2109,6 +2238,40 @@ class SparseTerms:
         records `(0.0, 0.0)` when no shift is applied). `None` means not recorded. Terms with
         different phase centres have dirty images referred to different sky origins and
         cannot be summed.
+
+    Fine grids (`sparse_terms_from_chunks(oversample=q)`)
+    ------------------------------------------------------
+    Optional, `None` unless accumulated with `oversample`. They let the terms of components that
+    are analytic in the uv-plane (a point source, a small Gaussian) at sub-pixel positions be
+    read off by interpolation: for a unit point at `p`, the cross term with image pixel `x_i` is
+    `K(x_i - p)`, the point-point term `K(p - p')` and the data term `D(p)`.
+
+    precision_operator_fine
+        `K` on a grid `q` times finer than the image pixel, `sum_k w_k cos(2 pi u_k . lag)`, in
+        the same wraparound order and orientation as `nufft_precision_operator` (index `(i, j)` is
+        the lag of `i` fine rows and `j` fine columns; index 0 = zero lag). Shape
+        `(2 (Ny + p) q, 2 (Nx + p) q)` with `(Ny, Nx)` the **full** native shape (points may sit
+        anywhere in the mask) and `p = ceil(oversample_pad * max(Ny, Nx))` pixels of extra lag
+        so that smoothing it (e.g. by a Gaussian width) does not wrap. Unlike `W~` its Nyquist
+        row and column are not zeroed: an interpolant reads across them.
+        `precision_operator_fine[i * q, j * q] == nufft_precision_operator[i, j]` within the
+        masked extent.
+    dirty_image_fine
+        `D(x) = Re sum_k c_k exp(2 pi i u_k . x)`, `c = d_r / sigma_r^2 + i d_i / sigma_i^2` (the
+        phase-shifted data, exactly as `dirty_image_native`), on a grid `q` times finer than the
+        image pixel covering **twice** the field: shape `(2 Ny q, 2 Nx q)`, centred (`x = 0, y = 0`
+        at index `[Ny q, Nx q]`), native orientation (`x` along the columns, `y` decreasing down
+        the rows). Native pixel `(r, c)` sits at fine index
+        `(Ny q - (Ny - 1) q / 2 + r q, Nx q - (Nx - 1) q / 2 + c q)`, a grid point because `q` is
+        even, where it equals `dirty_image_native[r, c]`.
+    oversample
+        The even oversampling factor `q`.
+    oversample_pad
+        The fractional lag pad the fine operator was built with (`p` above).
+
+    Both are sums over visibilities and inherit the equal-sigma assumption (`K` uses the
+    real-part weights only); with `pool_noise_map=True` they are built from the pooled
+    noise-map like every other term.
     """
 
     nufft_precision_operator: np.ndarray
@@ -2124,14 +2287,31 @@ class SparseTerms:
     eps: Optional[float] = None
     transformer_class_name: Optional[str] = None
     phase_centre: Optional[Tuple[float, float]] = None
+    precision_operator_fine: Optional[np.ndarray] = None
+    dirty_image_fine: Optional[np.ndarray] = None
+    oversample: Optional[int] = None
+    oversample_pad: Optional[float] = None
+
+    @property
+    def has_fine_grids(self) -> bool:
+        """
+        Whether these terms carry the `oversample` fine grids (`precision_operator_fine`,
+        `dirty_image_fine`).
+        """
+        return (
+            self.precision_operator_fine is not None
+            or self.dirty_image_fine is not None
+        )
 
     def __add__(self, other: "SparseTerms") -> "SparseTerms":
         """
         The field-wise sum of two `SparseTerms`.
 
         Raises `exc.InversionException` if a provenance field (`shape_native`,
-        `pixel_scales`, `origin`, `eps`, `phase_centre`, `transformer_class_name`) is recorded on
-        both sides with different values.
+        `pixel_scales`, `origin`, `eps`, `phase_centre`, `transformer_class_name`, `oversample`,
+        `oversample_pad`) is recorded on both sides with different values, or if exactly one
+        side carries the `oversample` fine grids (summing would silently drop or half-fill them;
+        accumulate every part with the same `oversample`, or with none).
         The result carries, for each provenance field, the recorded value from either side
         (the left one when both are recorded), so an unrecorded operand never erases the
         provenance of a recorded one.
@@ -2142,6 +2322,14 @@ class SparseTerms:
         """
         if not isinstance(other, SparseTerms):
             return NotImplemented
+
+        if self.has_fine_grids != other.has_fine_grids:
+            raise exc.InversionException(
+                "SparseTerms can only be added when both or neither carry the `oversample` fine "
+                "grids (`precision_operator_fine`, `dirty_image_fine`): one side has fine grids "
+                f"(oversample={self.oversample if self.has_fine_grids else other.oversample!r}) "
+                "and the other does not. Accumulate every part with the same `oversample`."
+            )
 
         if self.nufft_precision_operator.shape != other.nufft_precision_operator.shape:
             raise ValueError(
@@ -2157,6 +2345,8 @@ class SparseTerms:
             "eps",
             "phase_centre",
             "transformer_class_name",
+            "oversample",
+            "oversample_pad",
         ):
             value_self = getattr(self, name)
             value_other = getattr(other, name)
@@ -2166,7 +2356,9 @@ class SparseTerms:
 
             if isinstance(value_self, str) or isinstance(value_other, str):
                 differ = str(value_self) != str(value_other)
-            elif isinstance(value_self, float) or isinstance(value_other, float):
+            elif isinstance(value_self, numbers.Number) or isinstance(
+                value_other, numbers.Number
+            ):
                 differ = float(value_self) != float(value_other)
             else:
                 differ = tuple(value_self) != tuple(value_other)
@@ -2176,8 +2368,28 @@ class SparseTerms:
                     "SparseTerms can only be added when accumulated with the same provenance: "
                     f"`{name}` is {value_self!r} on one and {value_other!r} on the other. "
                     "Terms accumulated on different real-space masks, NUFFT accuracies, "
-                    "phase centres or transformers do not describe the same operator."
+                    "phase centres, transformers or oversampling do not describe the same "
+                    "operator."
                 )
+
+        fine_grids = {}
+
+        if self.has_fine_grids:
+            for name in ("precision_operator_fine", "dirty_image_fine"):
+                value_self = getattr(self, name)
+                value_other = getattr(other, name)
+
+                if value_self is None or value_other is None:
+                    fine_grids[name] = _recorded(value_self, value_other)
+                    continue
+
+                if value_self.shape != value_other.shape:
+                    raise ValueError(
+                        f"SparseTerms can only be added when their fine grids match: `{name}` "
+                        f"shapes {value_self.shape} and {value_other.shape} differ."
+                    )
+
+                fine_grids[name] = value_self + value_other
 
         return SparseTerms(
             nufft_precision_operator=self.nufft_precision_operator
@@ -2198,6 +2410,9 @@ class SparseTerms:
                 self.transformer_class_name, other.transformer_class_name
             ),
             phase_centre=_recorded(self.phase_centre, other.phase_centre),
+            oversample=_recorded(self.oversample, other.oversample),
+            oversample_pad=_recorded(self.oversample_pad, other.oversample_pad),
+            **fine_grids,
         )
 
     def __radd__(self, other) -> "SparseTerms":
@@ -2240,6 +2455,90 @@ def _complex_visibilities_from(values) -> np.ndarray:
     return np.asarray(values, dtype=np.complex128).ravel()
 
 
+def _check_oversample(oversample, oversample_pad) -> None:
+    """
+    Raise a `ValueError` unless `oversample` is a positive even integer and `oversample_pad` a
+    non-negative finite number.
+
+    `q` must be even so that the native pixel centres -- at half-integer pixel positions for an
+    even native shape -- land on fine grid points, where `dirty_image_fine` equals
+    `dirty_image_native` exactly (to NUFFT precision) rather than by interpolation.
+    """
+    if (
+        isinstance(oversample, bool)
+        or not isinstance(oversample, numbers.Integral)
+        or oversample < 2
+        or oversample % 2 != 0
+    ):
+        raise ValueError(
+            "sparse_terms_from_chunks: `oversample` must be a positive even integer (2, 4, "
+            f"8, ...), got {oversample!r}. It must be even so that the native pixel centres "
+            "land on fine grid points."
+        )
+
+    if (
+        isinstance(oversample_pad, bool)
+        or not isinstance(oversample_pad, numbers.Real)
+        or not np.isfinite(oversample_pad)
+        or oversample_pad < 0
+    ):
+        raise ValueError(
+            "sparse_terms_from_chunks: `oversample_pad` must be a non-negative fraction of the "
+            f"native field, got {oversample_pad!r}."
+        )
+
+
+def fine_grid_shapes_from(
+    shape_native, oversample: int, oversample_pad: float = 0.25
+) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+    """
+    The shapes of the `oversample` fine grids `sparse_terms_from_chunks` accumulates on a real-space
+    mask of native shape `(Ny, Nx)`: `precision_operator_fine` is `(2 (Ny + p) q, 2 (Nx + p) q)`
+    with `p = ceil(oversample_pad * max(Ny, Nx))`, and `dirty_image_fine` is `(2 Ny q, 2 Nx q)`.
+
+    Returns
+    -------
+    (shape_precision_operator_fine, shape_dirty_image_fine)
+    """
+    n_y, n_x = (int(n) for n in shape_native)
+    q = int(oversample)
+    pad = int(math.ceil(float(oversample_pad) * max(n_y, n_x)))
+
+    return (
+        (2 * (n_y + pad) * q, 2 * (n_x + pad) * q),
+        (2 * n_y * q, 2 * n_x * q),
+    )
+
+
+def _log_fine_grid_memory(shape_operator_fine, shape_dirty_image_fine, oversample):
+    """
+    Log one line estimating the memory the `oversample` fine grids need: the two float64 grids
+    held for the whole stream, plus the largest per-call `nufftax.nufft2d1` working set (its 2x
+    upsampled complex128 grid, its complex128 output and that output's float64 real part).
+    """
+    held = 8 * (
+        int(np.prod(shape_operator_fine)) + int(np.prod(shape_dirty_image_fine))
+    )
+    largest = max(
+        int(np.prod(shape_operator_fine)), int(np.prod(shape_dirty_image_fine))
+    )
+    work = largest * (16 * 4 + 16 + 8)
+
+    logger.info(
+        "sparse_terms_from_chunks: oversample=%d fine grids precision_operator_fine %s and "
+        "dirty_image_fine %s hold %.1f MB; each NUFFT call adds up to ~%.1f MB of working "
+        "memory (peak ~%.1f MB). Two extra type-1 NUFFTs run per chunk with an FFT cost "
+        "independent of the chunk length, so use large chunks (>= ~1e6 visibilities) with "
+        "oversample.",
+        oversample,
+        tuple(shape_operator_fine),
+        tuple(shape_dirty_image_fine),
+        held / 1.0e6,
+        work / 1.0e6,
+        (held + work) / 1.0e6,
+    )
+
+
 def sparse_terms_from_chunks(
     chunks: Iterable[Tuple[np.ndarray, np.ndarray, np.ndarray]],
     *,
@@ -2253,6 +2552,8 @@ def sparse_terms_from_chunks(
     show_progress: bool = False,
     phase_centre: Optional[Tuple[float, float]] = None,
     pool_noise_map: bool = False,
+    oversample: Optional[int] = None,
+    oversample_pad: float = 0.25,
 ) -> SparseTerms:
     """
     Accumulate the `SparseTerms` of an interferometer dataset one chunk of visibilities at a
@@ -2314,6 +2615,33 @@ def sparse_terms_from_chunks(
     differs from the unpooled one at second order in the asymmetry per visibility, so do not
     compare the log-evidences of a pooled and an unpooled fit of the same data.
 
+    Fine grids for uv-analytic components (`oversample=q`)
+    ------------------------------------------------------
+    A component that is analytic in the uv-plane (a point source, a small Gaussian) needs its
+    terms at sub-pixel positions. All of them are values of two image-plane functions, so with
+    `oversample=q` (a positive even integer) two more grids are accumulated in the same pass:
+
+    - `precision_operator_fine`, `K(lag) = sum_k w_k cos(2 pi u_k . lag)` on a grid `q` times
+      finer than the image pixel, over the full native shape plus a lag pad of
+      `ceil(oversample_pad * max(Ny, Nx))` pixels (so smoothing it does not wrap), in `W~`'s
+      wraparound order with the Nyquist row/column kept;
+    - `dirty_image_fine`, `D(x) = Re sum_k c_k exp(2 pi i u_k . x)` from the same (phase-shifted,
+      noise-weighted) data as the dirty image, centred, over twice the field.
+
+    See `SparseTerms` for their exact layout. Each is one extra type-1 NUFFT per chunk
+    (`_type1_real_grid_from`), added **in place** into arrays preallocated once, so the stream
+    holds the two grids plus one NUFFT working set -- never a fresh grid per chunk. Both inherit
+    the equal-sigma assumption (`K` uses the real-part weights) and `pool_noise_map`. The fine
+    grids need the NUFFT: `oversample` with a transformer other than `TransformerNUFFT` raises.
+
+    Memory and cost. At a 400 x 400 native grid and `q = 8`, `precision_operator_fine` is 8000^2
+    float64 (512 MB) and `dirty_image_fine` 6400^2 (328 MB), and `nufftax`'s 2x upsampled complex
+    work grid adds ~4 GB during each call: plan for 5-6 GB peak (`q = 4` is ~1.5 GB; ~112 pixels
+    at `q = 8` is under 0.5 GB). One info line logs the estimate for the actual shapes. The FFT
+    part of each fine NUFFT costs the same whatever the chunk length (seconds per chunk at
+    400 / `q = 8` on a CPU), so use large chunks (>= ~1e6 visibilities) with `oversample`. Under
+    JAX each distinct chunk length compiles its own transform.
+
     Phase-centre shift
     ------------------
     With `phase_centre=(y0, x0)` (arcseconds, autoarray `(y, x)` order like a mask `origin`),
@@ -2359,6 +2687,13 @@ def sparse_terms_from_chunks(
         If `True`, pool every chunk's real and imaginary sigma in quadrature before forming
         any term, instead of raising on unequal sigmas (see "Unequal real and imaginary
         sigma" above). `False` (the default) keeps the equal-sigma check.
+    oversample
+        If set, the positive even factor `q` by which the fine grids `precision_operator_fine`
+        and `dirty_image_fine` are finer than the image pixel (see "Fine grids" above). `None`
+        (the default) accumulates no fine grids.
+    oversample_pad
+        The extra lag of `precision_operator_fine`, as a fraction of the larger native axis
+        (rounded up to whole pixels). Ignored unless `oversample` is set.
 
     Returns
     -------
@@ -2371,8 +2706,33 @@ def sparse_terms_from_chunks(
         If any chunk's noise-map has unequal real and imaginary sigma and `pool_noise_map`
         is `False`.
     ValueError
-        If `chunks` yields no visibilities.
+        If `chunks` yields no visibilities, or `oversample` is not a positive even integer.
+    exc.InversionException
+        If `oversample` is set and the transformer is not a `TransformerNUFFT`.
     """
+    if oversample is not None:
+        _check_oversample(oversample, oversample_pad)
+
+        oversample = int(oversample)
+        oversample_pad = float(oversample_pad)
+
+        shape_operator_fine, shape_dirty_image_fine = fine_grid_shapes_from(
+            real_space_mask.shape_native, oversample, oversample_pad
+        )
+
+        # The same radian pixel scale the precision-operator builder reads off the grid.
+        pixel_scale_radians_fine = (
+            _pixel_scale_radians_from(
+                real_space_mask.derive_grid.all_false.in_radians.native.array
+            )
+            / oversample
+        )
+
+        _log_fine_grid_memory(shape_operator_fine, shape_dirty_image_fine, oversample)
+
+        precision_operator_fine = np.zeros(shape_operator_fine, dtype=np.float64)
+        dirty_image_fine = np.zeros(shape_dirty_image_fine, dtype=np.float64)
+
     if transformer_class is None:
         from autoarray.operators.transformer import TransformerNUFFT
 
@@ -2433,6 +2793,17 @@ def sparse_terms_from_chunks(
             uv_wavelengths=uv_wavelengths, real_space_mask=real_space_mask
         )
 
+        if oversample is not None:
+            from autoarray.operators.transformer import TransformerNUFFT
+
+            if not isinstance(transformer, TransformerNUFFT):
+                raise exc.InversionException(
+                    "sparse_terms_from_chunks: `oversample` needs the NUFFT path -- the fine "
+                    "grids are type-1 NUFFTs consistent with `TransformerNUFFT`'s dirty image -- "
+                    f"but the transformer is a {type(transformer).__name__}. Use "
+                    "`transformer_class=TransformerNUFFT` (the default) or drop `oversample`."
+                )
+
         # The phase-centre shift is applied to the data before every data-dependent term (the
         # dirty image and `data_term`), so all of them describe the same shifted visibilities.
         # The precision operator, dirty beam, `sum_weights` and `noise_normalization` depend on
@@ -2473,6 +2844,38 @@ def sparse_terms_from_chunks(
 
         weights = noise_map_real**-2.0
 
+        # The fine grids, added in place into the preallocated arrays (never a fresh grid per
+        # chunk). `K` is the real transform of the weights in `W~`'s wraparound order. `D` is
+        # built from `conj(c)`, which turns the core's `(-x, +y)` convention into the native
+        # orientation (`x` along the columns, `y` decreasing down the rows), centred.
+        if oversample is not None:
+            _type1_real_grid_from(
+                uv_wavelengths,
+                weights,
+                (shape_operator_fine[1], shape_operator_fine[0]),
+                pixel_scale_radians_fine,
+                eps=eps,
+                chunk_size=chunk_size,
+                centred=False,
+                zero_nyquist=False,
+                out=precision_operator_fine,
+            )
+
+            _type1_real_grid_from(
+                uv_wavelengths,
+                np.conj(
+                    data.real * noise_map_real**-2.0
+                    + 1j * data.imag * noise_map_imag**-2.0
+                ),
+                (shape_dirty_image_fine[1], shape_dirty_image_fine[0]),
+                pixel_scale_radians_fine,
+                eps=eps,
+                chunk_size=chunk_size,
+                centred=True,
+                zero_nyquist=False,
+                out=dirty_image_fine,
+            )
+
         dirty_beam_native = np.asarray(
             transformer.image_from(
                 visibilities=Visibilities(visibilities=weights.astype(np.complex128)),
@@ -2512,5 +2915,14 @@ def sparse_terms_from_chunks(
 
     if pool_noise_map:
         pooling_record.log()
+
+    if oversample is not None:
+        terms = replace(
+            terms,
+            precision_operator_fine=precision_operator_fine,
+            dirty_image_fine=dirty_image_fine,
+            oversample=oversample,
+            oversample_pad=oversample_pad,
+        )
 
     return terms
