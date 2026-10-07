@@ -1403,8 +1403,9 @@ _IIU_LOGGER = "autoarray.inversion.inversion.interferometer.inversion_interferom
 
 def _pooled_terms_log(caplog, noise_map):
     """
-    Run `sparse_terms_from_chunks(pool_noise_map=True)` on a NumPy-only setup (DFT
-    transformer, brute-force builder) over three chunks and return the pooling log records.
+    Run `sparse_terms_from_chunks(pool_noise_map=True)` with the DFT transformer and the
+    brute-force builder over three chunks and return the pooling log records. The inputs come
+    from `_streaming_inputs`, which builds a `TransformerNUFFT`, so callers need `nufftax`.
     """
     mask, uv_wavelengths, data, _, _ = _streaming_inputs()
 
@@ -1423,6 +1424,8 @@ def _pooled_terms_log(caplog, noise_map):
 
 
 def test__sparse_terms_from_chunks__pool_noise_map__logs_once_per_call(caplog):
+    pytest.importorskip("nufftax")
+
     # 2 % estimator scatter: one info line for the whole stream, not one per chunk.
     records = _pooled_terms_log(
         caplog, _asymmetric_noise_map(n_visibilities=60, fraction=0.02)
