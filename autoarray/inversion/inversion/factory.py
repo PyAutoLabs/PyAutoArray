@@ -266,6 +266,12 @@ def _use_interferometer_numba(
       FFT route is faster (see `Settings.interferometer_numba_nnz_per_source_max`).
     - `import numba` succeeds.
 
+    NaN mapping weights (an overflowing or degenerate `DelaunayNN` Sibson row) are
+    deliberately not a condition: the kernel propagates them into `F` exactly as the FFT
+    and mapping routes do, so every route returns the same NaN evidence and the sample is
+    rejected identically (pinned by the NaN-weight tests in
+    `test_interferometer_numba.py` and `test_factory.py`).
+
     Parameters
     ----------
     linear_obj_list

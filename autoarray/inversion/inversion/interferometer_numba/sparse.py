@@ -101,6 +101,9 @@ class InversionInterferometerSparseNumba(InversionInterferometerSparse):
         These are raised, not worked around: each one would otherwise compute a different
         (and silently wrong) `F`, or none at all. The factory checks the same conditions
         up front and simply does not route here when one fails.
+
+        NaN mapping weights are not a precondition: they propagate into `F` and give the
+        same NaN evidence as the FFT route, which is the intended rejection of the sample.
         """
         if self.has(cls=AbstractLinearObjFuncList):
             raise exc.InversionException(
