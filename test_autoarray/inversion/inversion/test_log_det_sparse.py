@@ -409,3 +409,120 @@ def test__log_det_curvature_reg_matrix_term__is_not_routed_sparsely(monkeypatch)
     assert inversion.log_det_curvature_reg_matrix_term == pytest.approx(
         _dense_log_det(matrix), rel=1.0e-12
     )
+
+
+def _vertex_coincident_adapt_split_mapper(regularization, xp):
+    """
+    A Delaunay ``AdaptSplit`` mapper whose mesh is the stride-2 subsample of a 16x16 data grid
+    with a smooth ``0.01 * sin(7 * grid)`` distortion, so 64 data points sit exactly on mesh
+    vertices. scipy's ``find_simplex`` and the JAX Delaunay walk pick different (equally valid)
+    triangles for some of those points (PyAutoArray#627).
+    """
+    n = 16
+
+    yy, xx = np.meshgrid(np.linspace(-1, 1, n), np.linspace(-1, 1, n), indexing="ij")
+
+    data_grid = np.stack([yy.ravel(), xx.ravel()], axis=1)
+    data_grid = data_grid + 0.01 * np.sin(7 * data_grid[:, ::-1])
+
+    mesh_grid = data_grid.reshape(n, n, 2)[::2, ::2].reshape(-1, 2)
+
+    adapt_data = np.exp(-np.sum(data_grid**2, axis=1) / 0.3)
+
+    interpolator = aa.mesh.Delaunay(pixels=mesh_grid.shape[0]).interpolator_from(
+        source_plane_data_grid=aa.Grid2D.no_mask(
+            values=data_grid, shape_native=(data_grid.shape[0], 1), pixel_scales=1.0
+        ),
+        source_plane_mesh_grid=aa.Grid2DIrregular(mesh_grid),
+        adapt_data=aa.Array2D.no_mask(
+            values=adapt_data, shape_native=(n, n), pixel_scales=0.1
+        ),
+        xp=xp,
+    )
+
+    return aa.Mapper(interpolator=interpolator, regularization=regularization, xp=xp)
+
+
+def _high_precision_log_det(matrix):
+    """
+    A reference log determinant: a 50-digit mpmath determinant, or, if mpmath is unavailable, a
+    Cholesky carried out in ``np.longdouble`` (NumPy and SciPy linalg cast that back to fp64,
+    so the factorization is written out here).
+    """
+    try:
+        import mpmath
+    except ImportError:
+        mpmath = None
+
+    if mpmath is not None:
+        with mpmath.workdps(50):
+            return float(mpmath.log(mpmath.det(mpmath.matrix(matrix.tolist()))))
+
+    lower = np.array(matrix, dtype=np.longdouble)
+    pixels = lower.shape[0]
+
+    for j in range(pixels):
+        lower[j, j] = np.sqrt(lower[j, j] - np.sum(lower[j, :j] ** 2))
+        lower[j + 1 :, j] = (
+            lower[j + 1 :, j] - lower[j + 1 :, :j] @ lower[j, :j]
+        ) / lower[j, j]
+
+    return float(2 * np.sum(np.log(np.diag(lower))))
+
+
+def test__log_det_regularization_matrix_term__vertex_coincident_adapt_split__numpy_matches_jax():
+    """
+    PyAutoArray#627: on a mesh whose vertices coincide with data points, the NumPy and JAX
+    backends used to build *different* ``AdaptSplit`` regularization matrices (max difference
+    0.74 on max|H| 14.6 here, a log-determinant gap of 0.097), because the zero-weight mapping
+    entries of vertex-coincident points depend on which triangle each backend's point location
+    picks, and those entries were counted in the adaptive pixel signals.
+
+    The log-determinant routes themselves were never the cause: given the same ``H`` both agree
+    with a 50-digit reference. That is pinned here only at moderate coefficients, where ``H`` is
+    well-posed (``cond ~ 2e9``). At high coefficients (``max(coefficient)^4 >~ 1e6``) the absolute
+    1e-8 diagonal jitter puts ``H``'s constant-mode eigenvalue at round-off level, so the log
+    determinant is round-off-determined on either backend and no parity is asserted.
+    """
+    jax = pytest.importorskip("jax")
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
+
+    regularization = aa.reg.AdaptSplit(
+        inner_coefficient=0.4, outer_coefficient=1.7, signal_scale=0.3
+    )
+
+    mapper_np = _vertex_coincident_adapt_split_mapper(regularization, xp=np)
+    mapper_jax = _vertex_coincident_adapt_split_mapper(regularization, xp=jnp)
+
+    matrix_np = np.asarray(
+        regularization.regularization_matrix_from(linear_obj=mapper_np)
+    )
+    matrix_jax = regularization.regularization_matrix_from(
+        linear_obj=mapper_jax, xp=jnp
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(matrix_jax),
+        matrix_np,
+        rtol=1.0e-12,
+        atol=1.0e-12 * np.abs(matrix_np).max(),
+    )
+
+    inversion_np = aa.m.MockInversion(
+        linear_obj_list=[mapper_np], regularization_matrix=matrix_np
+    )
+    inversion_jax = aa.m.MockInversion(
+        linear_obj_list=[mapper_jax], regularization_matrix=matrix_jax
+    )
+    inversion_jax.use_jax = True
+
+    log_det_np = float(inversion_np.log_det_regularization_matrix_term)
+    log_det_jax = float(inversion_jax.log_det_regularization_matrix_term)
+
+    assert abs(log_det_np - log_det_jax) < 1.0e-6
+
+    reference = _high_precision_log_det(matrix_np)
+
+    assert abs(log_det_np - reference) < 1.0e-6
+    assert abs(log_det_jax - reference) < 1.0e-6

@@ -11,6 +11,7 @@ def adaptive_pixel_signals_from(
     pix_size_for_sub_slim_index: np.ndarray,
     slim_index_for_sub_slim_index: np.ndarray,
     adapt_data: np.ndarray,
+    exclude_zero_weight_mappings: bool = False,
     xp=np,
 ) -> np.ndarray:
     """
@@ -19,8 +20,11 @@ def adaptive_pixel_signals_from(
 
     The pixel signals are computed as follows:
 
-    1) Divide by the number of mappe data points in the pixel, to ensure all pixels have the same
+    1) Divide by the number of mapped data points in the pixel, to ensure all pixels have the same
        'relative' signal (i.e. a pixel with 10 pixels doesn't have x2 the signal of one with 5).
+       By default every mapping entry within a data point's size counts, including entries whose
+       weight is zero. With `exclude_zero_weight_mappings=True` (set by Delaunay interpolators),
+       zero-weight entries are not counted -- see that parameter.
 
     2) Divided by the maximum pixel-signal, so that all signals vary between 0 and 1. This ensures that the
        regularization weight_list are defined identically for any data quantity or signal-to-noise_map ratio.
@@ -39,6 +43,20 @@ def adaptive_pixel_signals_from(
         A 1D array util every pixel on the grid to a pixel on the pixelization.
     adapt_data
         The image of the galaxy which is used to compute the weigghted pixel signals.
+    exclude_zero_weight_mappings
+        If `True`, mapping entries whose weight is exactly zero are not counted towards a pixel's number of
+        mapped data points. Delaunay interpolators set this (via their `exclude_zero_weight_mappings` class
+        attribute): a data point lying exactly on a Delaunay vertex has barycentric weights (0, 0, 1) in *any*
+        triangle around that vertex (a point on an edge has a zero weight in either neighbouring triangle), and
+        scipy's `find_simplex` and the JAX Delaunay walk legitimately choose different triangles. Counting those
+        zero-weight duplicates made the pixel signals, and through them the adaptive regularization matrix,
+        differ between the NumPy and JAX backends from identical inputs (PyAutoArray#627). The set of non-zero
+        (index, weight) pairs is unique, so excluding zero weights makes the result independent of that choice.
+
+        It is `False` for every other interpolator. In particular `KNNBarycentric` clips negative barycentric
+        weights to exactly zero for every data point outside the triangle formed by its 3 nearest vertices --
+        whole regions, not rare coincidences -- so excluding them there would change pixel signals broadly
+        and make the count (and hence the likelihood) jump wherever a clipped weight reaches zero.
     """
 
     M_sub, B = pix_indexes_for_sub_slim_index.shape
@@ -50,8 +68,14 @@ def adaptive_pixel_signals_from(
     # 2) Build a matching “parent‐slim” index for each flattened entry:
     I_sub = xp.repeat(xp.arange(M_sub), B)  # (M_sub*B,)
 
-    # 3) Mask out any k >= pix_size_for_sub_slim_index[i]
+    # 3) Mask out any k >= pix_size_for_sub_slim_index[i] and, for Delaunay tables, any entry whose
+    #    weight is zero (see `exclude_zero_weight_mappings` above, PyAutoArray#627). The flag is a
+    #    static Python bool, so this is jit-safe; the mask is not differentiated, so the function
+    #    stays differentiable under JAX.
     valid = (xp.arange(B)[None, :] < pix_size_for_sub_slim_index[:, None]).reshape(-1)
+
+    if exclude_zero_weight_mappings:
+        valid = valid & (flat_weights != 0)
 
     flat_weights = xp.where(valid, flat_weights, 0.0)
     flat_pixidx = xp.where(

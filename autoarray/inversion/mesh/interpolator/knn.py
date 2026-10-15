@@ -145,6 +145,11 @@ def kernel_interpolate_points(points, query_chunk, values, k, radius_scale):
 
 class InterpolatorKNearestNeighbor(InterpolatorDelaunay):
 
+    # Not a Delaunay table: `KNNBarycentric` clips negative barycentric weights to exactly zero for every point
+    # outside its 3-nearest triangle, so its zero weights are region-wide, not choice-dependent duplicates.
+    # Excluding them would change pixel signals broadly and add a jump in the likelihood (PyAutoArray#627).
+    exclude_zero_weight_mappings = False
+
     @property
     def dual_areas(self):
         """

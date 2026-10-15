@@ -737,6 +737,12 @@ class DelaunayInterface:
 
 
 class InterpolatorDelaunay(AbstractInterpolator):
+
+    # A data point on a Delaunay vertex (or edge) has zero barycentric weights whose vertices depend on which
+    # surrounding triangle is chosen, and scipy and the JAX walk choose differently, so zero-weight entries must
+    # not count towards adaptive pixel signals (PyAutoArray#627).
+    exclude_zero_weight_mappings = True
+
     def __init__(
         self,
         mesh,

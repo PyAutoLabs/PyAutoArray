@@ -656,3 +656,257 @@ def test__mapping_matrix_from__no_mixed_precision__float64_on_both_backends():
     assert jax_matrix.dtype == jnp.float64
 
     assert np.asarray(jax_matrix) == pytest.approx(numpy_matrix, abs=1.0e-14)
+
+
+# ----------------------------------------------------------------------------
+# Zero-weight mapping entries are not counted (PyAutoArray#627).
+#
+# A data point lying exactly on a Delaunay vertex has barycentric weights
+# (0, 0, 1) in *every* triangle around that vertex, and a point on an edge has
+# a zero weight in either neighbouring triangle. scipy's `find_simplex` and the
+# JAX Delaunay walk legitimately choose different triangles for such points, so
+# the two backends' mapping tables carry different zero-weight entries.
+# `adaptive_pixel_signals_from` used to count those entries when normalising
+# each pixel's signal, which made the pixel signals -- and through them the
+# AdaptSplit regularization weights and matrix -- depend on the triangle chosen.
+# Only non-zero-weight entries are counted now, and the set of non-zero
+# (index, weight) pairs is unique.
+# ----------------------------------------------------------------------------
+
+
+def _vertex_coincident_delaunay_setup():
+    """
+    A 16x16 data grid with a smooth `0.01 * sin(7 * grid)` distortion, and a mesh that is
+    the stride-2 subsample of the same points, so 64 data points sit exactly on mesh vertices
+    (the geometry of a grid-subsample / `Overlay` image mesh traced through a lens).
+    """
+    n = 16
+
+    yy, xx = np.meshgrid(np.linspace(-1, 1, n), np.linspace(-1, 1, n), indexing="ij")
+
+    data_grid = np.stack([yy.ravel(), xx.ravel()], axis=1)
+    data_grid = data_grid + 0.01 * np.sin(7 * data_grid[:, ::-1])
+
+    mesh_grid = data_grid.reshape(n, n, 2)[::2, ::2].reshape(-1, 2)
+
+    adapt_data = np.exp(-np.sum(data_grid**2, axis=1) / 0.3)
+
+    return data_grid, mesh_grid, adapt_data
+
+
+def _delaunay_tables_from(delaunay_fn, data_grid, mesh_grid, xp):
+    from autoarray.inversion.mesh.interpolator.delaunay import (
+        pixel_weights_delaunay_from,
+    )
+
+    mappings = np.asarray(
+        delaunay_fn(xp.asarray(mesh_grid), xp.asarray(data_grid), 0.5)[2]
+    )
+
+    sizes = (mappings >= 0).sum(axis=1)
+
+    weights = np.asarray(
+        pixel_weights_delaunay_from(
+            data_grid=xp.asarray(data_grid),
+            mesh_grid=xp.asarray(mesh_grid),
+            pix_indexes_for_sub_slim_index=xp.asarray(mappings),
+            xp=xp,
+        )
+    )
+
+    return mappings, sizes, weights
+
+
+@requires_jax
+def test__adaptive_pixel_signals_from__scipy_and_jax_delaunay_tables__agree():
+    import jax
+
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
+
+    from autoarray.inversion.mesh.interpolator.delaunay import (
+        jax_delaunay,
+        scipy_delaunay,
+    )
+
+    data_grid, mesh_grid, adapt_data = _vertex_coincident_delaunay_setup()
+
+    scipy_tables = _delaunay_tables_from(scipy_delaunay, data_grid, mesh_grid, xp=np)
+    jax_tables = _delaunay_tables_from(jax_delaunay, data_grid, mesh_grid, xp=jnp)
+
+    # The precondition the test exists for: the two point-location routines pick different
+    # (equally valid) triangles for some of the vertex-coincident data points.
+    rows_differ = np.any(
+        np.sort(scipy_tables[0], axis=1) != np.sort(jax_tables[0], axis=1), axis=1
+    )
+    assert rows_differ.sum() > 0
+
+    def pixel_signals_from(tables):
+        mappings, sizes, weights = tables
+
+        return aa.util.mapper.adaptive_pixel_signals_from(
+            pixels=mesh_grid.shape[0],
+            pixel_weights=weights,
+            signal_scale=1.0,
+            pix_indexes_for_sub_slim_index=mappings,
+            pix_size_for_sub_slim_index=sizes,
+            slim_index_for_sub_slim_index=np.arange(data_grid.shape[0]),
+            adapt_data=adapt_data,
+            exclude_zero_weight_mappings=True,
+        )
+
+    np.testing.assert_allclose(
+        pixel_signals_from(scipy_tables),
+        pixel_signals_from(jax_tables),
+        rtol=0.0,
+        atol=1.0e-12,
+    )
+
+
+def test__adaptive_pixel_signals_from__vertex_point_via_two_triangles__identical():
+    """
+    Pure NumPy: data point 0 lies exactly on vertex 0. Described through triangle (0, 1, 2)
+    or through triangle (0, 3, 4) its weights are (1, 0, 0); the other two data points are
+    ordinary interior points. Only the zero-weight neighbours differ, so the signals must not.
+    """
+    kwargs = dict(
+        pixels=5,
+        signal_scale=1.0,
+        pix_size_for_sub_slim_index=np.array([3, 3, 3]),
+        slim_index_for_sub_slim_index=np.array([0, 1, 2]),
+        adapt_data=np.array([3.0, 1.0, 2.0]),
+        exclude_zero_weight_mappings=True,
+    )
+
+    weights = np.array([[1.0, 0.0, 0.0], [0.2, 0.3, 0.5], [0.6, 0.1, 0.3]])
+
+    signals_via_012 = aa.util.mapper.adaptive_pixel_signals_from(
+        pix_indexes_for_sub_slim_index=np.array([[0, 1, 2], [0, 1, 3], [0, 3, 4]]),
+        pixel_weights=weights,
+        **kwargs,
+    )
+    signals_via_034 = aa.util.mapper.adaptive_pixel_signals_from(
+        pix_indexes_for_sub_slim_index=np.array([[0, 3, 4], [0, 1, 3], [0, 3, 4]]),
+        pixel_weights=weights,
+        **kwargs,
+    )
+
+    assert np.array_equal(signals_via_012, signals_via_034)
+
+    # Pixel 0 is mapped by all three points with non-zero weight; the zero-weight entries of
+    # point 0 add nothing to pixels 1 and 2 (or 3 and 4) and are not counted there either.
+    pixel_sums = np.array([3.0 * 1.0 + 0.2 + 2.0 * 0.6, 0.3, 0.0, 0.5 + 0.2, 0.6])
+    pixel_counts = np.array([3.0, 1.0, 1.0, 2.0, 1.0])
+    expected = pixel_sums / pixel_counts
+
+    assert signals_via_012 == pytest.approx(expected / expected.max(), rel=1.0e-14)
+
+
+def test__adaptive_pixel_signals_from__default_flag__zero_weight_entries_still_counted():
+    """
+    Without `exclude_zero_weight_mappings` the util keeps its previous behaviour: every entry within
+    a data point's size counts towards its pixel, including zero-weight ones. Same table as the
+    two-triangle test above, described through triangle (0, 1, 2).
+    """
+    signals = aa.util.mapper.adaptive_pixel_signals_from(
+        pixels=5,
+        signal_scale=1.0,
+        pixel_weights=np.array([[1.0, 0.0, 0.0], [0.2, 0.3, 0.5], [0.6, 0.1, 0.3]]),
+        pix_indexes_for_sub_slim_index=np.array([[0, 1, 2], [0, 1, 3], [0, 3, 4]]),
+        pix_size_for_sub_slim_index=np.array([3, 3, 3]),
+        slim_index_for_sub_slim_index=np.array([0, 1, 2]),
+        adapt_data=np.array([3.0, 1.0, 2.0]),
+    )
+
+    # Point 0's zero-weight entries on pixels 1 and 2 add nothing to the sums but are counted.
+    pixel_sums = np.array([3.0 * 1.0 + 0.2 + 2.0 * 0.6, 0.3, 0.0, 0.5 + 0.2, 0.6])
+    pixel_counts = np.array([3.0, 2.0, 1.0, 2.0, 1.0])
+    expected = pixel_sums / pixel_counts
+
+    assert signals == pytest.approx(expected / expected.max(), rel=1.0e-14)
+
+
+def _mapper_from(mesh, data_grid, mesh_grid, adapt_data):
+    interpolator = mesh.interpolator_from(
+        source_plane_data_grid=aa.Grid2D.no_mask(
+            values=data_grid, shape_native=(data_grid.shape[0], 1), pixel_scales=1.0
+        ),
+        source_plane_mesh_grid=aa.Grid2DIrregular(mesh_grid),
+        adapt_data=aa.Array2D.no_mask(
+            values=adapt_data, shape_native=(adapt_data.shape[0], 1), pixel_scales=1.0
+        ),
+    )
+
+    return aa.Mapper(interpolator=interpolator)
+
+
+def _util_pixel_signals_from(mapper, adapt_data, exclude_zero_weight_mappings):
+    return aa.util.mapper.adaptive_pixel_signals_from(
+        pixels=mapper.pixels,
+        signal_scale=1.0,
+        pixel_weights=mapper.pix_weights_for_sub_slim_index,
+        pix_indexes_for_sub_slim_index=mapper.pix_indexes_for_sub_slim_index,
+        pix_size_for_sub_slim_index=mapper.pix_sizes_for_sub_slim_index,
+        slim_index_for_sub_slim_index=mapper.over_sampler.slim_for_sub_slim,
+        adapt_data=adapt_data,
+        exclude_zero_weight_mappings=exclude_zero_weight_mappings,
+    )
+
+
+def test__mapper_pixel_signals_from__knn_barycentric_keeps_counting_clipped_zero_weights():
+    """
+    `KNNBarycentric` clips negative barycentric weights to exactly zero for every data point outside
+    the triangle of its 3 nearest vertices, so its tables carry zero weights over whole regions. Those
+    entries keep being counted (PyAutoArray#627 scopes the exclusion to Delaunay tables), so its pixel
+    signals are exactly those of the default util path.
+    """
+    data_grid, mesh_grid, adapt_data = _vertex_coincident_delaunay_setup()
+    mesh_grid = mesh_grid + np.random.default_rng(1).normal(0.0, 0.03, mesh_grid.shape)
+
+    mapper = _mapper_from(
+        aa.mesh.KNNBarycentric(pixels=mesh_grid.shape[0]),
+        data_grid,
+        mesh_grid,
+        adapt_data,
+    )
+
+    weights = np.asarray(mapper.pix_weights_for_sub_slim_index)
+    in_size = (
+        np.arange(weights.shape[1])[None, :]
+        < np.asarray(mapper.pix_sizes_for_sub_slim_index)[:, None]
+    )
+    assert ((weights == 0.0) & in_size).sum() > 0
+
+    assert mapper.interpolator.exclude_zero_weight_mappings is False
+
+    signals = mapper.pixel_signals_from(signal_scale=1.0)
+
+    assert np.array_equal(
+        signals,
+        _util_pixel_signals_from(
+            mapper, adapt_data, exclude_zero_weight_mappings=False
+        ),
+    )
+    assert not np.allclose(
+        signals,
+        _util_pixel_signals_from(mapper, adapt_data, exclude_zero_weight_mappings=True),
+    )
+
+
+def test__mapper_pixel_signals_from__delaunay_excludes_zero_weights():
+    data_grid, mesh_grid, adapt_data = _vertex_coincident_delaunay_setup()
+
+    for mesh in [
+        aa.mesh.Delaunay(pixels=mesh_grid.shape[0]),
+        aa.mesh.DelaunayNN(pixels=mesh_grid.shape[0]),
+    ]:
+        mapper = _mapper_from(mesh, data_grid, mesh_grid, adapt_data)
+
+        assert mapper.interpolator.exclude_zero_weight_mappings is True
+
+        assert np.array_equal(
+            mapper.pixel_signals_from(signal_scale=1.0),
+            _util_pixel_signals_from(
+                mapper, adapt_data, exclude_zero_weight_mappings=True
+            ),
+        )
