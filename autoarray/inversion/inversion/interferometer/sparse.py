@@ -83,13 +83,17 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
 
         The `data_vector` is computed as `Lᵀ d~`, where `L` is the real-space mapping matrix of every
         linear object stacked horizontally and `d~ = Re(Fᴴ W d)` is the dirty image cached on the
-        dataset's `sparse_operator`. This single expression covers every linear object type:
+        dataset's `sparse_operator`. Each linear object contributes its own block, concatenated in
+        `linear_obj_list` order (matching `param_range_list_from(cls=LinearObj)`):
 
-        - For a `Mapper` column `a`, `aᵀ d~` is the mapper's data vector entry.
+        - For a `Mapper` the block `Aᵀ d~` is computed from the mapper's sparse COO triplets
+          (`_data_vector_mapper_from`), as a segment-sum of `vals * d~[rows]` over source pixel
+          columns. The dense (masked pixels x source pixels) mapping matrix is therefore never
+          built in the likelihood, which at 91,507 masked pixels and 5,746 source pixels is 4.2 GB.
         - For an `AbstractLinearObjFuncList` column `b`, `bᵀ d~ = bᵀ Re(Fᴴ W d) = Re((F b)ᴴ W d)`,
           which is exactly the entry the mapping (dense) formalism computes via the linear
-          function's transformed mapping matrix. Linear function lists therefore require no
-          separate branch here.
+          function's transformed mapping matrix. Its mapping matrix is small (one column per
+          linear function), so it is used directly.
 
         The cached dirty image is that of the visibilities the `sparse_operator` was built from. When
         the inversion's data differs from them (e.g. a `DatasetInterface` whose data has the visibilities
@@ -101,7 +105,95 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
         if dirty_image is None:
             dirty_image = self.dataset.sparse_operator.dirty_image
 
-        return self._xp.dot(self.mapping_matrix.T, dirty_image)
+        dirty_image = self._xp.asarray(
+            getattr(dirty_image, "array", dirty_image), dtype=self._xp.float64
+        )
+
+        data_vector_list = []
+
+        for linear_obj in self.linear_obj_list:
+            if isinstance(linear_obj, Mapper):
+                data_vector_list.append(
+                    self._data_vector_mapper_from(
+                        mapper=linear_obj, dirty_image=dirty_image
+                    )
+                )
+            else:
+                data_vector_list.append(
+                    self._xp.dot(linear_obj.mapping_matrix.T, dirty_image)
+                )
+
+        if len(data_vector_list) == 1:
+            return data_vector_list[0]
+
+        return self._xp.concatenate(data_vector_list)
+
+    def _sparse_triplets_slim_from(self, mapper: Mapper):
+        """
+        Returns the sparse COO triplets `(rows, cols, vals)` of a mapper's real-space mapping
+        operator `A`, with `rows` indexed on the slim (masked-pixel) grid the dirty image lives on.
+
+        This is the sibling of `_sparse_triplets_curvature_from`, whose rows are extent-flat
+        indices on the `W~` operator's rectangular grid and therefore cannot index the slim dirty
+        image.
+
+        The triplets reproduce `mapper_util.mapping_matrix_from` exactly: `vals` carry the
+        `sub_fraction` normalisation of each sub-pixel's slim pixel, and stencil slots that
+        `mapping_matrix_from` drops (slot index `>= pix_sizes_for_sub_slim_index`, or a negative
+        source pixel index) are given zero weight and column 0, so they contribute nothing.
+
+        Parameters
+        ----------
+        mapper
+            The mapper whose mapping operator is expressed in sparse triplet form.
+        """
+        xp = self._xp
+
+        rows, cols, vals = mapper_util.sparse_triplets_from(
+            pix_indexes_for_sub=mapper.pix_indexes_for_sub_slim_index,
+            pix_weights_for_sub=mapper.pix_weights_for_sub_slim_index,
+            slim_index_for_sub=mapper.slim_index_for_sub_slim_index,
+            fft_index_for_masked_pixel=self.mask.extent_index_for_masked_pixel,
+            sub_fraction_slim=mapper.over_sampler.sub_fraction.array,
+            return_rows_slim=True,
+            xp=xp,
+        )
+
+        pix_indexes = xp.asarray(mapper.pix_indexes_for_sub_slim_index)
+        M_sub, P = pix_indexes.shape
+
+        pix_sizes = xp.asarray(mapper.pix_sizes_for_sub_slim_index, dtype=xp.int32)
+        slot = xp.tile(xp.arange(P, dtype=xp.int32), M_sub)
+        valid = (slot < xp.repeat(pix_sizes, P)) & (cols >= 0)
+
+        vals = xp.where(valid, vals, 0.0)
+        cols = xp.where(valid, cols, 0)
+
+        return rows, cols, vals
+
+    def _data_vector_mapper_from(self, mapper: Mapper, dirty_image) -> np.ndarray:
+        """
+        Returns a mapper's block of the `data_vector`, `Aᵀ d~`, computed from the sparse triplets
+        of its mapping operator `A` without building the dense mapping matrix.
+
+        Entry `j` is the sum over the non-zeros of `A`'s column `j` of `val * d~[row]`, i.e. a
+        segment-sum of `vals * dirty_image[rows]` over the source pixel columns.
+
+        Parameters
+        ----------
+        mapper
+            The mapper whose data vector block is computed.
+        dirty_image
+            The slim (masked-pixel indexed) dirty image `d~`.
+        """
+        rows, cols, vals = self._sparse_triplets_slim_from(mapper=mapper)
+
+        weights = vals * dirty_image[rows]
+
+        if self._xp is np:
+            return np.bincount(cols, weights=weights, minlength=mapper.params)
+
+        return self._xp.zeros(mapper.params, dtype=weights.dtype).at[cols].add(weights)
 
     def _sparse_triplets_curvature_from(self, mapper: Mapper):
         """
