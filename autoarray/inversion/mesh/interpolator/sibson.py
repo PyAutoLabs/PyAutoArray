@@ -556,6 +556,160 @@ def _sibson_single_from_tables(
     return mappings, size, weights, cavity_size, overflow, degenerate
 
 
+_SIBSON_NUMBA_CACHE: dict = {}
+
+
+def _sibson_use_numba():
+    """Whether the NumPy Sibson path dispatches to the numba kernel.
+
+    True when numba is importable and ``general.yaml`` ``numba: use_numba`` is
+    true (the default when the config cannot be read).  Otherwise the NumPy
+    path keeps the per-query Python reference loop.
+    """
+    try:
+        from autonerves import conf
+
+        use_numba = conf.instance["general"]["numba"]["use_numba"]
+    except Exception:
+        use_numba = True
+
+    if not use_numba:
+        return False
+
+    try:
+        import numba  # noqa: F401
+    except ImportError:
+        # Not installed, or installed against an incompatible NumPy.
+        return False
+
+    return True
+
+
+def sibson_numba_kernel():
+    """
+    Compile (once) the numba kernel evaluating every Sibson query in parallel.
+
+    The kernel is a line-by-line port of :func:`_sibson_single_from_tables`
+    (NumPy branch) with ``prange`` over queries: the same cavity walk and
+    containment tolerance, the same Watson circumcircle arithmetic in the same
+    operation order, the same on-vertex / on-edge / outside-mesh fallbacks,
+    degeneracy and overflow diagnostics, and the same padding of unused slots.
+    Each query owns its scratch arrays and writes only its own output row, so
+    the parallel loop needs neither a reduction nor a lock.
+
+    Two details are reproduced deliberately rather than approximated:
+
+    * the per-vertex grouping inserts the at-most ``3 * C`` contributions into
+      a small sorted list (ascending vertex id, contributions summed in cavity
+      order), which is the reference's ``argsort`` + ``np.add.at`` grouping up
+      to the order equal vertex ids are summed in -- NumPy's argsort is not
+      stable, so weights agree to rounding (parity tests: <= 1e-12, observed
+      ~1e-14 near the hull where cavity contributions cancel), not
+      bit-for-bit;
+    * the normalising sum replicates NumPy's pairwise summation over the
+      length ``3 * C`` compact vector, so ``weight_sum`` (and the degeneracy
+      test on it) sees the same blocking as ``np.sum``.
+
+    The jitted functions live at module level in ``_sibson_numba``, which is
+    imported only here, so ``import numba`` stays off the library import path
+    (``numba_util.jit`` cannot express ``parallel=True``) while numba's
+    on-disk cache still hits across processes -- closures built inside this
+    function recompiled in every new process.
+
+    Returns
+    -------
+    The compiled kernel ``(query_points, seeds, fallbacks, points,
+    simplices_padded, simplex_neighbors, circumcentres, circumradii_squared,
+    circumcircle_valid, max_cavity_triangles, max_neighbors)`` returning the six
+    arrays of :func:`sibson_mappings_weights_from_tables`.
+    """
+    if "kernel" in _SIBSON_NUMBA_CACHE:
+        return _SIBSON_NUMBA_CACHE["kernel"]
+
+    from autoarray.inversion.mesh.interpolator._sibson_numba import (
+        _sibson_from_tables_parallel,
+    )
+
+    _SIBSON_NUMBA_CACHE["kernel"] = _sibson_from_tables_parallel
+    return _sibson_from_tables_parallel
+
+
+def _sibson_numba_eligible(query_points, points):
+    """Float64 inputs only: the kernel hard-codes the float64 tolerances."""
+    return (
+        np.asarray(query_points).dtype == np.float64
+        and np.asarray(points).dtype == np.float64
+    )
+
+
+def _sibson_mappings_weights_numba(
+    query_points,
+    points,
+    simplices_padded,
+    simplex_neighbors,
+    simplex_indexes,
+    outside_fallback_indexes,
+    circumcircles,
+    max_cavity_triangles,
+    max_neighbors,
+):
+    """NumPy-path Sibson tables from the parallel numba kernel."""
+    circumcentres, circumradii_squared, circumcircle_valid = circumcircles
+    kernel = sibson_numba_kernel()
+    return kernel(
+        np.ascontiguousarray(query_points, dtype=np.float64),
+        np.ascontiguousarray(simplex_indexes, dtype=np.int64),
+        np.ascontiguousarray(outside_fallback_indexes, dtype=np.int64),
+        np.ascontiguousarray(points, dtype=np.float64),
+        np.ascontiguousarray(simplices_padded, dtype=np.int64),
+        np.ascontiguousarray(simplex_neighbors, dtype=np.int64),
+        np.ascontiguousarray(circumcentres, dtype=np.float64),
+        np.ascontiguousarray(circumradii_squared, dtype=np.float64),
+        np.ascontiguousarray(circumcircle_valid, dtype=np.bool_),
+        int(max_cavity_triangles),
+        int(max_neighbors),
+    )
+
+
+def _sibson_mappings_weights_numpy_reference(
+    query_points,
+    points,
+    simplices_padded,
+    simplex_neighbors,
+    simplex_indexes,
+    outside_fallback_indexes,
+    circumcircles,
+    max_cavity_triangles,
+    max_neighbors,
+):
+    """NumPy-path Sibson tables from the per-query Python reference loop.
+
+    The parity oracle for :func:`sibson_numba_kernel` and the fallback when
+    numba is unavailable or disabled in ``general.yaml``.
+    """
+    circumcentres, circumradii_squared, circumcircle_valid = circumcircles
+    rows = [
+        _sibson_single_from_tables(
+            query=query,
+            seed_simplex=seed,
+            outside_fallback_index=fallback,
+            points=points,
+            simplices_padded=simplices_padded,
+            simplex_neighbors=simplex_neighbors,
+            circumcentres=circumcentres,
+            circumradii_squared=circumradii_squared,
+            circumcircle_valid=circumcircle_valid,
+            max_cavity_triangles=max_cavity_triangles,
+            max_neighbors=max_neighbors,
+            xp=np,
+        )
+        for query, seed, fallback in zip(
+            query_points, simplex_indexes, outside_fallback_indexes
+        )
+    ]
+    return tuple(np.stack(values) for values in zip(*rows))
+
+
 def sibson_mappings_weights_from_tables(
     query_points,
     points,
@@ -585,7 +739,11 @@ def sibson_mappings_weights_from_tables(
     latency-bound program rather than saving time, which is why
     ``query_chunk`` is documented as a memory guard on the ``(C, 3, 2)``
     per-cavity intermediates and nothing else (issue #532).  The NumPy path
-    ignores ``query_chunk`` entirely and loops over queries in Python.
+    ignores ``query_chunk`` entirely: it runs every query through the parallel
+    numba kernel (:func:`sibson_numba_kernel`) when numba is available and
+    ``general.yaml`` ``numba: use_numba`` is true, and otherwise loops over
+    queries in Python (:func:`_sibson_single_from_tables`, the parity
+    reference).
 
     Parameters
     ----------
@@ -627,13 +785,20 @@ def sibson_mappings_weights_from_tables(
         )
 
     if xp is np:
-        rows = [
-            single(query, seed, fallback)
-            for query, seed, fallback in zip(
-                query_points, simplex_indexes, outside_fallback_indexes
-            )
-        ]
-        return tuple(np.stack(values) for values in zip(*rows))
+        numpy_kwargs = dict(
+            query_points=query_points,
+            points=points,
+            simplices_padded=simplices_padded,
+            simplex_neighbors=simplex_neighbors,
+            simplex_indexes=simplex_indexes,
+            outside_fallback_indexes=outside_fallback_indexes,
+            circumcircles=circumcircles,
+            max_cavity_triangles=max_cavity_triangles,
+            max_neighbors=max_neighbors,
+        )
+        if _sibson_use_numba() and _sibson_numba_eligible(query_points, points):
+            return _sibson_mappings_weights_numba(**numpy_kwargs)
+        return _sibson_mappings_weights_numpy_reference(**numpy_kwargs)
 
     import jax
 
