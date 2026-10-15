@@ -3,6 +3,11 @@ import numpy as np
 
 class AbstractInterpolator:
 
+    # Whether zero-weight mapping entries are excluded when counting the data points mapped to each pixel for
+    # adaptive pixel signals (`mapper_util.adaptive_pixel_signals_from`). Only Delaunay tables set this: their
+    # zero-weight entries are arbitrary duplicates from the triangle choice (PyAutoArray#627).
+    exclude_zero_weight_mappings = False
+
     def __init__(
         self,
         mesh,
