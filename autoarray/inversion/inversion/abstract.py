@@ -761,11 +761,79 @@ class AbstractInversion:
 
                 return reconstruction
 
+        # One Cholesky factor of `F + H`, shared with `log_det_curvature_reg_matrix_term`. `None`
+        # when the gate in `_curvature_reg_matrix_cho_factor` is closed or the factorization failed,
+        # in which case the unchanged LU solve below runs (with its test-mode guard).
+        cho_factor = self._curvature_reg_matrix_cho_factor
+
+        if cho_factor is not None:
+            import scipy.linalg
+
+            return scipy.linalg.cho_solve(
+                cho_factor, np.asarray(self.data_vector), check_finite=False
+            )
+
         return inversion_util.reconstruction_positive_negative_from(
             data_vector=self.data_vector,
             curvature_reg_matrix=self.curvature_reg_matrix,
             xp=self._xp,
         )
+
+    @cached_property
+    def _curvature_reg_matrix_cho_factor(self):
+        """
+        One Cholesky factor of ``F + reg_coeff*H`` for the positive-negative solve, shared by
+        :attr:`reconstruction` and :attr:`log_det_curvature_reg_matrix_term`.
+
+        Without it, a NumPy positive-negative likelihood call factorizes the same symmetric
+        positive-definite matrix twice: ``np.linalg.solve`` (an LU) for the reconstruction and
+        ``np.linalg.cholesky`` for the log determinant. On the Aris SPT2319-55 interferometer setup
+        those two were 31% of a call at 1,405 source pixels and 72% at 2,947 (PyAutoArray#633,
+        campaign PyAutoPulse#62). One ``cho_factor`` serves both: ``cho_solve`` gives the
+        reconstruction and ``2 * sum(log(diag(L)))`` the log determinant.
+
+        Returns the ``(c, lower)`` tuple of :func:`scipy.linalg.cho_factor`, or ``None`` -- meaning
+        "take the unchanged routes" -- when any of these holds:
+
+        - the JAX backend (its solve and log determinant are traced and stay as they are);
+        - ``Settings.use_positive_only_solver`` (that solve builds and reuses its own factor);
+        - ``Settings.log_det_method != "cholesky"`` (the ``"slogdet"`` opt-in is untouched);
+        - the factorization raises ``LinAlgError`` (``scipy.linalg.LinAlgError`` is
+          ``numpy.linalg.LinAlgError``), i.e. the matrix is not positive-definite;
+        - the factor's diagonal is not finite (non-finite input).
+
+        The ``None`` fallbacks keep failure behaviour identical to before: an indefinite but
+        nonsingular ``F + H`` is still solved by the LU and still makes the log determinant raise
+        (or return 0.0 in test mode) through :meth:`_log_det_symmetric_from`; a singular one still
+        makes the LU raise (or return its test-mode dummy).
+
+        ``curvature_reg_matrix`` is a cached array that other properties read (the reduced matrix,
+        the covariance), so it is copied, never factorized in place. The factor is one further
+        ``(n, n)`` array held for the inversion's lifetime.
+        """
+        if (
+            self._xp is not np
+            or self.settings.use_positive_only_solver
+            or self.settings.log_det_method != "cholesky"
+        ):
+            return None
+
+        import scipy.linalg
+
+        try:
+            cho_factor = scipy.linalg.cho_factor(
+                np.asarray(self.curvature_reg_matrix),
+                lower=True,
+                overwrite_a=False,
+                check_finite=False,
+            )
+        except np.linalg.LinAlgError:
+            return None
+
+        if not np.all(np.isfinite(np.diag(cho_factor[0]))):
+            return None
+
+        return cho_factor
 
     @cached_property
     def reconstruction_reduced(self) -> np.ndarray:
@@ -1019,7 +1087,9 @@ class AbstractInversion:
 
         On the NumPy path with the positive-only solver and the default ``"cholesky"`` method this term is read
         off the Cholesky factor the reconstruction's non-negative least squares solve has already built, rather
-        than factorizing ``F + reg_coeff*H`` a second time.
+        than factorizing ``F + reg_coeff*H`` a second time. On the NumPy path with the positive-negative solver it
+        is read off the Cholesky factor the reconstruction solved with (:attr:`_curvature_reg_matrix_cho_factor`),
+        for the same reason.
 
         ``fnnls_cholesky`` finishes holding a factor ``U`` of ``M[P][:, P]``, where ``M`` is
         ``curvature_reg_matrix_reduced`` and ``P`` is the solve's final passive set -- 1485 of the 1500 columns
@@ -1092,6 +1162,17 @@ class AbstractInversion:
                     # likelihood's `FitException` resampling handle it as they always have. It must
                     # not be answered with a fabricated 0.0 here.
                     pass
+
+        # Positive-negative NumPy path: read the log determinant off the Cholesky factor the
+        # reconstruction solves with (see `_curvature_reg_matrix_cho_factor`), rather than
+        # factorizing the same matrix again. Only when every linear object is regularized, so the
+        # reduced matrix is the full `curvature_reg_matrix` that was factorized. Reading the factor
+        # does not evaluate the reconstruction.
+        if self.all_linear_obj_have_regularization:
+            cho_factor = self._curvature_reg_matrix_cho_factor
+
+            if cho_factor is not None:
+                return 2.0 * np.sum(np.log(np.diag(cho_factor[0])))
 
         return self._log_det_symmetric_from(self.curvature_reg_matrix_reduced)
 
