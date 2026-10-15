@@ -22,6 +22,7 @@ class Settings:
         log_det_method: Optional[str] = None,
         regularization_term_method: Optional[str] = None,
         interferometer_numba_nnz_per_source_max: Optional[float] = None,
+        interferometer_route: Optional[str] = None,
         positive_only_solver: Optional[str] = None,
         certified_pass_budget: Optional[int] = None,
         certified_fallback: Optional[str] = None,
@@ -190,12 +191,23 @@ class Settings:
               ``curvature_reg_matrix`` is a dense ``F + H`` feeding the dense solve for the
               reconstruction, so ``H`` is still formed there regardless.
         interferometer_numba_nnz_per_source_max
-            The geometry gate above which the numba `direct_conv` interferometer curvature
-            path is not used, in mean non-zeros per source column
-            (``mapper.pix_sizes_for_sub_slim_index.sum() / mapper.params``). `None`
-            (default) reads the packaged value (`60.0`); `0` disables the numba path. See
-            the property of the same name for the measured crossovers and why the constant
-            is machine-dependent.
+            How a NumPy single-mapper interferometer inversion chooses between the numba
+            `direct_conv` curvature path and the FFT one. `None` (default) reads the
+            packaged value, which is itself `None`: a cost model predicts both routes' time
+            from the source pixels, the mapping operator's non-zeros and the extent
+            rectangle, and picks the faster (PyAutoArray#628). A positive value is a hard
+            gate in mean non-zeros per source column
+            (``mapper.pix_sizes_for_sub_slim_index.sum() / mapper.params``): numba at or
+            below it, FFT above. `0` disables the numba path. See the property of the same
+            name.
+        interferometer_route
+            Forces the interferometer curvature route, for benchmarking. `None` (default)
+            reads the packaged value, which is `None`: route by
+            `interferometer_numba_nnz_per_source_max`. ``"fft"`` always uses the FFT route
+            (`InversionInterferometerSparse`); ``"numba"`` uses the numba `direct_conv` route
+            (`InversionInterferometerSparseNumba`) whenever it can represent the inversion
+            (NumPy backend, one mapper, no linear functions, no over-sampling, numba
+            installed), overriding the geometry gate and the `0` kill switch.
         positive_only_solver
             Which solver the JAX (`xp=jnp`) positive-only reconstruction uses. `None` (default) reads the packaged
             value ``"pdip"``.
@@ -262,6 +274,7 @@ class Settings:
         self._interferometer_numba_nnz_per_source_max = (
             interferometer_numba_nnz_per_source_max
         )
+        self._interferometer_route = interferometer_route
         self._positive_only_solver = positive_only_solver
         self._certified_pass_budget = certified_pass_budget
         self._certified_fallback = certified_fallback
@@ -275,6 +288,8 @@ class Settings:
             self.certified_fallback
         if nnls_preconditioning_no_mapper is not None:
             self.nnls_preconditioning_no_mapper
+        if interferometer_route is not None:
+            self.interferometer_route
 
     @property
     def use_positive_only_solver(self):
@@ -374,42 +389,67 @@ class Settings:
         return self._regularization_term_method
 
     @property
-    def interferometer_numba_nnz_per_source_max(self) -> float:
+    def interferometer_numba_nnz_per_source_max(self) -> Optional[float]:
         """
-        The geometry gate above which the numba `direct_conv` interferometer curvature
-        path is not used.
+        How the factory chooses between the numba `direct_conv` interferometer curvature
+        path and the FFT one: `None` (packaged default) for the cost model, a positive
+        value for a hard non-zeros-per-source-column gate, `0` for never numba.
 
-        `InversionInterferometerSparseNumba` convolves each source column of the mapping
-        operator over the extent rectangle, at a cost that scales with the column's
-        non-zeros; the FFT route (`InversionInterferometerSparse`) costs the same whatever
-        the density. The two therefore cross at a roughly fixed number of non-zeros per
-        source column, `mapper.pix_sizes_for_sub_slim_index.sum() / mapper.params`, and
-        the factory routes to numba only at or below this value.
+        `InversionInterferometerSparseNumba` convolves each non-zero of the mapping
+        operator over the extent rectangle, so its cost scales with the total non-zeros
+        times the extent area and is flat in the number of source pixels; the FFT route
+        (`InversionInterferometerSparse`) transforms the padded extent once per source
+        column, so its cost scales with the source pixels times the padded extent's
+        transform cost. At a fixed extent the two cross at a fixed mean non-zeros per
+        source column, `mapper.pix_sizes_for_sub_slim_index.sum() / mapper.params` -- but
+        that crossover moves with the extent: ~60 (Delaunay) / ~77 (rectangular) at the
+        autolens_profiling#226 geometries, ~130-150 on the 512x512 Aris mask
+        (PyAutoArray#628), so no single constant is right for both.
 
-        The measured crossovers are **~60 non-zeros per source column on Delaunay meshes**
-        and **~77 on rectangular meshes** (autolens_profiling issue #226 verdict, section
-        2), where the numba kernel is 2-7x faster than JAX-CPU well below the crossover.
-        The default is the conservative of the two.
+        - `None` -- the cost model
+          (`inversion_interferometer_numba_util.curvature_route_seconds_from`, constants
+          calibrated in that module) predicts both routes' time and the factory routes to
+          numba when `direct_conv` is predicted no slower.
+        - positive -- the pre-#628 hard gate: numba at or below this many non-zeros per
+          source column, FFT above, whatever the extent. Honoured as given, so A/B scripts
+          that set it keep their meaning.
+        - `0` -- the kill switch: never numba.
 
-        This is a **machine-dependent constant**: it is set by the ratio of scalar AXPY
-        throughput to FFT throughput on the CPU running the fit, so a machine with a very
-        different cache hierarchy or FFT library will cross somewhere else. Re-measure
-        before tuning it for a new machine; `0` disables the numba path entirely.
+        The cost model's constants are single-thread measurements on one CPU; the ratio
+        that decides a route depends on the ratio of scalar AXPY throughput to FFT
+        throughput, so a very different machine may cross elsewhere. `interferometer_route`
+        forces a route for benchmarking.
         """
         if self._interferometer_numba_nnz_per_source_max is None:
-            try:
-                return conf.instance["general"]["inversion"][
-                    "interferometer_numba_nnz_per_source_max"
-                ]
-            except KeyError:
-                # A workspace `general.yaml` normally omits this key, so autoconf's
-                # config-path list falls through to autoarray's packaged value (`60.0`).
-                # This fallback fires only when the workspace config is the sole config
-                # path (isolated test configs push one dir) and returns that same value,
-                # so both routes resolve identically.
-                return 60.0
+            # A workspace `general.yaml` normally omits this key, so autoconf's config-path
+            # list falls through to autoarray's packaged value (`null`, the cost model). The
+            # fallback fires only when the workspace config is the sole config path
+            # (isolated test configs push one dir) and returns that same value.
+            return self._inversion_config_value(
+                "interferometer_numba_nnz_per_source_max", None
+            )
 
         return self._interferometer_numba_nnz_per_source_max
+
+    @property
+    def interferometer_route(self) -> Optional[str]:
+        """
+        A forced interferometer curvature route: `None` (route by
+        `interferometer_numba_nnz_per_source_max`), ``"numba"`` or ``"fft"``.
+
+        See the constructor docstring; ``"numba"`` still requires an inversion the
+        `direct_conv` kernel can represent.
+        """
+        value = self._interferometer_route
+        if value is None:
+            value = self._inversion_config_value("interferometer_route", None)
+
+        if value not in (None, "numba", "fft"):
+            raise ValueError(
+                f"interferometer_route={value!r} is invalid; expected None, 'numba' or 'fft'."
+            )
+
+        return value
 
     def _inversion_config_value(self, key, default):
         # A workspace `general.yaml` normally omits the newer keys, so autoconf's config-path

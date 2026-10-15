@@ -385,15 +385,22 @@ def test__factory__routes_to_numba_below_the_gate_and_sparse_above_it():
 def test__factory__delaunay_nn__routes_to_numba_with_default_settings():
     """
     Sibson rows carry more non-zeros than Delaunay ones, so the risk is that a
-    `DelaunayNN` mapper trips the nnz-per-source-column gate onto the FFT route. With the
-    packaged gate it must not, and the factory-built inversion matches the FFT one.
+    `DelaunayNN` mapper trips the geometry gate onto the FFT route. With the packaged
+    routing (the cost model) it must not, and the factory-built inversion matches the FFT
+    one.
     """
     mask, _, dataset_sparse = _dataset_from()
     mapper = _delaunay_nn_mapper_from(mask=mask)
 
-    assert numba_util.nnz_per_source_column_from(
-        mapper=mapper
-    ) <= aa.Settings().interferometer_numba_nnz_per_source_max
+    assert aa.Settings().interferometer_numba_nnz_per_source_max is None
+
+    t_fft, t_direct_conv = numba_util.curvature_route_seconds_from(
+        source_pixels=mapper.params,
+        nnz=int(np.asarray(mapper.pix_sizes_for_sub_slim_index).sum()),
+        extent_shape=mask.shape_native_masked_pixels,
+    )
+
+    assert t_direct_conv <= t_fft
 
     inversion = aa.Inversion(dataset=dataset_sparse, linear_obj_list=[mapper])
 
@@ -446,6 +453,33 @@ def test__numba_inversion__delaunay_nn_nan_weights__give_nan_evidence_like_spars
     ):
         assert np.isnan(np.asarray(inversion.curvature_matrix)).any()
         assert np.isnan(log_evidence_terms_from(inversion))
+
+
+def test__factory__interferometer_route_forces_the_route():
+    mask, _, dataset_sparse = _dataset_from()
+    mapper = _delaunay_mapper_from(mask=mask)
+
+    inversion = aa.Inversion(
+        dataset=dataset_sparse,
+        linear_obj_list=[mapper],
+        settings=aa.Settings(interferometer_route="fft"),
+    )
+
+    assert isinstance(inversion, InversionInterferometerSparse)
+    assert not isinstance(inversion, InversionInterferometerSparseNumba)
+
+    # "numba" overrides both the hard gate and the kill switch.
+    for nnz_max in (0, 0.5):
+        inversion = aa.Inversion(
+            dataset=dataset_sparse,
+            linear_obj_list=[mapper],
+            settings=aa.Settings(
+                interferometer_route="numba",
+                interferometer_numba_nnz_per_source_max=nnz_max,
+            ),
+        )
+
+        assert isinstance(inversion, InversionInterferometerSparseNumba)
 
 
 def test__factory__gate_of_zero_disables_the_numba_path():
