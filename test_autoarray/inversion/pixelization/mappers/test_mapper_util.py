@@ -859,7 +859,11 @@ def test__mapper_pixel_signals_from__knn_barycentric_keeps_counting_clipped_zero
     the triangle of its 3 nearest vertices, so its tables carry zero weights over whole regions. Those
     entries keep being counted (PyAutoArray#627 scopes the exclusion to Delaunay tables), so its pixel
     signals are exactly those of the default util path.
+
+    The KNN interpolator computes its weights with JAX, so this test skips on the no-JAX leg.
     """
+    pytest.importorskip("jax")
+
     data_grid, mesh_grid, adapt_data = _vertex_coincident_delaunay_setup()
     mesh_grid = mesh_grid + np.random.default_rng(1).normal(0.0, 0.03, mesh_grid.shape)
 
