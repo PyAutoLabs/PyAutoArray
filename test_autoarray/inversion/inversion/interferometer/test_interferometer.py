@@ -1739,3 +1739,162 @@ def test__inversion_interferometer_mask__is_the_real_space_mask_for_every_datase
         assert isinstance(inversion, aa.InversionInterferometerSparse)
         assert (inversion.mask == mask).all()
         assert inversion.mask.pixel_scales == mask.pixel_scales
+
+
+def _over_sampled_mapper_from(mask, pixels, shape, over_sample_size):
+    grid = aa.Grid2D.from_mask(mask=mask, over_sample_size=over_sample_size)
+
+    mesh = aa.mesh.Delaunay(pixels=pixels)
+    image_mesh_grid = aa.image_mesh.Overlay(shape=shape).image_plane_mesh_grid_from(
+        mask=mask, adapt_data=None
+    )
+
+    interpolator = mesh.interpolator_from(
+        source_plane_data_grid=grid,
+        source_plane_mesh_grid=image_mesh_grid,
+    )
+
+    return aa.Mapper(
+        interpolator=interpolator, regularization=aa.reg.Constant(coefficient=1.0)
+    )
+
+
+def _dense_data_vector_from(inversion, dirty_image):
+    return np.asarray(inversion.mapping_matrix).T @ np.asarray(dirty_image)
+
+
+def test__interferometer_sparse_operator__data_vector_from_triplets_matches_dense_mapping_matrix():
+    """
+    `InversionInterferometerSparse.data_vector` computes each mapper block from the mapper's sparse
+    triplets (a segment-sum over source columns) instead of the dense `mapping_matrix.T @ d~`. It must
+    reproduce the dense product exactly for an over-sampled mapper (where the triplets carry the
+    `sub_fraction` normalisation), for a mapper mixed with a linear function list (in either order), and
+    for a `DatasetInterface` whose `sparse_dirty_image` differs from the operator's cached dirty image.
+    """
+    mask = aa.Mask2D.circular(shape_native=(12, 12), pixel_scales=1.0, radius=4.0)
+
+    rng = np.random.default_rng(seed=3)
+    n_visibilities = 32
+
+    dataset = aa.Interferometer(
+        data=aa.Visibilities(
+            visibilities=rng.normal(size=(n_visibilities, 2)).astype(np.float64)
+        ),
+        noise_map=aa.VisibilitiesNoiseMap(
+            visibilities=np.ones((n_visibilities, 2), dtype=np.float64)
+        ),
+        uv_wavelengths=rng.normal(size=(n_visibilities, 2)).astype(np.float64),
+        real_space_mask=mask,
+        transformer_class=aa.TransformerDFT,
+    )
+    dataset_sparse = dataset.apply_sparse_operator(use_jax=False)
+    dirty_image = np.asarray(dataset_sparse.sparse_operator.dirty_image)
+
+    mapper = _over_sampled_mapper_from(
+        mask=mask, pixels=16, shape=(4, 4), over_sample_size=2
+    )
+    linear_obj = aa.m.MockLinearObjFuncList(
+        parameters=2,
+        mapping_matrix=rng.normal(size=(mask.pixels_in_mask, 2)),
+    )
+
+    for linear_obj_list in ([mapper], [mapper, linear_obj], [linear_obj, mapper]):
+        inversion = aa.Inversion(
+            dataset=dataset_sparse, linear_obj_list=linear_obj_list
+        )
+
+        assert type(inversion) is aa.InversionInterferometerSparse
+
+        reference = _dense_data_vector_from(inversion, dirty_image)
+
+        np.testing.assert_allclose(
+            np.asarray(inversion.data_vector),
+            reference,
+            rtol=1.0e-12,
+            atol=1.0e-12 * np.abs(reference).max(),
+        )
+
+    # A `DatasetInterface` with its own `sparse_dirty_image` must use it in place of the operator's.
+    sparse_dirty_image = rng.normal(size=mask.pixels_in_mask)
+
+    inversion = aa.Inversion(
+        dataset=aa.DatasetInterface(
+            data=dataset.data,
+            noise_map=dataset.noise_map,
+            grids=dataset.grids,
+            transformer=dataset.transformer,
+            sparse_operator=dataset_sparse.sparse_operator,
+            sparse_dirty_image=sparse_dirty_image,
+        ),
+        linear_obj_list=[mapper, linear_obj],
+    )
+
+    reference = _dense_data_vector_from(inversion, sparse_dirty_image)
+
+    np.testing.assert_allclose(
+        np.asarray(inversion.data_vector),
+        reference,
+        rtol=1.0e-12,
+        atol=1.0e-12 * np.abs(reference).max(),
+    )
+
+    assert (
+        np.abs(_dense_data_vector_from(inversion, dirty_image) - reference).max()
+        > 1.0e-4 * np.abs(reference).max()
+    )
+
+
+def test__interferometer_sparse_operator__data_vector_from_triplets_matches_dense_mapping_matrix__jax():
+    """
+    The JAX backend of the triplet data vector (a scatter-add over source columns) must reproduce the
+    dense `mapping_matrix.T @ d~` for an over-sampled mapper and a mapper mixed with a linear function list.
+    """
+    pytest.importorskip("jax")
+
+    import jax.numpy as jnp
+
+    mask = aa.Mask2D.circular(shape_native=(12, 12), pixel_scales=1.0, radius=4.0)
+
+    rng = np.random.default_rng(seed=5)
+    n_visibilities = 32
+
+    dataset = aa.Interferometer(
+        data=aa.Visibilities(
+            visibilities=rng.normal(size=(n_visibilities, 2)).astype(np.float64)
+        ),
+        noise_map=aa.VisibilitiesNoiseMap(
+            visibilities=np.ones((n_visibilities, 2), dtype=np.float64)
+        ),
+        uv_wavelengths=rng.normal(size=(n_visibilities, 2)).astype(np.float64),
+        real_space_mask=mask,
+        transformer_class=aa.TransformerDFT,
+    )
+    dataset_sparse = dataset.apply_sparse_operator(use_jax=False)
+    dirty_image = np.asarray(dataset_sparse.sparse_operator.dirty_image)
+
+    mapper = _over_sampled_mapper_from(
+        mask=mask, pixels=16, shape=(4, 4), over_sample_size=2
+    )
+    linear_obj = aa.m.MockLinearObjFuncList(
+        parameters=2,
+        mapping_matrix=rng.normal(size=(mask.pixels_in_mask, 2)),
+    )
+
+    for linear_obj_list in ([mapper], [linear_obj, mapper]):
+        inversion_np = aa.Inversion(
+            dataset=dataset_sparse, linear_obj_list=linear_obj_list, xp=np
+        )
+        inversion_jax = aa.Inversion(
+            dataset=dataset_sparse, linear_obj_list=linear_obj_list, xp=jnp
+        )
+
+        assert isinstance(inversion_jax, aa.InversionInterferometerSparse)
+
+        reference = _dense_data_vector_from(inversion_np, dirty_image)
+
+        np.testing.assert_allclose(
+            np.asarray(inversion_jax.data_vector),
+            reference,
+            rtol=1.0e-12,
+            atol=1.0e-12 * np.abs(reference).max(),
+        )
