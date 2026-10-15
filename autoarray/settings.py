@@ -403,8 +403,9 @@ class Settings:
         transform cost. At a fixed extent the two cross at a fixed mean non-zeros per
         source column, `mapper.pix_sizes_for_sub_slim_index.sum() / mapper.params` -- but
         that crossover moves with the extent: ~60 (Delaunay) / ~77 (rectangular) at the
-        autolens_profiling#226 geometries, ~130-150 on the 512x512 Aris mask
-        (PyAutoArray#628), so no single constant is right for both.
+        autolens_profiling#226 geometries (extents 70^2-280^2), between 106 and 188 on
+        the 512x512 Aris mask (extent 341^2, model crossover ~166; PyAutoArray#628), so
+        no single constant is right for both.
 
         - `None` -- the cost model
           (`inversion_interferometer_numba_util.curvature_route_seconds_from`, constants

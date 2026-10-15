@@ -455,7 +455,7 @@ def direct_conv_work_from(nnz: int, extent_shape) -> float:
 #   Aris 512, S = 2,577       106.2          1.29            1.57
 #   Aris 512, S = 5,746        47.6          2.36            3.49
 #
-# The absolute residuals are larger (log-rms 0.55 FFT, 0.52 direct_conv): the two campaigns ran
+# The absolute residuals are larger (log-rms 0.56 FFT, 0.52 direct_conv): the two campaigns ran
 # on the same i9-10885H ~2.5x apart in clock state (the bake-off documents the drift), which
 # moves both routes together and cancels in the ratio. Implied crossovers in non-zeros per
 # source column: ~51 / 58 / 58 at the 70^2 / 140^2 / 280^2 bake-off extents (measured ~60 Delaunay,
@@ -487,11 +487,13 @@ def curvature_route_seconds_from(source_pixels: int, nnz: int, extent_shape):
 
     The FFT route scales with the number of source *columns* and with the padded extent's
     transform cost, including its factorisation; `direct_conv` scales with the number of
-    non-zeros times the extent area and is flat in `S` at fixed `nnz` (34-41 s from 2,577
-    to 5,746 vertices on the Aris 512x512 mask). A fixed non-zeros-per-column gate is the
-    special case of this model at one extent, which is why it could be right for the
-    125x125 reference geometry (crossover ~60) and wrong for the 512x512 one (crossover
-    ~130-150).
+    non-zeros times the extent area, so at a large extent it is ~flat in `S` at fixed
+    `nnz` (34-41 s from 2,577 to 5,746 vertices on the Aris 512x512 mask). Both routes
+    also pay `S`-dependent costs the model leaves out because they are common to both
+    (the `S · nnz` gather, the dense solve). A fixed non-zeros-per-column gate is the
+    special case of this model at one extent, which is why it could be right at the
+    autolens_profiling#226 extents (70^2-280^2, crossover ~60) and wrong on the Aris
+    512x512 mask (model crossover ~166, measured between 106 and 188).
 
     Returns
     -------
