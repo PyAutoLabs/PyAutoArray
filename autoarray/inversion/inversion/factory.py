@@ -1,5 +1,5 @@
 import numpy as np
-from typing import List, Union
+from typing import List, Optional, Tuple, Union
 
 from autoarray.dataset.imaging.dataset import Imaging
 from autoarray.dataset.interferometer.dataset import Interferometer
@@ -214,6 +214,10 @@ def inversion_interferometer_from(
             linear_obj_list=linear_obj_list,
             settings=settings,
             xp=xp,
+            extent_shape=(
+                dataset.sparse_operator.y_shape,
+                dataset.sparse_operator.x_shape,
+            ),
         ):
             return InversionInterferometerSparseNumba(
                 dataset=dataset,
@@ -243,6 +247,7 @@ def _use_interferometer_numba(
     linear_obj_list: List[LinearObj],
     settings: Settings = None,
     xp=np,
+    extent_shape: Optional[Tuple[int, int]] = None,
 ) -> bool:
     """
     Whether an interferometer inversion is routed to the numba `direct_conv` curvature
@@ -258,12 +263,25 @@ def _use_interferometer_numba(
     The conditions are, in order of cost to evaluate:
 
     - `xp is np` -- the kernel is numba, with no JAX path.
-    - `settings.interferometer_numba_nnz_per_source_max > 0` -- `0` is the kill switch.
+    - `settings.interferometer_route` -- `"fft"` never routes to numba; `"numba"` forces it
+      whenever the kernel can represent the inversion (the conditions below that are not
+      about speed), bypassing the geometry gate and the kill switch. For benchmarking.
+    - `settings.interferometer_numba_nnz_per_source_max` is not `0` -- `0` is the kill
+      switch.
     - exactly one `Mapper` and no `AbstractLinearObjFuncList` -- the kernel builds a single
       mapper-mapper block and has no off-diagonal or function blocks.
     - no over-sampling (`sub_fraction == 1`) -- the kernel uses the mapper's weights as-is.
-    - the mapper's mean non-zeros per source column is at or below the gate -- above it the
-      FFT route is faster (see `Settings.interferometer_numba_nnz_per_source_max`).
+    - the geometry gate, which picks the faster route:
+
+      - `interferometer_numba_nnz_per_source_max` positive -- a hard gate: numba at or
+        below that many mean non-zeros per source column (the pre-#628 behaviour, kept
+        so explicit A/B settings are honoured).
+      - `interferometer_numba_nnz_per_source_max` `None` (the packaged default) -- the
+        cost model `inversion_interferometer_numba_util.curvature_route_seconds_from`,
+        which predicts both routes' time from the source pixels, the mapping operator's
+        non-zeros and the extent rectangle `extent_shape`, and routes to numba when
+        `direct_conv` is predicted no slower. Without an `extent_shape` the model cannot
+        be evaluated and the FFT route is used.
     - `import numba` succeeds.
 
     NaN mapping weights (an overflowing or degenerate `DelaunayNN` Sibson row) are
@@ -277,19 +295,29 @@ def _use_interferometer_numba(
     linear_obj_list
         The linear objects reconstructing the data.
     settings
-        The inversion settings, whose `interferometer_numba_nnz_per_source_max` is the
-        geometry gate. `None` uses the packaged defaults.
+        The inversion settings, whose `interferometer_route` and
+        `interferometer_numba_nnz_per_source_max` select the route. `None` uses the
+        packaged defaults.
     xp
         The array module the inversion runs on.
+    extent_shape
+        The `(ny, nx)` extent rectangle the `W~` operator lives on, i.e. the dataset's
+        `sparse_operator.y_shape, sparse_operator.x_shape`
+        (`= mask.shape_native_masked_pixels`). Needed only by the default cost model.
     """
     if xp is not np:
         return False
 
     settings = settings if settings is not None else Settings()
 
+    route = settings.interferometer_route
+
+    if route == "fft":
+        return False
+
     nnz_max = settings.interferometer_numba_nnz_per_source_max
 
-    if nnz_max is None or nnz_max <= 0:
+    if route is None and nnz_max is not None and nnz_max <= 0:
         return False
 
     if any(
@@ -312,12 +340,31 @@ def _use_interferometer_numba(
     if not np.all(sub_fraction == 1.0):
         return False
 
-    nnz_per_source_column = (
-        inversion_interferometer_numba_util.nnz_per_source_column_from(mapper=mapper)
-    )
+    if route is None:
+        if nnz_max is not None:
+            nnz_per_source_column = (
+                inversion_interferometer_numba_util.nnz_per_source_column_from(
+                    mapper=mapper
+                )
+            )
 
-    if nnz_per_source_column > nnz_max:
-        return False
+            if nnz_per_source_column > nnz_max:
+                return False
+
+        else:
+            if extent_shape is None:
+                return False
+
+            t_fft, t_direct_conv = (
+                inversion_interferometer_numba_util.curvature_route_seconds_from(
+                    source_pixels=int(mapper.params),
+                    nnz=int(np.asarray(mapper.pix_sizes_for_sub_slim_index).sum()),
+                    extent_shape=extent_shape,
+                )
+            )
+
+            if t_direct_conv > t_fft:
+                return False
 
     try:
         import numba  # noqa: F401

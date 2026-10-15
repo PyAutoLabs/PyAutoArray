@@ -796,3 +796,192 @@ def test__data_linear_func_matrix_dict(
     assert inversion_mapping.data_linear_func_matrix_dict[linear_obj][
         2
     ] == pytest.approx([0.06458333, 0.05972222], 1.0e-4)
+
+
+class _GeometryMapper(aa.m.MockMapper):
+    """
+    A mapper carrying only what the interferometer route gate reads: the number of source
+    pixels and the per-image-pixel non-zero counts, with no over-sampling.
+    """
+
+    def __init__(self, source_pixels, nnz, image_pixels):
+        import types
+
+        super().__init__(
+            parameters=source_pixels,
+            over_sampler=types.SimpleNamespace(
+                sub_fraction=types.SimpleNamespace(array=np.ones(image_pixels))
+            ),
+        )
+
+        sizes = np.full(image_pixels, nnz // image_pixels, dtype=np.int64)
+        sizes[: nnz - int(sizes.sum())] += 1
+
+        self._pix_sizes = sizes
+
+    @property
+    def pix_sizes_for_sub_slim_index(self):
+        return self._pix_sizes
+
+
+def _route_is_numba(source_pixels, nnz, image_pixels, extent_shape, settings=None):
+    from autoarray.inversion.inversion.factory import _use_interferometer_numba
+
+    mapper = _GeometryMapper(
+        source_pixels=source_pixels, nnz=nnz, image_pixels=image_pixels
+    )
+
+    return _use_interferometer_numba(
+        linear_obj_list=[mapper],
+        settings=settings,
+        xp=np,
+        extent_shape=extent_shape,
+    )
+
+
+# Every measured point the cost model was calibrated or checked against, with the route that
+# measured faster (single thread, seconds per call / per curvature build):
+#
+# - Aris 512x512 mask: 91,507 masked pixels, extent 341x341 (`shape_native_masked_pixels`),
+#   Delaunay P=3, nnz 273,661 (PyAutoArray#628): FFT 28.3 / 44.1 / 97.3 s vs direct_conv
+#   38.4 / 34.2 / 41.2 s.
+# - Aris 125x125 mask: 5,496 masked pixels, extent 83x83: direct_conv 0.40 / 2.08 / 6.12 s
+#   (1 thread) vs the JAX FFT route 1.96 / 6.84 / 12.0 s (2.8-3.6 cores).
+# - autolens_profiling#226 bake-off (`bakeoff_v2026.8.17.1.json`), rfft2_numpy vs direct_conv.
+_MEASURED_ROUTES = [
+    # (label, S, nnz, image pixels, extent, faster route)
+    ("aris_512_1459", 1459, 273661, 91507, (341, 341), "fft"),
+    ("aris_512_2577", 2577, 273661, 91507, (341, 341), "numba"),
+    ("aris_512_5746", 5746, 273661, 91507, (341, 341), "numba"),
+    ("aris_125_1405", 1405, 16438, 5496, (83, 83), "numba"),
+    ("aris_125_2947", 2947, 16448, 5496, (83, 83), "numba"),
+    ("aris_125_5526", 5526, 16488, 5496, (83, 83), "numba"),
+    ("bakeoff_sma_delaunay", 1500, 11556, 3852, (70, 70), "numba"),
+    ("bakeoff_sma_rect", 784, 15408, 3852, (70, 70), "numba"),
+    ("bakeoff_alma_delaunay", 1500, 46140, 15380, (140, 140), "numba"),
+    ("bakeoff_alma_rect", 784, 61520, 15380, (140, 140), "fft"),
+    ("bakeoff_alma_high_delaunay", 1500, 184716, 61572, (280, 280), "fft"),
+    ("bakeoff_alma_high_rect", 784, 246288, 61572, (280, 280), "fft"),
+]
+
+
+@pytest.mark.parametrize(
+    "label, source_pixels, nnz, image_pixels, extent_shape, faster",
+    _MEASURED_ROUTES,
+    ids=[row[0] for row in _MEASURED_ROUTES],
+)
+def test__interferometer_route__default_cost_model_picks_the_measured_faster_route(
+    label, source_pixels, nnz, image_pixels, extent_shape, faster
+):
+    """
+    The Witness of PyAutoArray#628: on both Aris masks the default routing picks the
+    faster of numba `direct_conv` and the NumPy FFT curvature at every measured vertex
+    count, and it still does at every autolens_profiling#226 bake-off cell.
+    """
+    pytest.importorskip("numba")
+
+    assert aa.Settings().interferometer_numba_nnz_per_source_max is None
+
+    is_numba = _route_is_numba(
+        source_pixels=source_pixels,
+        nnz=nnz,
+        image_pixels=image_pixels,
+        extent_shape=extent_shape,
+    )
+
+    assert is_numba == (faster == "numba")
+
+
+def test__interferometer_route__crossover_moves_with_the_extent():
+    """
+    The old fixed gate (60 non-zeros per source column) is right at the
+    autolens_profiling#226 extents and wrong on the Aris 512x512 one; the cost model
+    crosses near 60 at the former and between the measured 106 (numba) and 188 (FFT) at
+    the latter.
+    """
+    pytest.importorskip("numba")
+
+    # alma extent (140x140), where the ~60 Delaunay crossover was measured.
+    assert _route_is_numba(1500, 1500 * 50, 15380, (140, 140))
+    assert not _route_is_numba(1500, 1500 * 80, 15380, (140, 140))
+
+    # Aris 512x512 extent at 2,577 vertices: 106 non-zeros per column is numba by the cost
+    # model and FFT by the old gate, which measured 1.29x slower.
+    assert _route_is_numba(2577, 273661, 91507, (341, 341))
+    assert not _route_is_numba(
+        2577,
+        273661,
+        91507,
+        (341, 341),
+        settings=aa.Settings(interferometer_numba_nnz_per_source_max=60.0),
+    )
+
+
+def test__interferometer_route__settings_overrides():
+    pytest.importorskip("numba")
+
+    # Aris 512 at 1,459 vertices: the cost model picks FFT.
+    geometry = dict(
+        source_pixels=1459, nnz=273661, image_pixels=91507, extent_shape=(341, 341)
+    )
+    # Aris 512 at 5,746 vertices: the cost model picks numba.
+    geometry_numba = dict(
+        source_pixels=5746, nnz=273661, image_pixels=91507, extent_shape=(341, 341)
+    )
+
+    assert not _route_is_numba(**geometry)
+    assert _route_is_numba(**geometry_numba)
+
+    # A positive gate is a hard gate, whatever the extent (pre-#628 behaviour).
+    assert _route_is_numba(
+        **geometry,
+        settings=aa.Settings(interferometer_numba_nnz_per_source_max=200.0),
+    )
+    assert not _route_is_numba(
+        **geometry_numba,
+        settings=aa.Settings(interferometer_numba_nnz_per_source_max=40.0),
+    )
+
+    # 0 is the kill switch.
+    assert not _route_is_numba(
+        **geometry_numba,
+        settings=aa.Settings(interferometer_numba_nnz_per_source_max=0),
+    )
+
+    # The forced route wins over the cost model, the hard gate and the kill switch.
+    assert _route_is_numba(**geometry, settings=aa.Settings(interferometer_route="numba"))
+    assert _route_is_numba(
+        **geometry_numba,
+        settings=aa.Settings(
+            interferometer_route="numba", interferometer_numba_nnz_per_source_max=0
+        ),
+    )
+    assert not _route_is_numba(
+        **geometry_numba, settings=aa.Settings(interferometer_route="fft")
+    )
+
+    # Without the extent the cost model cannot be evaluated and the FFT route is used.
+    assert not _route_is_numba(**{**geometry_numba, "extent_shape": None})
+
+    with pytest.raises(ValueError):
+        aa.Settings(interferometer_route="direct_conv")
+
+
+def test__interferometer_route__fft_length_cost_penalises_awkward_lengths():
+    from autoarray.inversion.inversion.interferometer_numba import (
+        inversion_interferometer_numba_util as numba_util,
+    )
+
+    def per_element(n):
+        return numba_util._fft_length_cost(n) / n
+
+    # 682 = 2 * 11 * 31 (the Aris 512 padded extent) costs far more per element than the
+    # smooth 560 = 2^4 * 5 * 7, although log2 of the two differs by 3 %.
+    assert per_element(682) > 2.0 * per_element(560)
+
+    # 166 = 2 * 83 (the Aris 125 padded extent) is pocketfft's Bluestein case: the
+    # estimate is capped by the Bluestein cost, below the direct mixed-radix one.
+    assert numba_util._fft_length_cost(166) < 166 * (2.0 + 1.1 * 83)
+
+    # A power of two is the cheapest per element of its size class.
+    assert per_element(512) < per_element(510)
