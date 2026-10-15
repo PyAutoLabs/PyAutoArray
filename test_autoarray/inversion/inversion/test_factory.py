@@ -5,6 +5,10 @@ from dill import settings
 
 import autoarray as aa
 
+from autoarray.inversion.inversion.imaging_numba.sparse import (
+    InversionImagingSparseNumba,
+)
+
 
 def test__inversion_imaging__via_linear_obj_func_list(masked_imaging_7x7_no_blur):
     mask = masked_imaging_7x7_no_blur.mask
@@ -349,6 +353,107 @@ def test__inversion_imaging__compare_mapping_and_sparse_operator_values(
     assert inversion_sparse_operator.log_det_curvature_reg_matrix_term == pytest.approx(
         inversion_mapping.log_det_curvature_reg_matrix_term
     )
+
+
+def _delaunay_nn_mapper_from(mask, pixels=25, max_neighbors=None, seed=3):
+    """
+    A `DelaunayNN` (Sibson) mapper on a seeded irregular mesh, so the masked pixels carry
+    wide, variable-width natural-neighbour rows rather than the 3-wide Delaunay ones.
+    `max_neighbors` lowers the mesh's class-level cap on the instance so rows overflow
+    and carry NaN weights.
+    """
+    mesh = aa.mesh.DelaunayNN(pixels=pixels)
+
+    if max_neighbors is not None:
+        mesh.max_neighbors = max_neighbors
+
+    rng = np.random.default_rng(seed=seed)
+
+    interpolator = mesh.interpolator_from(
+        source_plane_data_grid=aa.Grid2D.from_mask(mask=mask, over_sample_size=1),
+        source_plane_mesh_grid=aa.Grid2DIrregular(
+            rng.uniform(-4.0, 4.0, size=(pixels, 2))
+        ),
+    )
+
+    return aa.Mapper(
+        interpolator=interpolator,
+        regularization=aa.reg.Constant(coefficient=1.0),
+    )
+
+
+def test__inversion_imaging__delaunay_nn__numba_sparse_operator_matches_mapping(
+    masked_imaging_7x7,
+):
+    pytest.importorskip("numba")
+
+    mapper = _delaunay_nn_mapper_from(mask=masked_imaging_7x7.mask)
+
+    pix_sizes = np.asarray(mapper.pix_sizes_for_sub_slim_index)
+
+    assert pix_sizes.max() > 3
+    assert len(np.unique(pix_sizes)) > 1
+
+    inversion_sparse_operator = aa.Inversion(
+        dataset=masked_imaging_7x7.apply_sparse_operator_cpu(),
+        linear_obj_list=[mapper],
+    )
+    inversion_mapping = aa.Inversion(
+        dataset=masked_imaging_7x7,
+        linear_obj_list=[mapper],
+    )
+
+    assert isinstance(inversion_sparse_operator, InversionImagingSparseNumba)
+    assert isinstance(inversion_mapping, aa.InversionImagingMapping)
+
+    np.testing.assert_allclose(
+        np.asarray(inversion_sparse_operator.curvature_matrix),
+        np.asarray(inversion_mapping.curvature_matrix),
+        rtol=1.0e-10,
+        atol=1.0e-10 * np.abs(np.asarray(inversion_mapping.curvature_matrix)).max(),
+    )
+    np.testing.assert_allclose(
+        np.asarray(inversion_sparse_operator.reconstruction),
+        np.asarray(inversion_mapping.reconstruction),
+        rtol=1.0e-8,
+    )
+    assert inversion_sparse_operator.log_det_curvature_reg_matrix_term == pytest.approx(
+        inversion_mapping.log_det_curvature_reg_matrix_term, rel=1.0e-10
+    )
+    assert inversion_sparse_operator.regularization_term == pytest.approx(
+        inversion_mapping.regularization_term, rel=1.0e-8
+    )
+
+
+def test__inversion_imaging__delaunay_nn_nan_weights__numba_gives_nan_like_mapping(
+    masked_imaging_7x7,
+):
+    """
+    Overflowing Sibson rows carry NaN weights so the model sample is rejected. The mapping
+    route turns them into a NaN `log_det_curvature_reg_matrix_term`; the numba sparse
+    route must do the same, not silently return a finite one.
+    """
+    pytest.importorskip("numba")
+
+    mapper = _delaunay_nn_mapper_from(mask=masked_imaging_7x7.mask, max_neighbors=6)
+
+    nan_rows = np.isnan(np.asarray(mapper.pix_weights_for_sub_slim_index)).any(axis=1)
+
+    assert nan_rows.any() and not nan_rows.all()
+
+    inversion_sparse_operator = aa.Inversion(
+        dataset=masked_imaging_7x7.apply_sparse_operator_cpu(),
+        linear_obj_list=[mapper],
+    )
+
+    assert isinstance(inversion_sparse_operator, InversionImagingSparseNumba)
+
+    for inversion in (
+        inversion_sparse_operator,
+        aa.Inversion(dataset=masked_imaging_7x7, linear_obj_list=[mapper]),
+    ):
+        assert np.isnan(np.asarray(inversion.curvature_matrix)).any()
+        assert np.isnan(inversion.log_det_curvature_reg_matrix_term)
 
 
 def test__inversion_imaging__linear_obj_func_and_non_func_give_same_terms(

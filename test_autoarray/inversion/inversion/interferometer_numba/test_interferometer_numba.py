@@ -103,6 +103,38 @@ def _rectangular_mapper_from(mask, shape=(3, 3), over_sample_size=1):
     )
 
 
+def _delaunay_nn_mapper_from(mask, pixels=25, max_neighbors=None, seed=3):
+    """
+    A `DelaunayNN` (Sibson) mapper on a seeded irregular mesh, so most masked pixels fall
+    strictly inside a triangle and carry wide natural-neighbour rows (5-8 vertices here,
+    against at most 3 for `Delaunay`). An Overlay mesh on this small mask would put the
+    mesh vertices on the pixel centres, giving width-1 rows that test nothing.
+
+    `max_neighbors` lowers the mesh's class-level `SIBSON_MAX_NEIGHBORS` cap on the
+    instance, which makes the wider rows overflow and carry NaN weights.
+    """
+    grid = aa.Grid2D.from_mask(mask=mask, over_sample_size=1)
+
+    mesh = aa.mesh.DelaunayNN(pixels=pixels)
+
+    if max_neighbors is not None:
+        mesh.max_neighbors = max_neighbors
+
+    rng = np.random.default_rng(seed=seed)
+
+    interpolator = mesh.interpolator_from(
+        source_plane_data_grid=grid,
+        source_plane_mesh_grid=aa.Grid2DIrregular(
+            rng.uniform(-4.0, 4.0, size=(pixels, 2))
+        ),
+    )
+
+    return aa.Mapper(
+        interpolator=interpolator,
+        regularization=aa.reg.Constant(coefficient=1.0),
+    )
+
+
 def _assert_numba_matches_sparse(dataset_sparse, mapper):
     """
     Pin the numba `direct_conv` inversion against the NumPy FFT (`xp=np`) inversion, which
@@ -168,6 +200,22 @@ def test__numba_inversion__delaunay__matches_sparse_numpy_inversion():
 def test__numba_inversion__rectangular__matches_sparse_numpy_inversion():
     mask, _, dataset_sparse = _dataset_from(seed=1)
     mapper = _rectangular_mapper_from(mask=mask)
+
+    _assert_numba_matches_sparse(dataset_sparse=dataset_sparse, mapper=mapper)
+
+
+def test__numba_inversion__delaunay_nn__matches_sparse_numpy_inversion():
+    """
+    Sibson rows are variable-width (up to `SIBSON_MAX_NEIGHBORS`), unlike the fixed
+    3-wide Delaunay rows; `kernel_inputs_from` must drop each row's padding entries.
+    """
+    mask, _, dataset_sparse = _dataset_from()
+    mapper = _delaunay_nn_mapper_from(mask=mask)
+
+    pix_sizes = np.asarray(mapper.pix_sizes_for_sub_slim_index)
+
+    assert pix_sizes.max() > 3
+    assert len(np.unique(pix_sizes)) > 1
 
     _assert_numba_matches_sparse(dataset_sparse=dataset_sparse, mapper=mapper)
 
@@ -332,6 +380,72 @@ def test__factory__routes_to_numba_below_the_gate_and_sparse_above_it():
 
     assert isinstance(inversion, InversionInterferometerSparse)
     assert not isinstance(inversion, InversionInterferometerSparseNumba)
+
+
+def test__factory__delaunay_nn__routes_to_numba_with_default_settings():
+    """
+    Sibson rows carry more non-zeros than Delaunay ones, so the risk is that a
+    `DelaunayNN` mapper trips the nnz-per-source-column gate onto the FFT route. With the
+    packaged gate it must not, and the factory-built inversion matches the FFT one.
+    """
+    mask, _, dataset_sparse = _dataset_from()
+    mapper = _delaunay_nn_mapper_from(mask=mask)
+
+    assert numba_util.nnz_per_source_column_from(
+        mapper=mapper
+    ) <= aa.Settings().interferometer_numba_nnz_per_source_max
+
+    inversion = aa.Inversion(dataset=dataset_sparse, linear_obj_list=[mapper])
+
+    assert isinstance(inversion, InversionInterferometerSparseNumba)
+
+    inversion_sparse = InversionInterferometerSparse(
+        dataset=dataset_sparse, linear_obj_list=[mapper], xp=np
+    )
+
+    assert inversion.log_det_curvature_reg_matrix_term == pytest.approx(
+        inversion_sparse.log_det_curvature_reg_matrix_term, rel=1.0e-10
+    )
+    assert float(inversion.fast_chi_squared) == pytest.approx(
+        float(inversion_sparse.fast_chi_squared), rel=1.0e-10
+    )
+
+
+def test__numba_inversion__delaunay_nn_nan_weights__give_nan_evidence_like_sparse():
+    """
+    A Sibson row that overflows `max_neighbors` (or is degenerate) carries NaN weights,
+    so the model sample is rejected. NaN weights are deliberately not a routing condition:
+    the FFT and mapping routes turn them into a NaN evidence, and the numba route must do
+    the same rather than return a finite number -- so the factory still routes here.
+    """
+    mask, dataset, dataset_sparse = _dataset_from()
+    mapper = _delaunay_nn_mapper_from(mask=mask, max_neighbors=6)
+
+    nan_rows = np.isnan(np.asarray(mapper.pix_weights_for_sub_slim_index)).any(axis=1)
+
+    assert nan_rows.any() and not nan_rows.all()
+
+    def log_evidence_terms_from(inversion):
+        return (
+            float(inversion.fast_chi_squared)
+            + float(inversion.regularization_term)
+            + float(inversion.log_det_curvature_reg_matrix_term)
+            - float(inversion.log_det_regularization_matrix_term)
+        )
+
+    inversion_numba = aa.Inversion(dataset=dataset_sparse, linear_obj_list=[mapper])
+
+    assert isinstance(inversion_numba, InversionInterferometerSparseNumba)
+
+    for inversion in (
+        inversion_numba,
+        InversionInterferometerSparse(
+            dataset=dataset_sparse, linear_obj_list=[mapper], xp=np
+        ),
+        aa.Inversion(dataset=dataset, linear_obj_list=[mapper]),
+    ):
+        assert np.isnan(np.asarray(inversion.curvature_matrix)).any()
+        assert np.isnan(log_evidence_terms_from(inversion))
 
 
 def test__factory__gate_of_zero_disables_the_numba_path():
