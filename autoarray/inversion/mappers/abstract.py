@@ -249,11 +249,13 @@ class Mapper(LinearObj):
             pix_lengths,
         ) = mapper_numba_util.data_slim_to_pixelization_unique_from(
             data_pixels=self.over_sampler.mask.pixels_in_mask,
-            pix_indexes_for_sub_slim_index=np.array(
+            # `np.asarray`, not `np.array`: the kernel only reads these tables, so a NumPy table is passed
+            # without copying it (DelaunayNN tables are 32 columns wide, PyAutoArray#629).
+            pix_indexes_for_sub_slim_index=np.asarray(
                 self.pix_indexes_for_sub_slim_index
             ),
-            pix_sizes_for_sub_slim_index=np.array(self.pix_sizes_for_sub_slim_index),
-            pix_weights_for_sub_slim_index=np.array(
+            pix_sizes_for_sub_slim_index=np.asarray(self.pix_sizes_for_sub_slim_index),
+            pix_weights_for_sub_slim_index=np.asarray(
                 self.pix_weights_for_sub_slim_index
             ),
             pix_pixels=self.params,

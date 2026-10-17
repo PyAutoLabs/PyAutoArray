@@ -59,47 +59,41 @@ def adaptive_pixel_signals_from(
         and make the count (and hence the likelihood) jump wherever a clipped weight reaches zero.
     """
 
-    M_sub, B = pix_indexes_for_sub_slim_index.shape
-
-    # 1) Flatten the per‐mapping tables:
-    flat_pixidx = pix_indexes_for_sub_slim_index.reshape(-1)  # (M_sub*B,)
-    flat_weights = pixel_weights.reshape(-1)  # (M_sub*B,)
-
-    # 2) Build a matching “parent‐slim” index for each flattened entry:
-    I_sub = xp.repeat(xp.arange(M_sub), B)  # (M_sub*B,)
-
-    # 3) Mask out any k >= pix_size_for_sub_slim_index[i] and, for Delaunay tables, any entry whose
-    #    weight is zero (see `exclude_zero_weight_mappings` above, PyAutoArray#627). The flag is a
-    #    static Python bool, so this is jit-safe; the mask is not differentiated, so the function
-    #    stays differentiable under JAX.
-    valid = (xp.arange(B)[None, :] < pix_size_for_sub_slim_index[:, None]).reshape(-1)
-
-    if exclude_zero_weight_mappings:
-        valid = valid & (flat_weights != 0)
-
-    flat_weights = xp.where(valid, flat_weights, 0.0)
-    flat_pixidx = xp.where(
-        valid, flat_pixidx, pixels
-    )  # send invalid indices to an out-of-bounds slot
-
-    # 4) Look up data & multiply by mapping weights:
-    flat_data_vals = xp.take(adapt_data[slim_index_for_sub_slim_index], I_sub, axis=0)
-    flat_contrib = flat_data_vals * flat_weights  # (M_sub*B,)
-
-    pixel_signals = xp.zeros((pixels + 1,))
-    pixel_counts = xp.zeros((pixels + 1,))
-
-    # 5) Scatter‐add into signal sums and counts:
     if xp.__name__.startswith("jax"):
-        pixel_signals = pixel_signals.at[flat_pixidx].add(flat_contrib)
-        pixel_counts = pixel_counts.at[flat_pixidx].add(valid.astype(float))
-    else:
-        xp.add.at(pixel_signals, flat_pixidx, flat_contrib)
-        xp.add.at(pixel_counts, flat_pixidx, valid.astype(float))
+        pixel_signals, pixel_counts = _pixel_signal_sums_jax(
+            pixels=pixels,
+            pixel_weights=pixel_weights,
+            pix_indexes_for_sub_slim_index=pix_indexes_for_sub_slim_index,
+            pix_size_for_sub_slim_index=pix_size_for_sub_slim_index,
+            slim_index_for_sub_slim_index=slim_index_for_sub_slim_index,
+            adapt_data=adapt_data,
+            exclude_zero_weight_mappings=exclude_zero_weight_mappings,
+            xp=xp,
+        )
+    elif _use_numba():
+        from autoarray.inversion.mappers import mapper_numba_util
 
-    # 6) Drop the extra “out-of-bounds” slot:
-    pixel_signals = pixel_signals[:pixels]
-    pixel_counts = pixel_counts[:pixels]
+        pix_indexes = np.asarray(pix_indexes_for_sub_slim_index)
+
+        pixel_signals, pixel_counts = mapper_numba_util.adaptive_pixel_signal_sums_from(
+            pixels=pixels,
+            pixel_weights=np.asarray(pixel_weights).reshape(pix_indexes.shape),
+            pix_indexes_for_sub_slim_index=pix_indexes,
+            pix_size_for_sub_slim_index=np.asarray(pix_size_for_sub_slim_index),
+            slim_index_for_sub_slim_index=np.asarray(slim_index_for_sub_slim_index),
+            adapt_data=np.asarray(adapt_data),
+            exclude_zero_weight_mappings=bool(exclude_zero_weight_mappings),
+        )
+    else:
+        pixel_signals, pixel_counts = _pixel_signal_sums_numpy(
+            pixels=pixels,
+            pixel_weights=pixel_weights,
+            pix_indexes_for_sub_slim_index=pix_indexes_for_sub_slim_index,
+            pix_size_for_sub_slim_index=pix_size_for_sub_slim_index,
+            slim_index_for_sub_slim_index=slim_index_for_sub_slim_index,
+            adapt_data=adapt_data,
+            exclude_zero_weight_mappings=exclude_zero_weight_mappings,
+        )
 
     # 7) Normalize
     #
@@ -135,6 +129,142 @@ def adaptive_pixel_signals_from(
     zero_signal = pixel_signals <= 0.0
     safe_signals = xp.where(zero_signal, 1.0, pixel_signals)
     return xp.where(zero_signal, 0.0, safe_signals**signal_scale)
+
+
+def _use_numba() -> bool:
+    """
+    Whether the NumPy branch of `adaptive_pixel_signals_from` uses the numba kernel
+    `mapper_numba_util.adaptive_pixel_signal_sums_from`.
+
+    True when numba is importable and `general.yaml` `numba: use_numba` is true (the default when the config
+    cannot be read); otherwise the vectorised `np.bincount` form `_pixel_signal_sums_numpy` is used. Both are
+    bit-identical to the padded scatter.
+    """
+    try:
+        from autonerves import conf
+
+        use_numba = conf.instance["general"]["numba"]["use_numba"]
+    except Exception:
+        use_numba = True
+
+    if not use_numba:
+        return False
+
+    try:
+        import numba  # noqa: F401
+    except ImportError:
+        return False
+
+    return True
+
+
+def _pixel_signal_sums_jax(
+    pixels,
+    pixel_weights,
+    pix_indexes_for_sub_slim_index,
+    pix_size_for_sub_slim_index,
+    slim_index_for_sub_slim_index,
+    adapt_data,
+    exclude_zero_weight_mappings,
+    xp,
+):
+    """
+    The JAX branch of `adaptive_pixel_signals_from` steps 1-6: the summed weighted adapt-data signal and the
+    number of counted mapping entries in every pixel, built with fixed shapes over the full padded tables so it
+    traces under `jit` and stays differentiable.
+    """
+    M_sub, B = pix_indexes_for_sub_slim_index.shape
+
+    # 1) Flatten the per-mapping tables:
+    flat_pixidx = pix_indexes_for_sub_slim_index.reshape(-1)  # (M_sub*B,)
+    flat_weights = pixel_weights.reshape(-1)  # (M_sub*B,)
+
+    # 2) Build a matching "parent-slim" index for each flattened entry:
+    I_sub = xp.repeat(xp.arange(M_sub), B)  # (M_sub*B,)
+
+    # 3) Mask out any k >= pix_size_for_sub_slim_index[i] and, for Delaunay tables, any entry whose
+    #    weight is zero (see `exclude_zero_weight_mappings` above, PyAutoArray#627). The flag is a
+    #    static Python bool, so this is jit-safe; the mask is not differentiated, so the function
+    #    stays differentiable under JAX.
+    valid = (xp.arange(B)[None, :] < pix_size_for_sub_slim_index[:, None]).reshape(-1)
+
+    if exclude_zero_weight_mappings:
+        valid = valid & (flat_weights != 0)
+
+    flat_weights = xp.where(valid, flat_weights, 0.0)
+    flat_pixidx = xp.where(
+        valid, flat_pixidx, pixels
+    )  # send invalid indices to an out-of-bounds slot
+
+    # 4) Look up data & multiply by mapping weights:
+    flat_data_vals = xp.take(adapt_data[slim_index_for_sub_slim_index], I_sub, axis=0)
+    flat_contrib = flat_data_vals * flat_weights  # (M_sub*B,)
+
+    pixel_signals = xp.zeros((pixels + 1,))
+    pixel_counts = xp.zeros((pixels + 1,))
+
+    # 5) Scatter-add into signal sums and counts:
+    pixel_signals = pixel_signals.at[flat_pixidx].add(flat_contrib)
+    pixel_counts = pixel_counts.at[flat_pixidx].add(valid.astype(float))
+
+    # 6) Drop the extra "out-of-bounds" slot:
+    return pixel_signals[:pixels], pixel_counts[:pixels]
+
+
+def _pixel_signal_sums_numpy(
+    pixels,
+    pixel_weights,
+    pix_indexes_for_sub_slim_index,
+    pix_size_for_sub_slim_index,
+    slim_index_for_sub_slim_index,
+    adapt_data,
+    exclude_zero_weight_mappings,
+):
+    """
+    The NumPy branch of `adaptive_pixel_signals_from` steps 1-6, computed over the live mapping entries only.
+
+    Natural-neighbour (`DelaunayNN`) tables are `SIBSON_MAX_NEIGHBORS` (32) columns wide but hold at most ~15 live
+    entries per row, so scattering over every padded slot (the JAX branch's fixed-shape form) spent most of its
+    time on padding (PyAutoArray#629). Here the tables are first trimmed to their widest live row, the live
+    entries compacted in row-major order and summed with `np.bincount`.
+
+    The result is bit-identical to the padded scatter: `np.bincount` adds the compacted entries into each bin
+    in the same row-major order that `np.add.at` visited them, starting from the same `0.0`, and every entry it
+    drops (padding, `-1` indexes, and zero weights when `exclude_zero_weight_mappings`) only ever reached the
+    padded scatter's discarded out-of-bounds slot. Counts are integers, so summing them as integers is exact.
+    """
+    pix_indexes = np.asarray(pix_indexes_for_sub_slim_index)
+    weights = np.asarray(pixel_weights).reshape(pix_indexes.shape)
+    sizes = np.asarray(pix_size_for_sub_slim_index)
+
+    # Trim every table to its widest live row (a view; padding beyond it is never read).
+    width = int(np.max(sizes)) if sizes.size else 0
+    width = min(max(width, 0), pix_indexes.shape[1])
+    pix_indexes = pix_indexes[:, :width]
+    weights = weights[:, :width]
+
+    valid = np.arange(width)[None, :] < sizes[:, None]
+
+    if exclude_zero_weight_mappings:
+        valid &= weights != 0
+
+    # A `-1` index inside a row's size only ever landed in the padded scatter's out-of-bounds slot.
+    valid &= pix_indexes >= 0
+
+    rows = np.nonzero(valid)[0]
+    live_indexes = pix_indexes[valid]
+    live_weights = weights[valid]
+
+    data_values = np.asarray(adapt_data)[
+        np.asarray(slim_index_for_sub_slim_index)[rows]
+    ]
+
+    pixel_signals = np.bincount(
+        live_indexes, weights=data_values * live_weights, minlength=pixels
+    )[:pixels]
+    pixel_counts = np.bincount(live_indexes, minlength=pixels)[:pixels].astype(float)
+
+    return pixel_signals, pixel_counts
 
 
 def sparse_triplets_from(
