@@ -353,6 +353,11 @@ def _sibson_from_tables_parallel(
         if failed:
             for k in range(max_neighbors):
                 weights[q, k] = np.nan
+            # Keep a failed row at size >= 1 so its NaN weight propagates (see the reference
+            # ``_sibson_single_from_tables``, PyAutoArray#629).
+            if size == 0 and max_neighbors > 0:
+                mappings[q, 0] = local_vertex
+                size = 1
 
         sizes[q] = size
         cavity_sizes[q] = count

@@ -552,6 +552,18 @@ def _sibson_single_from_tables(
     )
     overflow = overflow | neighbor_overflow
     failed = overflow | degenerate
+
+    # A failed row whose Sibson weights were all non-positive or non-finite has no selected entry, so its
+    # size would be 0 and every consumer (which reads only the first `size` entries) would skip the NaN
+    # weights below, silently returning a finite, wrong evidence. Keep such a row at size 1, mapped to the
+    # nearest seed vertex, so its NaN weight reaches the curvature matrix and the evidence is NaN
+    # (PyAutoArray#629).
+    empty_failed = failed & (size == 0)
+    mappings = xp.where(
+        empty_failed & (xp.arange(max_neighbors) == 0), local_vertex, mappings
+    ).astype(xp.int32)
+    size = xp.where(empty_failed, 1, size).astype(xp.int32)
+
     weights = xp.where(failed, xp.nan, weights)
     return mappings, size, weights, cavity_size, overflow, degenerate
 

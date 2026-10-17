@@ -61,17 +61,21 @@ def data_slim_to_pixelization_unique_from(
 
     # TODO : Work out if we can reduce size from np.max(sub_size) using sub_size of max_pix_mappings.
 
-    data_to_pix_unique = -1 * np.ones(
-        (data_pixels, max_pix_mappings * np.max(sub_size) ** 2)
+    data_to_pix_unique = np.full(
+        (data_pixels, max_pix_mappings * np.max(sub_size) ** 2), -1.0
     )
     data_weights = np.zeros((data_pixels, max_pix_mappings * np.max(sub_size) ** 2))
     pix_lengths = np.zeros(data_pixels)
-    pix_check = -1 * np.ones(shape=pix_pixels)
+    pix_check = np.full(pix_pixels, -1.0)
 
     ip_sub_start = 0
 
     for ip in range(data_pixels):
-        pix_check[:] = -1
+        # Reset only the pixelization pixels the previous data pixel touched (its unique list), rather than
+        # all `pix_pixels` entries: the full reset cost O(data_pixels * pix_pixels) per call (PyAutoArray#629).
+        if ip > 0:
+            for unique_index in range(int(pix_lengths[ip - 1])):
+                pix_check[int(data_to_pix_unique[ip - 1, unique_index])] = -1.0
 
         pix_size = 0
 
@@ -98,3 +102,70 @@ def data_slim_to_pixelization_unique_from(
         pix_lengths[ip] = pix_size
 
     return data_to_pix_unique, data_weights, pix_lengths
+
+
+@numba_util.jit()
+def adaptive_pixel_signal_sums_from(
+    pixels: int,
+    pixel_weights: np.ndarray,
+    pix_indexes_for_sub_slim_index: np.ndarray,
+    pix_size_for_sub_slim_index: np.ndarray,
+    slim_index_for_sub_slim_index: np.ndarray,
+    adapt_data: np.ndarray,
+    exclude_zero_weight_mappings: bool,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    The summed weighted adapt-data signal and the number of counted mapping entries in every pixelization pixel,
+    visiting only the first `pix_size_for_sub_slim_index[i]` (live) entries of every row.
+
+    This is the numba form of steps 1-6 of `mapper_util.adaptive_pixel_signals_from` for the NumPy path. Natural
+    neighbour (`DelaunayNN`) mapping tables are `SIBSON_MAX_NEIGHBORS` (32) columns wide but hold at most ~15 live
+    entries per row, so the padded scatter spent most of its time on padding (PyAutoArray#629).
+
+    The result is bit-identical to the padded `np.add.at` scatter: the live entries are added into each pixel in
+    the same row-major order, starting from the same `0.0`, as the same `adapt_data * weight` products, and every
+    entry skipped here (padding, a `-1` index, and a zero weight when `exclude_zero_weight_mappings`) only ever
+    reached the scatter's discarded out-of-bounds slot.
+
+    Parameters
+    ----------
+    pixels
+        The number of pixelization pixels the signals are summed into.
+    pixel_weights
+        The interpolation weight of every (sub-pixel, mapping) entry, shape [total_sub_pixels, max_mappings].
+    pix_indexes_for_sub_slim_index
+        The pixelization pixel of every (sub-pixel, mapping) entry, padded with -1.
+    pix_size_for_sub_slim_index
+        The number of live mapping entries of every sub-pixel.
+    slim_index_for_sub_slim_index
+        The slim data pixel of every sub-pixel.
+    adapt_data
+        The adapt image whose values are summed.
+    exclude_zero_weight_mappings
+        Whether entries with a zero weight are skipped (Delaunay interpolators, PyAutoArray#627).
+
+    Returns
+    -------
+    The summed signal and the count of every pixel, each of shape [pixels].
+    """
+    pixel_signals = np.zeros(pixels)
+    pixel_counts = np.zeros(pixels)
+
+    for sub_index in range(pix_indexes_for_sub_slim_index.shape[0]):
+        data_value = adapt_data[slim_index_for_sub_slim_index[sub_index]]
+
+        for mapping_index in range(pix_size_for_sub_slim_index[sub_index]):
+            pix = pix_indexes_for_sub_slim_index[sub_index, mapping_index]
+
+            if pix < 0 or pix >= pixels:
+                continue
+
+            weight = pixel_weights[sub_index, mapping_index]
+
+            if exclude_zero_weight_mappings and weight == 0.0:
+                continue
+
+            pixel_signals[pix] += data_value * weight
+            pixel_counts[pix] += 1.0
+
+    return pixel_signals, pixel_counts
