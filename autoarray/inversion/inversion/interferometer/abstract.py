@@ -15,6 +15,28 @@ from autoarray.structures.arrays.uniform_2d import Array2D
 from autoarray.inversion.inversion import inversion_util
 
 
+def real_space_mask_from(dataset) -> Mask2D:
+    """
+    The real-space mask an interferometer inversion of `dataset` reconstructs on: an
+    `Interferometer`'s `real_space_mask`, else a transformer's `real_space_mask`, else the
+    dataset's own `mask` (a `DatasetInterface`'s `grids.lp.mask`).
+
+    A module function so the inversion factory can read the same mask before it builds an
+    inversion (`AbstractInversionInterferometer.mask` returns this).
+    """
+    real_space_mask = getattr(dataset, "real_space_mask", None)
+
+    if real_space_mask is not None:
+        return real_space_mask
+
+    transformer = getattr(dataset, "transformer", None)
+
+    if transformer is not None:
+        return transformer.real_space_mask
+
+    return dataset.mask
+
+
 class AbstractInversionInterferometer(AbstractInversion):
     def __init__(
         self,
@@ -70,17 +92,7 @@ class AbstractInversionInterferometer(AbstractInversion):
         `real_space_mask`, else the dataset's own `mask` (a `DatasetInterface`'s
         `grids.lp.mask`).
         """
-        real_space_mask = getattr(self.dataset, "real_space_mask", None)
-
-        if real_space_mask is not None:
-            return real_space_mask
-
-        transformer = getattr(self.dataset, "transformer", None)
-
-        if transformer is not None:
-            return transformer.real_space_mask
-
-        return self.dataset.mask
+        return real_space_mask_from(dataset=self.dataset)
 
     @cached_property
     def operated_mapping_matrix_list(self) -> List[np.ndarray]:

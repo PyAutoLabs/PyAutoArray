@@ -23,6 +23,7 @@ class Settings:
         regularization_term_method: Optional[str] = None,
         interferometer_numba_nnz_per_source_max: Optional[float] = None,
         interferometer_route: Optional[str] = None,
+        interferometer_direct_conv_symmetric_max_work_fraction: Optional[float] = None,
         positive_only_solver: Optional[str] = None,
         certified_pass_budget: Optional[int] = None,
         certified_fallback: Optional[str] = None,
@@ -208,6 +209,13 @@ class Settings:
             (`InversionInterferometerSparseNumba`) whenever it can represent the inversion
             (NumPy backend, one mapper, no linear functions, no over-sampling, numba
             installed), overriding the geometry gate and the `0` kill switch.
+        interferometer_direct_conv_symmetric_max_work_fraction
+            When the serial numba `direct_conv` route runs, the largest geometry work
+            fraction at which it uses the symmetric, row-restricted kernel
+            (`curvature_direct_conv_symmetric`) instead of the full one. `None` (default)
+            reads the packaged value (`0.7`); `0` always uses the full kernel. The result
+            is the same either way (to round-off); only the time differs. See the property
+            of the same name.
         positive_only_solver
             Which solver the JAX (`xp=jnp`) positive-only reconstruction uses. `None` (default) reads the packaged
             value ``"pdip"``.
@@ -275,6 +283,9 @@ class Settings:
             interferometer_numba_nnz_per_source_max
         )
         self._interferometer_route = interferometer_route
+        self._interferometer_direct_conv_symmetric_max_work_fraction = (
+            interferometer_direct_conv_symmetric_max_work_fraction
+        )
         self._positive_only_solver = positive_only_solver
         self._certified_pass_budget = certified_pass_budget
         self._certified_fallback = certified_fallback
@@ -290,6 +301,8 @@ class Settings:
             self.nnls_preconditioning_no_mapper
         if interferometer_route is not None:
             self.interferometer_route
+        if interferometer_direct_conv_symmetric_max_work_fraction is not None:
+            self.interferometer_direct_conv_symmetric_max_work_fraction
 
     @property
     def use_positive_only_solver(self):
@@ -448,6 +461,51 @@ class Settings:
         if value not in (None, "numba", "fft"):
             raise ValueError(
                 f"interferometer_route={value!r} is invalid; expected None, 'numba' or 'fft'."
+            )
+
+        return value
+
+    @property
+    def interferometer_direct_conv_symmetric_max_work_fraction(self) -> float:
+        """
+        The work-fraction gate of the serial symmetric `direct_conv` kernel: `0.7`
+        (packaged default), `0` for the kill switch (always the full kernel).
+
+        `curvature_direct_conv_symmetric` exploits `F`'s symmetry (source columns ranked by
+        their top extent row, each convolving only the rows later-ranked columns span) and
+        each row's mask x-range. Its `work_fraction`
+        (`inversion_interferometer_numba_util.symmetric_restriction_inputs_from`) is the
+        fraction of the full kernel's convolution work it still does (PyAutoArray#635):
+
+        - the synthetic Aris-512 geometry (compact 3-NN columns): f ~ 0.41, 1.81-1.90x
+          faster single-threaded on RAL;
+        - Aris's real 512x512 Delaunay mesh (multiply imaged, tall columns): f ~ 0.51,
+          measured ~1.46x, as the cost model's `1 / (kappa f)` predicts.
+
+        The cost model (`DIRECT_CONV_SYMMETRIC_WORK_FACTOR`, kappa = 1.32) says the kernel
+        wins while `kappa f < 1`, i.e. f < 0.76; the default 0.7 keeps a predicted gain of
+        at least 1.08x. With serial numba and `work_fraction <= this value` (value > 0) the
+        symmetric kernel is used, and the route cost model is told so; the parallel path
+        always uses the full kernel. Must be non-negative.
+        """
+        value = self._interferometer_direct_conv_symmetric_max_work_fraction
+
+        if value is None:
+            value = self._inversion_config_value(
+                "interferometer_direct_conv_symmetric_max_work_fraction", 0.7
+            )
+
+        # A `null` config entry (the style of the neighbouring keys) means the default.
+        if value is None:
+            value = 0.7
+
+        value = float(value)
+
+        if not value >= 0.0:
+            raise ValueError(
+                "interferometer_direct_conv_symmetric_max_work_fraction="
+                f"{value!r} is invalid; expected a non-negative number (0 disables the "
+                "symmetric kernel)."
             )
 
         return value

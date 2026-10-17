@@ -185,14 +185,66 @@ class InversionInterferometerSparseNumba(InversionInterferometerSparse):
         return inputs
 
     @cached_property
+    def symmetric_restriction_inputs(self) -> dict:
+        """
+        The column ordering, row restriction and per-row mask x-range of the serial
+        symmetric kernel, plus its `work_fraction`
+        (`inversion_interferometer_numba_util.symmetric_restriction_inputs_from`).
+        """
+        inputs = self.kernel_index_arrays
+
+        return inversion_interferometer_numba_util.symmetric_restriction_inputs_from(
+            iy=inputs["iy"],
+            ix=inputs["ix"],
+            cscptr=inputs["cscptr"],
+            csc_row=inputs["csc_row"],
+            ny=inputs["ny"],
+            nx=inputs["nx"],
+            pix_pixels=inputs["pix_pixels"],
+        )
+
+    @property
+    def use_symmetric_kernel(self) -> bool:
+        """
+        Whether `curvature_matrix_diag` uses the serial symmetric, row-restricted kernel
+        (`curvature_direct_conv_symmetric`) rather than the full `curvature_direct_conv`.
+
+        Only on the serial path, and only when its work fraction is at or below
+        `Settings.interferometer_direct_conv_symmetric_max_work_fraction` (`0` = never).
+        The parallel path always uses the full parallel kernel.
+
+        A mapping operator with non-finite weights (an overflowing or degenerate
+        `DelaunayNN` Sibson row) also uses the full kernel. The two kernels agree on
+        finite weights, but a NaN weight spreads through `F` along the full kernel's
+        column x row loops -- including into the rows of empty source columns, which the
+        symmetric kernel never visits -- and the evidence must come out NaN exactly as on
+        the FFT and mapping routes (pinned in `test_interferometer_numba.py`). The check
+        is one pass over the non-zeros.
+        """
+        if _numba_parallel():
+            return False
+
+        threshold = self.settings.interferometer_direct_conv_symmetric_max_work_fraction
+
+        if threshold <= 0.0:
+            return False
+
+        if not np.all(np.isfinite(self.kernel_index_arrays["val"])):
+            return False
+
+        return self.symmetric_restriction_inputs["work_fraction"] <= threshold
+
+    @cached_property
     def curvature_matrix_diag(self) -> np.ndarray:
         """
         `F = Aᵀ W~ A` for the inversion's single mapper, from the `direct_conv` numba
         kernel.
 
-        The returned matrix is complete and symmetric (the kernel loops the full source
-        column x masked pixel space rather than halving on symmetry), so it drops straight
-        into the parent's single-mapper branch with no mirroring pass.
+        The returned matrix is complete and symmetric, so it drops straight into the
+        parent's single-mapper branch with no mirroring pass: the full kernels loop the
+        whole source column x masked pixel space, and the serial symmetric kernel (used
+        when `use_symmetric_kernel`) computes one triangle in its ranked order and mirrors
+        it itself.
         """
         inputs = self.kernel_index_arrays
 
@@ -202,12 +254,7 @@ class InversionInterferometerSparseNumba(InversionInterferometerSparse):
             )
         )
 
-        if _numba_parallel():
-            kernel = inversion_interferometer_numba_util.direct_conv_parallel_kernel()
-        else:
-            kernel = inversion_interferometer_numba_util.curvature_direct_conv
-
-        return kernel(
+        args = (
             preload,
             inputs["iy"],
             inputs["ix"],
@@ -222,6 +269,24 @@ class InversionInterferometerSparseNumba(InversionInterferometerSparse):
             inputs["nx"],
             inputs["pix_pixels"],
         )
+
+        if _numba_parallel():
+            return inversion_interferometer_numba_util.direct_conv_parallel_kernel()(
+                *args
+            )
+
+        if self.use_symmetric_kernel:
+            restriction = self.symmetric_restriction_inputs
+
+            return inversion_interferometer_numba_util.curvature_direct_conv_symmetric(
+                *args,
+                *[
+                    restriction[key]
+                    for key in inversion_interferometer_numba_util.SYMMETRIC_KERNEL_KEYS
+                ],
+            )
+
+        return inversion_interferometer_numba_util.curvature_direct_conv(*args)
 
 
 def _numba_parallel() -> bool:

@@ -709,6 +709,13 @@ def test__numba_inversion__curvature_matrix_and_data_vector_evaluated_once_per_l
     monkeypatch.setattr(
         numba_util, "curvature_direct_conv", counted(numba_util.curvature_direct_conv)
     )
+    # The serial path may run the symmetric kernel instead (gate
+    # `interferometer_direct_conv_symmetric_max_work_fraction`); either counts once.
+    monkeypatch.setattr(
+        numba_util,
+        "curvature_direct_conv_symmetric",
+        counted(numba_util.curvature_direct_conv_symmetric),
+    )
     parallel_kernel = numba_util.direct_conv_parallel_kernel
     monkeypatch.setattr(
         numba_util,

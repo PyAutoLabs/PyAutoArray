@@ -103,6 +103,180 @@ def curvature_direct_conv(
     return curvature_matrix
 
 
+@numba_util.jit()
+def curvature_direct_conv_symmetric(
+    preload,
+    iy,
+    ix,
+    flat,
+    indptr,
+    col,
+    val,
+    cscptr,
+    csc_row,
+    csc_val,
+    ny,
+    nx,
+    pix_pixels,
+    order,
+    rank,
+    ylo_suffix,
+    xlo_row,
+    xhi_row,
+):
+    """
+    `F = Aᵀ W~ A` by the :func:`curvature_direct_conv` convolution, skipping the work
+    that `F`'s symmetry and the mask's footprint make redundant.
+
+    :func:`curvature_direct_conv` convolves every source column over the whole `(ny, nx)`
+    extent rectangle and gathers every entry of its row of `F`. Two cuts remove work
+    that cannot change the result:
+
+    1. **Symmetry, via y-ranked columns.** The source columns are processed in the order
+       `order` (by the top extent row `ymin` of their non-zeros, see
+       :func:`symmetric_restriction_inputs_from`); `rank` is the inverse permutation.
+       Column `sp` of rank `r` only computes the entries `F[sp, c]` with
+       `rank[c] >= r`, and the others are filled by a mirror pass at the end
+       (`F[c, sp] = F[sp, c]`). Every pixel `A[:, c]` touches lies in an extent row
+       `>= ymin(c)`, so column `sp` only needs `u = W~ A[:, sp]` on the rows
+       `>= ylo_suffix[r] = min_{rank(c) >= r} ymin(c)` -- the rows above are neither
+       convolved nor gathered.
+    2. **The mask's x-range per row.** `u` is only ever read at masked pixels, so each
+       extent row `jy` is convolved only over `[xlo_row[jy], xhi_row[jy])`, the x-range
+       of the masked pixels in that row (rows with no masked pixel are skipped).
+
+    Both cuts are exact for *any* column ordering: whatever `order` is, each computed
+    entry `F[sp, c]` receives exactly the contributions :func:`curvature_direct_conv`
+    gives it (the restricted rows and columns hold every masked pixel `A[:, c]` touches),
+    and every entry is either computed or mirrored. The ordering only decides how much
+    work is skipped. Ranking by each column's top row `ymin` (stable; empty columns last)
+    makes `ylo_suffix[r] = ymin(order[r])`, the largest the suffix minimum can be for
+    every rank, so column `r` convolves only from its own top row down: about half the
+    rows on average for compact columns, more for tall ones (`work_fraction` measures it
+    exactly). On Aris's real 512x512 Delaunay mesh, where multiple imaging makes columns
+    tall (median span 90 of 341 rows), `ymin` order gives f = 0.51 against 0.59 for
+    centroid order (PyAutoArray#635).
+
+    The mirror relies on `F` being symmetric, i.e. on `W~` being even in the pixel offset
+    (`preload[-dy, -dx] = preload[dy, dx]` with wrapped indices), which the
+    interferometer `nufft_precision_operator` is by construction.
+
+    The gather is column-major and branch-free: for rank `r` it computes, for each later-
+    ranked column `c = order[k]`, `k >= r`, the dot product
+    `F[sp, c] = Σ_{t in column c} val_t · u[flat[row_t]]` over that column's own non-zeros
+    -- `Σ_{k >= r} nnz_k` multiply-adds, about half of the full kernel's `nnz` per column,
+    with no per-entry rank test. The CSC non-zeros are first copied into rank order
+    (`ranked_flat` / `ranked_val`, `O(nnz)`), so the sweep for rank `r` is one contiguous
+    pass over the tail of those arrays. The pixels column `c` touches lie in the rows
+    `>= ylo_suffix[r]` and inside the mask x-range by construction, where `u` has just
+    been computed.
+
+    Each computed entry is accumulated in the same order as in
+    :func:`curvature_direct_conv`: the same `t` loop per extent cell for `u`, and, within
+    a column, the CSC non-zeros in increasing pixel index (:func:`kernel_inputs_from`
+    sorts them stably), which is the order that kernel's CSR sweep adds them in. So every
+    computed entry is bit-identical to that kernel's entry, whatever the pixel ordering.
+    A mirrored entry is the transposed computed one, so it equals the full kernel's entry
+    to round-off: the full kernel's own `F` is symmetric only to round-off.
+
+    The kernel keeps a single `u` buffer and is serial; the parallel path uses
+    :func:`direct_conv_parallel_kernel`, whose columns cost the same whatever their order.
+
+    Parameters
+    ----------
+    preload, iy, ix, flat, indptr, col, val, cscptr, csc_row, csc_val, ny, nx, pix_pixels
+        As :func:`curvature_direct_conv`.
+    order
+        The source columns in processing order (`[pix_pixels]`).
+    rank
+        The inverse permutation of `order`: `rank[order[r]] = r`.
+    ylo_suffix
+        The first extent row column `order[r]` must convolve (`[pix_pixels]`,
+        non-decreasing; `ny` for none).
+    xlo_row, xhi_row
+        Per extent row, the half-open x-range `[xlo, xhi)` of its masked pixels
+        (`xhi <= xlo` for a row with none).
+
+    Returns
+    -------
+    The curvature matrix `F`, of shape `[pix_pixels, pix_pixels]`.
+    """
+    nx2 = 2 * nx
+
+    curvature_matrix = np.zeros((pix_pixels, pix_pixels))
+    u = np.zeros(ny * nx)
+
+    # The CSC non-zeros in rank order, with the pixel's extent-flat index resolved.
+    ranked_ptr = np.zeros(pix_pixels + 1, dtype=np.int64)
+
+    for k in range(pix_pixels):
+        c = order[k]
+        ranked_ptr[k + 1] = ranked_ptr[k] + cscptr[c + 1] - cscptr[c]
+
+    ranked_flat = np.empty(ranked_ptr[pix_pixels], dtype=np.int64)
+    ranked_val = np.empty(ranked_ptr[pix_pixels])
+
+    for k in range(pix_pixels):
+        c = order[k]
+        q = ranked_ptr[k]
+
+        for t in range(cscptr[c], cscptr[c + 1]):
+            ranked_flat[q] = flat[csc_row[t]]
+            ranked_val[q] = csc_val[t]
+            q += 1
+
+    for r in range(pix_pixels):
+        sp = order[r]
+        y0 = ylo_suffix[r]
+
+        u[y0 * nx :] = 0.0
+
+        for t in range(cscptr[sp], cscptr[sp + 1]):
+            i0 = csc_row[t]
+            wi = csc_val[t]
+            i_y = iy[i0]
+            i_x = ix[i0]
+            off = nx2 - i_x
+
+            for jy in range(y0, ny):
+                x0 = xlo_row[jy]
+                x1 = xhi_row[jy]
+
+                if x1 <= x0:
+                    continue
+
+                dy = jy - i_y
+                base = jy * nx
+
+                for jx in range(x0, min(i_x, x1)):
+                    u[base + jx] += wi * preload[dy, off + jx]
+
+                for jx in range(max(i_x, x0), x1):
+                    u[base + jx] += wi * preload[dy, jx - i_x]
+
+        row = curvature_matrix[sp]
+
+        for k in range(r, pix_pixels):
+            value = 0.0
+
+            for t in range(ranked_ptr[k], ranked_ptr[k + 1]):
+                value += ranked_val[t] * u[ranked_flat[t]]
+
+            row[order[k]] = value
+
+    for a in range(pix_pixels):
+        for b in range(pix_pixels):
+            if rank[b] > rank[a]:
+                curvature_matrix[b, a] = curvature_matrix[a, b]
+
+    return curvature_matrix
+
+
+# The `symmetric_restriction_inputs_from` keys `curvature_direct_conv_symmetric` takes after
+# the `curvature_direct_conv` arguments, in argument order.
+SYMMETRIC_KERNEL_KEYS = ("order", "rank", "ylo_suffix", "xlo_row", "xhi_row")
+
+
 _PARALLEL_CACHE: dict = {}
 
 
@@ -278,6 +452,215 @@ def kernel_inputs_from(
         "nx": nx,
         "pix_pixels": int(pix_pixels),
     }
+
+
+def _symmetric_restriction_from(
+    column_counts, column_ymin, iy, ix, ny, nx, pix_pixels
+) -> dict:
+    """
+    The column ordering, row restriction and per-row mask x-range of
+    :func:`curvature_direct_conv_symmetric`, plus its `work_fraction`, from per-source-
+    column statistics of the mapping operator and the masked pixels' extent positions.
+
+    Shared by :func:`symmetric_restriction_inputs_from` (from the kernel's CSC arrays) and
+    :func:`symmetric_work_fraction_from` (from a mapper's triplets, for the factory's cost
+    model), so the gate and the kernel see the same work fraction: `column_ymin` is an
+    integer minimum, identical however it was computed, so both get the same order.
+    """
+    pix_pixels = int(pix_pixels)
+    ny, nx = int(ny), int(nx)
+
+    column_counts = np.asarray(column_counts, dtype=np.int64)
+    column_ymin = np.asarray(column_ymin, dtype=np.int64)
+    non_empty = column_counts > 0
+
+    # Rank by each column's top extent row, stably. An empty column has `ymin = ny`, which
+    # exceeds every real row, so it is ranked last and restricted to nothing.
+    column_ymin = np.where(non_empty, column_ymin, ny)
+
+    order = np.argsort(column_ymin, kind="stable").astype(np.int64)
+    rank = np.empty(pix_pixels, dtype=np.int64)
+    rank[order] = np.arange(pix_pixels, dtype=np.int64)
+
+    # Column of rank r needs the rows spanned by every column of rank >= r. In `ymin` order
+    # this is just ymin(order[r]); the suffix minimum keeps it right for any order.
+    ylo_suffix = np.ascontiguousarray(
+        np.minimum.accumulate(column_ymin[order][::-1])[::-1], dtype=np.int64
+    )
+
+    iy = np.asarray(iy, dtype=np.int64)
+    ix = np.asarray(ix, dtype=np.int64)
+
+    pix_by_row = np.argsort(iy, kind="stable").astype(np.int64)
+    pix_by_row_ptr = np.searchsorted(
+        iy[pix_by_row], np.arange(ny + 1, dtype=np.int64)
+    ).astype(np.int64)
+
+    # Half-open masked x-range of each extent row; a row with no masked pixel keeps the
+    # empty range [nx, 0), which the kernel skips.
+    xlo_row = np.full(ny, nx, dtype=np.int64)
+    xhi_row = np.zeros(ny, dtype=np.int64)
+
+    row_non_empty = np.diff(pix_by_row_ptr) > 0
+
+    if np.any(row_non_empty):
+        x_by_row = ix[pix_by_row]
+        starts = pix_by_row_ptr[:-1][row_non_empty]
+        xlo_row[row_non_empty] = np.minimum.reduceat(x_by_row, starts)
+        xhi_row[row_non_empty] = np.maximum.reduceat(x_by_row, starts) + 1
+
+    width = np.maximum(xhi_row - xlo_row, 0)
+    width_from_row = np.zeros(ny + 1, dtype=np.int64)
+    width_from_row[:ny] = np.cumsum(width[::-1])[::-1]
+
+    nnz = int(column_counts.sum())
+
+    if nnz == 0 or ny * nx == 0:
+        work_fraction = 0.0
+    else:
+        work = np.sum(
+            column_counts[order].astype(np.float64)
+            * width_from_row[ylo_suffix].astype(np.float64)
+        )
+        work_fraction = float(work / (float(nnz) * float(ny) * float(nx)))
+
+    return {
+        "order": order,
+        "rank": rank,
+        "ylo_suffix": ylo_suffix,
+        "xlo_row": xlo_row,
+        "xhi_row": xhi_row,
+        "work_fraction": work_fraction,
+    }
+
+
+def symmetric_restriction_inputs_from(
+    iy, ix, cscptr, csc_row, ny, nx, pix_pixels
+) -> dict:
+    """
+    The extra inputs of :func:`curvature_direct_conv_symmetric` and the fraction of
+    :func:`curvature_direct_conv`'s convolution work it performs.
+
+    - `order` / `rank`: the source columns sorted (stably) by their top extent row
+      `ymin` (the lowest row of their non-zeros), and its inverse permutation. Empty
+      columns are ranked last.
+    - `ylo_suffix[r]`: the suffix minimum, over the columns of rank `>= r`, of each
+      column's lowest extent row (`ny` when they are all empty). Column `order[r]` only
+      convolves the rows `>= ylo_suffix[r]`.
+    - `xlo_row` / `xhi_row`: per extent row the half-open x-range of its masked pixels
+      (`[nx, 0)`, i.e. empty, for a row with none).
+    - `work_fraction`: the convolution work of the symmetric kernel relative to the full
+      one,
+
+          Σ_cols nnz_col · Σ_{y >= ylo_suffix(col)} width(y)  /  (nnz · ny · nx),
+
+      with `width(y) = xhi_row[y] - xlo_row[y]`. It is a property of the geometry and the
+      mesh only (PyAutoArray#635): f ~ 0.41 on the synthetic Aris-512 geometry (compact
+      3-NN columns), f ~ 0.51 on Aris's real 512x512 Delaunay mesh (multiply imaged,
+      tall columns).
+
+    Everything is vectorised NumPy (`reduceat` over the CSC and row-sorted segments), as
+    it runs once per likelihood evaluation. The keys the kernel takes, in its argument
+    order, are :data:`SYMMETRIC_KERNEL_KEYS`.
+
+    Parameters
+    ----------
+    iy, ix
+        The extent-grid row / column of every masked pixel (:func:`kernel_inputs_from`).
+    cscptr, csc_row
+        The mapping operator's CSC column pointers and row (masked pixel) indices.
+    ny, nx
+        The extent rectangle's shape.
+    pix_pixels
+        The number of source pixels.
+
+    Returns
+    -------
+    A dict keyed by the kernel's extra argument names (:data:`SYMMETRIC_KERNEL_KEYS`),
+    plus `work_fraction`.
+    """
+    iy = np.asarray(iy, dtype=np.int64)
+    cscptr = np.asarray(cscptr, dtype=np.int64)
+    csc_row = np.asarray(csc_row, dtype=np.int64)
+
+    pix_pixels = int(pix_pixels)
+    ny = int(ny)
+
+    column_counts = np.diff(cscptr)
+    non_empty = column_counts > 0
+
+    column_ymin = np.full(pix_pixels, ny, dtype=np.int64)
+
+    if np.any(non_empty):
+        column_ymin[non_empty] = np.minimum.reduceat(
+            iy[csc_row], cscptr[:-1][non_empty]
+        )
+
+    return _symmetric_restriction_from(
+        column_counts=column_counts,
+        column_ymin=column_ymin,
+        iy=iy,
+        ix=ix,
+        ny=ny,
+        nx=nx,
+        pix_pixels=pix_pixels,
+    )
+
+
+def symmetric_work_fraction_from(
+    pix_indexes_for_sub_slim_index: np.ndarray,
+    pix_sizes_for_sub_slim_index: np.ndarray,
+    extent_index_for_masked_pixel: np.ndarray,
+    extent_shape,
+    pix_pixels: int,
+) -> float:
+    """
+    The `work_fraction` of :func:`symmetric_restriction_inputs_from`, straight from a
+    mapper's triplets, for the factory's route decision.
+
+    It skips the CSC sort :func:`kernel_inputs_from` performs (`bincount` and
+    `np.minimum.at` over the valid triplets instead), and returns exactly the value the
+    inversion's own restriction inputs will give.
+
+    Parameters
+    ----------
+    pix_indexes_for_sub_slim_index, pix_sizes_for_sub_slim_index
+        The mapper's dense triplet arrays (the weights do not enter).
+    extent_index_for_masked_pixel
+        The mask's flat extent-grid index of every masked pixel, ordered to match the
+        triplet rows.
+    extent_shape
+        The `(ny, nx)` extent rectangle.
+    pix_pixels
+        The number of source pixels, i.e. `mapper.params`.
+    """
+    flat = np.asarray(extent_index_for_masked_pixel, dtype=np.int64)
+    sizes = np.asarray(pix_sizes_for_sub_slim_index, dtype=np.int64)
+    indexes = np.asarray(pix_indexes_for_sub_slim_index, dtype=np.int64)
+
+    ny, nx = int(extent_shape[0]), int(extent_shape[1])
+    pix_pixels = int(pix_pixels)
+
+    iy = flat // nx
+    ix = flat % nx
+
+    valid = np.arange(indexes.shape[1], dtype=np.int64)[None, :] < sizes[:, None]
+    col = indexes[valid]
+    y_of_nnz = np.repeat(iy, sizes)
+
+    column_counts = np.bincount(col, minlength=pix_pixels).astype(np.int64)
+    column_ymin = np.full(pix_pixels, ny, dtype=np.int64)
+    np.minimum.at(column_ymin, col, y_of_nnz)
+
+    return _symmetric_restriction_from(
+        column_counts=column_counts,
+        column_ymin=column_ymin,
+        iy=iy,
+        ix=ix,
+        ny=ny,
+        nx=nx,
+        pix_pixels=pix_pixels,
+    )["work_fraction"]
 
 
 def nnz_per_source_column_from(mapper) -> float:
@@ -469,8 +852,54 @@ def direct_conv_work_from(nnz: int, extent_shape) -> float:
 FFT_ROUTE_SECONDS_PER_UNIT = 7.62e-10
 DIRECT_CONV_SECONDS_PER_UNIT = 1.77e-09
 
+# Time of the serial symmetric kernel (`curvature_direct_conv_symmetric`) relative to the full
+# `curvature_direct_conv`, per unit of its `work_fraction` f: `t_dc` is multiplied by
+# `min(1, kappa * f)` when the symmetric kernel runs. Fitted by least squares on
+# log(t_sym / t_full) to quiet-core single-thread timings of this library kernel on RAL (job
+# 411835, euclid-ral-compute-1, load < 1, A-C-C-A order, spreads <= 1.004; PyAutoPulse#62;
+# PyAutoArray#635), synthetic Aris-512 geometry (extent 341x341, circular mask, 91k masked
+# pixels, 3-NN weights, nnz 274,083), f from `symmetric_restriction_inputs_from` on that
+# geometry. These rows were measured with the columns in centroid-row order, the kernel's
+# order at the time; on this geometry of compact columns the `ymin` order it now uses gives
+# f = 0.414 / 0.408 / 0.403, so the ordering barely matters here:
+#
+#   S        f       t_full   t_sym   measured ratio   predicted (kappa f)
+#   1,428  0.416    22.04 s  12.19 s      0.553            0.548
+#   2,540  0.411    22.52 s  12.17 s      0.540            0.540
+#   5,712  0.404    23.88 s  12.59 s      0.527            0.532
+#
+# Measured / predicted lies in 0.99-1.01 (log-rms 0.008). kappa > 1 because the x-range splits
+# and the `S^2` mirror pass cost a little beyond the convolution work f counts; the ranked CSC
+# gather (half the non-zeros per column, branch-free) keeps the ratio flat in S. With it the
+# Aris 512 S = 1,459 point (measured FFT 28.3 s vs direct_conv 38.4 s on the full kernel) is
+# predicted direct_conv-faster (t_fft / t_dc 0.89 -> ~1.6 at f = 0.42).
+#
+# Check, not part of the fit: Aris's real 512x512 data with its step-8 Delaunay mesh (S = 1,459,
+# nnz 273,753, extent 341^2), laptop single-thread timings under falling load. Multiple imaging
+# feeds one source vertex from 2-4 lensed images, so the columns are tall (median span 90 of
+# 341 rows, against 15 on the synthetic geometry) and the ordering matters:
+#
+#   order          f      t_full   t_sym   measured speedup   predicted 1 / (kappa f)
+#   centroid row  0.587   40.4 s   30.5 s       1.32x              1.29x
+#   ymin          0.511   40.4 s   27.6 s       1.46x              1.48x
+#
+# Re-timed in ymin order on RAL (jobs 412490 / 412492, euclid-ral-compute-1, exclusive, load
+# <= 1, compile excluded), same data, step 8 / 6 / 4 meshes:
+#
+#   vertices   f      t_full   t_sym   measured speedup   predicted 1 / (kappa f)
+#   1,459    0.511   22.43 s  15.08 s       1.49x              1.48x
+#   2,577    0.504   22.83 s  14.95 s       1.53x              1.50x
+#   5,746    0.495   24.22 s  15.35 s       1.58x              1.53x
+#
+# The kernel wins while kappa f < 1, i.e. f < 0.76; the packaged gate
+# (`interferometer_direct_conv_symmetric_max_work_fraction: 0.7`) keeps a predicted gain of at
+# least 1.08x.
+DIRECT_CONV_SYMMETRIC_WORK_FACTOR = 1.32
 
-def curvature_route_seconds_from(source_pixels: int, nnz: int, extent_shape):
+
+def curvature_route_seconds_from(
+    source_pixels: int, nnz: int, extent_shape, work_fraction=None
+):
     """
     Predicted single-thread seconds of the FFT route and of the `direct_conv` route.
 
@@ -495,6 +924,13 @@ def curvature_route_seconds_from(source_pixels: int, nnz: int, extent_shape):
     autolens_profiling#226 extents (70^2-280^2, crossover ~60) and wrong on the Aris
     512x512 mask (model crossover ~166, measured between 106 and 188).
 
+    When the serial symmetric kernel (:func:`curvature_direct_conv_symmetric`) will run,
+    the caller passes its `work_fraction` and
+
+        t_dc *= min(1, DIRECT_CONV_SYMMETRIC_WORK_FACTOR · work_fraction)
+
+    `work_fraction=None` (the default) predicts the full kernel, unchanged.
+
     Returns
     -------
     `(t_fft, t_direct_conv)` in seconds on the calibration machine.
@@ -505,5 +941,10 @@ def curvature_route_seconds_from(source_pixels: int, nnz: int, extent_shape):
     t_direct_conv = DIRECT_CONV_SECONDS_PER_UNIT * direct_conv_work_from(
         nnz=nnz, extent_shape=extent_shape
     )
+
+    if work_fraction is not None:
+        t_direct_conv *= min(
+            1.0, DIRECT_CONV_SYMMETRIC_WORK_FACTOR * float(work_fraction)
+        )
 
     return t_fft, t_direct_conv
