@@ -73,6 +73,7 @@ def data_vector_via_psf_weighted_data_from(
     cols: np.ndarray,  # (nnz,) int32  source pixel index
     vals: np.ndarray,  # (nnz,) float64 mapping weights incl sub_fraction
     S: int,  # number of source pixels
+    xp=np,
 ) -> np.ndarray:
     r"""
     Returns the data vector `D` from the `psf_weighted_data` matrix (see `psf_weighted_data_from`), which encodes the
@@ -96,7 +97,16 @@ def data_vector_via_psf_weighted_data_from(
         The values of the sparse mapping matrix triplet representation, which map the image pixels to source pixels.
     S
         The number of source pixels.
+    xp
+        The array module: `np` scatter-adds with `np.bincount` (no JAX import, so this runs without
+        JAX installed); `jax.numpy` uses `jax.ops.segment_sum`. The triplets must be masked (see
+        `mapper_util.sparse_triplets_from(pix_sizes_for_sub=...)`) so every column is non-negative.
     """
+    if xp is np:
+        w = np.asarray(psf_weighted_data)[np.asarray(rows)]  # (nnz,)
+        contrib = np.asarray(vals) * w  # (nnz,)
+        return np.bincount(np.asarray(cols), weights=contrib, minlength=S)[:S]  # (S,)
+
     from jax.ops import segment_sum
 
     w = psf_weighted_data[rows]  # (nnz,)
@@ -284,7 +294,32 @@ def mapped_reconstructed_operated_data_via_sparse_operator_from(
     vals,  # (nnz,)
     fft_index_for_masked_pixel,
     data_shape: int,  # y_shape * x_shape
+    xp=np,
 ):
+    """
+    Returns the slim image `A s` of a reconstruction `s` mapped through a mapper's sparse mapping
+    operator `A`, whose COO triplets `(rows, cols, vals)` index rows on the rectangular FFT grid
+    (`Mapper.sparse_triplets_curvature`).
+
+    The scatter-add is performed on the rectangular grid of `data_shape` and the masked pixels are
+    then gathered via `fft_index_for_masked_pixel`. With `xp=np` it uses `np.bincount` and imports
+    no JAX, so it runs without JAX installed; with `xp=jax.numpy` it uses `jax.ops.segment_sum`.
+    """
+    num_segments = data_shape[0] * data_shape[1]
+
+    if xp is np:
+        reconstruction = np.asarray(reconstruction, dtype=np.float64)
+        rows = np.asarray(rows, dtype=np.int64)
+        cols = np.asarray(cols, dtype=np.int64)
+        vals = np.asarray(vals, dtype=np.float64)
+
+        contrib = vals * reconstruction[cols]  # (nnz,)
+        image_rect = np.bincount(rows, weights=contrib, minlength=num_segments)[
+            :num_segments
+        ]  # (M_rect,)
+
+        return image_rect[np.asarray(fft_index_for_masked_pixel)]  # (M_pix,)
+
     import jax.numpy as jnp
     from jax.ops import segment_sum
 
@@ -294,9 +329,7 @@ def mapped_reconstructed_operated_data_via_sparse_operator_from(
     vals = jnp.asarray(vals, dtype=jnp.float64)
 
     contrib = vals * reconstruction[cols]  # (nnz,)
-    image_rect = segment_sum(
-        contrib, rows, num_segments=data_shape[0] * data_shape[1]
-    )  # (M_rect,)
+    image_rect = segment_sum(contrib, rows, num_segments=num_segments)  # (M_rect,)
 
     image_slim = image_rect[fft_index_for_masked_pixel]  # (M_pix,)
     return image_slim

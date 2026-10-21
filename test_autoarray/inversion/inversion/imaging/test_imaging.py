@@ -1,3 +1,9 @@
+import importlib.util
+import os
+import subprocess
+import sys
+import textwrap
+
 import autoarray as aa
 
 from autoarray.inversion.inversion.imaging.inversion_imaging_util import (
@@ -299,3 +305,261 @@ def test__operated_mapping_matrix_list__psf_convolution_performed_once_per_linea
     inversion.mapped_reconstructed_data
 
     assert len(calls) == 1
+
+
+requires_jax = pytest.mark.skipif(
+    importlib.util.find_spec("jax") is None,
+    reason="the imaging sparse operator is built with jax",
+)
+
+
+def _mapper_with_invalid_slots_from(mapper):
+    """
+    Returns a copy of `mapper` whose stencil table carries every kind of entry
+    `mapping_matrix_from` drops, all with non-zero weights:
+
+    - an unused slot (slot >= pix_sizes) padded with index -1 (odd sub-pixels of a Delaunay row);
+    - a negative index inside a used slot (even sub-pixels, whose pix_size is bumped over a -1 slot);
+    - an extra unused slot holding a real source pixel index (every sub-pixel).
+
+    The dense mapping matrix is unchanged by these entries, so a correct sparse path must be too.
+    """
+    pix_indexes = np.asarray(mapper.pix_indexes_for_sub_slim_index)
+    pix_weights = np.asarray(mapper.pix_weights_for_sub_slim_index, dtype=float)
+    pix_sizes = np.asarray(mapper.pix_sizes_for_sub_slim_index).copy()
+
+    M_sub, P = pix_indexes.shape
+
+    unused = np.arange(P)[None, :] >= pix_sizes[:, None]
+
+    assert unused.any()
+    assert (pix_indexes[unused] == -1).all()
+
+    pix_weights = np.where(unused, 0.7, pix_weights)
+
+    bump = (np.arange(M_sub) % 2 == 0) & (pix_sizes < P)
+    pix_sizes[bump] += 1
+
+    pix_indexes = np.concatenate(
+        [pix_indexes, (np.arange(M_sub) % mapper.params)[:, None]], axis=1
+    )
+    pix_weights = np.concatenate([pix_weights, np.full((M_sub, 1), 0.9)], axis=1)
+
+    class MapperWithInvalidSlots(type(mapper)):
+        @property
+        def pix_indexes_for_sub_slim_index(self):
+            return pix_indexes
+
+        @property
+        def pix_weights_for_sub_slim_index(self):
+            return pix_weights
+
+        @property
+        def pix_sizes_for_sub_slim_index(self):
+            return pix_sizes
+
+    corrupted = MapperWithInvalidSlots(
+        interpolator=mapper.interpolator,
+        regularization=mapper.regularization,
+        image_plane_mesh_grid=mapper.image_plane_mesh_grid,
+    )
+
+    assert (corrupted.pix_indexes_for_sub_slim_index < 0).any()
+    assert np.allclose(corrupted.mapping_matrix, mapper.mapping_matrix)
+
+    return corrupted
+
+
+@requires_jax
+def test__sparse__mapper_with_invalid_stencil_slots__matches_mapping_inversion(
+    masked_imaging_7x7, delaunay_mapper_9_3x3
+):
+    mapper = _mapper_with_invalid_slots_from(delaunay_mapper_9_3x3)
+
+    settings = aa.Settings(use_positive_only_solver=False)
+
+    inversion_sparse = aa.Inversion(
+        dataset=masked_imaging_7x7.apply_sparse_operator(),
+        linear_obj_list=[mapper],
+        settings=settings,
+    )
+    inversion_mapping = aa.Inversion(
+        dataset=masked_imaging_7x7,
+        linear_obj_list=[mapper],
+        settings=settings,
+    )
+
+    assert isinstance(inversion_sparse, InversionImagingSparse)
+
+    assert np.asarray(inversion_sparse.data_vector) == pytest.approx(
+        np.asarray(inversion_mapping.data_vector), 1.0e-6
+    )
+    assert np.asarray(inversion_sparse.curvature_matrix) == pytest.approx(
+        np.asarray(inversion_mapping.curvature_matrix), 1.0e-6
+    )
+
+    reconstruction = np.asarray(inversion_sparse.reconstruction)
+
+    assert reconstruction == pytest.approx(
+        np.asarray(inversion_mapping.reconstruction), 1.0e-4
+    )
+
+    mapped = np.asarray(inversion_sparse.mapped_reconstructed_data_dict[mapper].array)
+
+    assert mapped == pytest.approx(
+        np.asarray(mapper.mapping_matrix) @ reconstruction, 1.0e-8
+    )
+    assert mapped == pytest.approx(
+        np.asarray(inversion_mapping.mapped_reconstructed_data_dict[mapper].array),
+        1.0e-4,
+    )
+    assert np.asarray(
+        inversion_sparse.mapped_reconstructed_operated_data_dict[mapper].array
+    ) == pytest.approx(
+        np.asarray(
+            inversion_mapping.mapped_reconstructed_operated_data_dict[mapper].array
+        ),
+        1.0e-4,
+    )
+
+
+@requires_jax
+def test__sparse__mapper_with_invalid_stencil_slots__matches_mapping_inversion__jax(
+    masked_imaging_7x7, delaunay_mapper_9_3x3
+):
+    import jax
+
+    jax.config.update("jax_enable_x64", True)
+
+    import jax.numpy as jnp
+
+    mapper = _mapper_with_invalid_slots_from(delaunay_mapper_9_3x3)
+    mapper_jax = type(mapper)(
+        interpolator=mapper.interpolator,
+        regularization=mapper.regularization,
+        image_plane_mesh_grid=mapper.image_plane_mesh_grid,
+        xp=jnp,
+    )
+
+    settings = aa.Settings(use_positive_only_solver=False)
+
+    inversion_sparse = aa.Inversion(
+        dataset=masked_imaging_7x7.apply_sparse_operator(),
+        linear_obj_list=[mapper_jax],
+        settings=settings,
+        xp=jnp,
+    )
+    inversion_mapping = aa.Inversion(
+        dataset=masked_imaging_7x7,
+        linear_obj_list=[mapper],
+        settings=settings,
+    )
+
+    assert isinstance(inversion_sparse, InversionImagingSparse)
+
+    assert np.asarray(inversion_sparse.data_vector) == pytest.approx(
+        np.asarray(inversion_mapping.data_vector), 1.0e-6
+    )
+    assert np.asarray(inversion_sparse.curvature_matrix) == pytest.approx(
+        np.asarray(inversion_mapping.curvature_matrix), 1.0e-6
+    )
+
+    reconstruction = np.asarray(inversion_sparse.reconstruction)
+
+    assert np.asarray(
+        inversion_sparse.mapped_reconstructed_data_dict[mapper_jax].array
+    ) == pytest.approx(np.asarray(mapper.mapping_matrix) @ reconstruction, 1.0e-8)
+
+
+def test__sparse_helpers__import_and_run_with_jax_blocked():
+    """
+    The mapper triplets and the two imaging scatter-add helpers (`data_vector_via_psf_weighted_data_from`,
+    `mapped_reconstructed_operated_data_via_sparse_operator_from`) must work in the `unittest-nojax`
+    leg. JAX is in `sys.modules` for the rest of a normal test session, so a subprocess hides `jax`,
+    `jaxlib` and `nufftax` from the import system and checks them against the dense mapping matrix
+    on a Delaunay mapper, whose unused stencil slots carry `-1` indices.
+
+    The `ImagingSparseOperator` itself (FFT precompute and curvature blocks) is JAX-only, so the full
+    `InversionImagingSparse` is not run here.
+    """
+    script = textwrap.dedent(
+        """
+        import importlib.machinery
+        import sys
+
+        _find_spec = importlib.machinery.PathFinder.find_spec.__func__
+
+
+        def _find_spec_blocking_jax(cls, name, path=None, target=None):
+            if name.split(".")[0] in ("jax", "jaxlib", "nufftax"):
+                return None
+            return _find_spec(cls, name, path, target)
+
+
+        importlib.machinery.PathFinder.find_spec = classmethod(_find_spec_blocking_jax)
+
+        # Guard the guard: if the block stopped working this test would pass vacuously.
+        try:
+            import jax
+        except ModuleNotFoundError:
+            pass
+        else:
+            raise AssertionError("jax was not blocked")
+
+        import numpy as np
+
+        import autoarray as aa
+        from autoarray import fixtures
+        from autoarray.inversion.inversion.imaging import inversion_imaging_util
+
+        mapper = fixtures.make_delaunay_mapper_9_3x3()
+        mask = fixtures.make_mask_2d_7x7()
+
+        assert (np.asarray(mapper.pix_indexes_for_sub_slim_index) < 0).any()
+
+        mapping_matrix = np.asarray(mapper.mapping_matrix)
+
+        rows, cols, vals = mapper.sparse_triplets_data
+
+        rng = np.random.default_rng(seed=1)
+        psf_weighted_data = rng.normal(size=mapping_matrix.shape[0])
+
+        data_vector = inversion_imaging_util.data_vector_via_psf_weighted_data_from(
+            psf_weighted_data=psf_weighted_data,
+            rows=rows,
+            cols=cols,
+            vals=vals,
+            S=mapper.params,
+            xp=np,
+        )
+
+        assert np.allclose(data_vector, mapping_matrix.T @ psf_weighted_data)
+
+        rows, cols, vals = mapper.sparse_triplets_curvature
+
+        reconstruction = rng.normal(size=mapper.params)
+
+        mapped = inversion_imaging_util.mapped_reconstructed_operated_data_via_sparse_operator_from(
+            reconstruction=reconstruction,
+            rows=rows,
+            cols=cols,
+            vals=vals,
+            fft_index_for_masked_pixel=mask.fft_index_for_masked_pixel,
+            data_shape=mask.shape_native,
+            xp=np,
+        )
+
+        assert np.allclose(mapped, mapping_matrix @ reconstruction)
+
+        assert not any(
+            name.split(".")[0] in ("jax", "jaxlib", "nufftax") for name in sys.modules
+        )
+        """
+    )
+
+    environment = dict(os.environ)
+    environment["PYAUTO_DISABLE_JAX"] = "1"
+
+    subprocess.run(
+        [sys.executable, "-c", script], check=True, env=environment, timeout=600
+    )
