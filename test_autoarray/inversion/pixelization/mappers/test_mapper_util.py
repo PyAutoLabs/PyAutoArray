@@ -914,3 +914,145 @@ def test__mapper_pixel_signals_from__delaunay_excludes_zero_weights():
                 mapper, adapt_data, exclude_zero_weight_mappings=True
             ),
         )
+
+
+def _invalid_slot_table():
+    """
+    A hand-built stencil table with every kind of entry `mapping_matrix_from` drops:
+
+    - row 0, slot 2: an unused slot (slot >= pix_sizes) padded with index -1 and a non-zero weight;
+    - row 1, slot 1: a negative index inside a used slot, with a non-zero weight;
+    - row 1, slot 2: an unused slot holding a real-looking index (1) and a non-zero weight.
+    """
+    pix_indexes = np.array([[0, 1, -1], [2, -1, 1], [1, 2, 0]])
+    pix_weights = np.array([[0.5, 0.5, 0.3], [0.6, 0.4, 0.9], [0.2, 0.3, 0.5]])
+    pix_sizes = np.array([2, 2, 3])
+    slim_index_for_sub = np.array([0, 1, 1])
+    fft_index_for_masked_pixel = np.array([3, 5])
+    sub_fraction_slim = np.array([1.0, 0.5])
+
+    return (
+        pix_indexes,
+        pix_weights,
+        pix_sizes,
+        slim_index_for_sub,
+        fft_index_for_masked_pixel,
+        sub_fraction_slim,
+    )
+
+
+def _assert_invalid_slots_zeroed(rows, cols, vals):
+    (
+        pix_indexes,
+        pix_weights,
+        pix_sizes,
+        slim_index_for_sub,
+        fft_index_for_masked_pixel,
+        sub_fraction_slim,
+    ) = _invalid_slot_table()
+
+    rows, cols, vals = np.asarray(rows), np.asarray(cols), np.asarray(vals)
+
+    assert (cols >= 0).all()
+    assert cols.tolist() == [0, 1, 0, 2, 0, 0, 1, 2, 0]
+    assert vals == pytest.approx(
+        np.array([0.5, 0.5, 0.0, 0.3, 0.0, 0.0, 0.1, 0.15, 0.25]), 1.0e-12
+    )
+
+    # The masked triplets scatter to exactly the dense mapping matrix.
+    mapping_matrix = aa.util.mapper.mapping_matrix_from(
+        pix_indexes_for_sub_slim_index=pix_indexes,
+        pix_size_for_sub_slim_index=pix_sizes,
+        pix_weights_for_sub_slim_index=pix_weights,
+        pixels=3,
+        total_mask_pixels=2,
+        slim_index_for_sub_slim_index=slim_index_for_sub,
+        sub_fraction=sub_fraction_slim,
+    )
+
+    dense = np.zeros((2, 3))
+    np.add.at(dense, (rows, cols), vals)
+
+    assert dense == pytest.approx(mapping_matrix, 1.0e-12)
+
+
+def test__sparse_triplets_from__pix_sizes_for_sub_zeroes_invalid_entries():
+    (
+        pix_indexes,
+        pix_weights,
+        pix_sizes,
+        slim_index_for_sub,
+        fft_index_for_masked_pixel,
+        sub_fraction_slim,
+    ) = _invalid_slot_table()
+
+    rows, cols, vals = aa.util.mapper.sparse_triplets_from(
+        pix_indexes_for_sub=pix_indexes,
+        pix_weights_for_sub=pix_weights,
+        slim_index_for_sub=slim_index_for_sub,
+        fft_index_for_masked_pixel=fft_index_for_masked_pixel,
+        sub_fraction_slim=sub_fraction_slim,
+        pix_sizes_for_sub=pix_sizes,
+    )
+
+    _assert_invalid_slots_zeroed(rows, cols, vals)
+
+    # Rectangular FFT-grid rows are unaffected by the masking.
+    rows_rect, cols_rect, vals_rect = aa.util.mapper.sparse_triplets_from(
+        pix_indexes_for_sub=pix_indexes,
+        pix_weights_for_sub=pix_weights,
+        slim_index_for_sub=slim_index_for_sub,
+        fft_index_for_masked_pixel=fft_index_for_masked_pixel,
+        sub_fraction_slim=sub_fraction_slim,
+        return_rows_slim=False,
+        pix_sizes_for_sub=pix_sizes,
+    )
+
+    assert rows_rect.tolist() == fft_index_for_masked_pixel[rows].tolist()
+    assert (cols_rect == cols).all()
+    assert (vals_rect == vals).all()
+
+    # Without `pix_sizes_for_sub` the raw stencil entries are returned unmasked.
+    _, cols_raw, vals_raw = aa.util.mapper.sparse_triplets_from(
+        pix_indexes_for_sub=pix_indexes,
+        pix_weights_for_sub=pix_weights,
+        slim_index_for_sub=slim_index_for_sub,
+        fft_index_for_masked_pixel=fft_index_for_masked_pixel,
+        sub_fraction_slim=sub_fraction_slim,
+    )
+
+    assert (cols_raw < 0).sum() == 2
+    assert vals_raw[5] == pytest.approx(0.45, 1.0e-12)
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("jax") is None,
+    reason="the JAX branch of sparse_triplets_from needs jax",
+)
+def test__sparse_triplets_from__pix_sizes_for_sub_zeroes_invalid_entries__jax():
+    import jax
+
+    jax.config.update("jax_enable_x64", True)
+
+    import jax.numpy as jnp
+
+    (
+        pix_indexes,
+        pix_weights,
+        pix_sizes,
+        slim_index_for_sub,
+        fft_index_for_masked_pixel,
+        sub_fraction_slim,
+    ) = _invalid_slot_table()
+
+    rows, cols, vals = aa.util.mapper.sparse_triplets_from(
+        pix_indexes_for_sub=pix_indexes,
+        pix_weights_for_sub=pix_weights,
+        slim_index_for_sub=slim_index_for_sub,
+        fft_index_for_masked_pixel=fft_index_for_masked_pixel,
+        sub_fraction_slim=sub_fraction_slim,
+        pix_sizes_for_sub=pix_sizes,
+        xp=jnp,
+    )
+
+    _assert_invalid_slots_zeroed(rows, cols, vals)
