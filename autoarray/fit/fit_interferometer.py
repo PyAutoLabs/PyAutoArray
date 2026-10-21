@@ -32,6 +32,9 @@ def dirty_model_image_natural_from(dataset, image) -> Array2D:
         The `Interferometer` dataset, which must carry a `sparse_operator`.
     image
         The model image `m` on the slim masked real-space grid of the dataset's `real_space_mask`.
+        If the dataset's `sparse_operator` carries a `primary_beam_slim` `P`, `m` is the true-sky
+        image and the result is `W~ P m / sum(w)`, the natural dirty image of the visibilities
+        `F P m`.
     """
     sparse_operator = getattr(dataset, "sparse_operator", None)
 
@@ -50,6 +53,11 @@ def dirty_model_image_natural_from(dataset, image) -> Array2D:
         sum_weights = float(np.sum(dataset.noise_map.array.real**-2.0))
 
     image = np.asarray(getattr(image, "array", image), dtype=np.float64)
+
+    primary_beam_slim = getattr(sparse_operator, "primary_beam_slim", None)
+
+    if primary_beam_slim is not None:
+        image = image * primary_beam_slim
 
     operated_image = sparse_operator.operated_matrix_slim_from(
         matrix_slim=image[:, None],

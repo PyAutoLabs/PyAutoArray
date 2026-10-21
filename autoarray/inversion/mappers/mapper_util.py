@@ -275,6 +275,7 @@ def sparse_triplets_from(
     sub_fraction_slim,  # (N_unmasked,)
     *,
     return_rows_slim: bool = True,
+    slim_weights=None,
     xp=np,
 ):
     """
@@ -297,6 +298,11 @@ def sparse_triplets_from(
         Mapping slim pixel -> rectangular FFT-grid pixel index (N_unmasked,)
     sub_fraction_slim
         Oversampling normalization per slim pixel (N_unmasked,)
+    slim_weights
+        Optional per-slim-pixel weights (N_unmasked,) multiplied into `vals`, i.e. the triplets
+        of `diag(w) A` rather than `A`. The interferometer sparse inversion passes the primary
+        beam here so the curvature and data vector use the beamed response `P A`. `None`
+        (default) applies no weighting.
     xp
         Backend module (np or jnp)
 
@@ -331,6 +337,9 @@ def sparse_triplets_from(
         slim_rows = slim_index_for_sub[sub_ids]  # int32
         vals = vals * sub_fraction_slim[slim_rows]  # float64
 
+        if slim_weights is not None:
+            vals = vals * np.asarray(slim_weights, dtype=np.float64)[slim_rows]
+
         if return_rows_slim:
             return slim_rows, cols, vals
 
@@ -357,6 +366,9 @@ def sparse_triplets_from(
 
     slim_rows = slim_index_for_sub[sub_ids]
     vals = vals * sub_fraction_slim[slim_rows]
+
+    if slim_weights is not None:
+        vals = vals * xp.asarray(slim_weights, dtype=xp.float64)[slim_rows]
 
     if return_rows_slim:
         return slim_rows, cols, vals

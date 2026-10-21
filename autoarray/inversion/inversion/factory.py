@@ -216,7 +216,11 @@ def inversion_interferometer_from(
     # need no mapper). `_use_interferometer_numba` returns False whenever a func-list is present.
     if dataset.sparse_operator is not None:
 
-        if _use_interferometer_numba(
+        # The numba `direct_conv` kernel uses the mapper weights as-is and cannot apply a primary
+        # beam, so a beamed dataset always takes the FFT sparse route.
+        if getattr(
+            dataset.sparse_operator, "primary_beam_slim", None
+        ) is None and _use_interferometer_numba(
             linear_obj_list=linear_obj_list,
             settings=settings,
             xp=xp,

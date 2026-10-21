@@ -107,7 +107,9 @@ class AbstractInversionInterferometer(AbstractInversion):
         A linear object may have a `operated_mapping_matrix_override` property, which bypasses the `mapping_matrix`
         computation and transformer operation and is directly placed in the `operated_mapping_matrix_list`. Because
         the override bypasses the transformer it must already be in the data's visibility space, with (complex)
-        shape [total_visibilities, params] (e.g. computed via an analytic Fourier transform).
+        shape [total_visibilities, params] (e.g. computed via an analytic Fourier transform). The dataset's primary
+        beam is not applied to the override either (the transformer applies it to every other linear object), so
+        an override for a dataset with a `primary_beam` must already include it; that is the caller's job.
         """
         operated_mapping_matrix_list = []
 
