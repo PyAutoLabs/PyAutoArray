@@ -28,10 +28,30 @@ by preconditioned conjugate gradients (PCG), with the Powell et al. (2021) preco
 `P = κ₀ MᵀM + λ H`, where `κ₀` is the kernel's zero-lag value (the diagonal of `W~`). `P` replaces
 `W~` by its peak, which keeps it sparse; it is factorised once per `λ` by a sparse LU.
 
-This phase lands the operator data term and the solver as library utilities, with parity tests
-against the dense sparse-path quantities. It does **not** wire them into fits and adds no
-`Settings` flag. Later phases (sparse Matérn precision, stochastic Lanczos log-determinant for the
-evidence, interior-point positivity, profiling and workspace examples) follow as their own tasks.
+Phase 1 landed the operator data term and the solver as library utilities, phase 2 the natively sparse
+Matérn precision (`aa.reg.MaternSparse`), and phase 3 the evidence log-determinants (below), each with
+parity tests against the dense sparse-path quantities. None of it is wired into fits and there is no
+`Settings` flag. Later phases (interior-point positivity, profiling and workspace examples) follow as
+their own tasks.
+
+The log evidence (phase 3)
+--------------------------
+The Bayesian evidence also needs `ln det(F + λ H)` and `ln det(λ H)`. `ln det H` is exact from a
+sparse factorisation (for `MaternSparse`, `log_det_regularization_matrix_term_from`). For the curvature
+term, `ln det(F + λ H) = ln det P + ln det(P⁻¹(F + λ H))`: `ln det P` is exact from the Powell
+preconditioner's sparse LU (`log_det_preconditioner_from`) and the second term is estimated by
+stochastic Lanczos quadrature in the `P` inner product (`log_det_curvature_reg_via_slq_from`), with
+probes `v ~ N(0, P⁻¹)` drawn from a sparse factor `R` of `H = RᵀR` and a fixed seed so the estimate is
+deterministic and smooth in the model parameters. `log_evidence_matrix_free_from` assembles the five
+evidence terms with the conventions of `FitInterferometer.log_evidence`.
+
+Tolerance: the estimate is only as good as the preconditioner. On the test case (a `6 x 6`
+`MaternSparse` rectangular mesh, 500 visibilities on long baselines, so the dirty beam is compact and
+`P⁻¹(F + H)` has eigenvalues in `~[0.6, 1.6]`) it lies within 0.5% of the dense `slogdet(F + H)` at
+the defaults (10 probes, 40 Lanczos steps; measured ~0.1-0.15% for the default seed), and the error
+falls as `1 / sqrt(n_probes)`. When `W~` is far from `κ₀ I` (few visibilities, fringes broader than
+the mask) the eigenvalues spread over orders of magnitude and the per-probe variance grows by an
+order of magnitude or more; the per-probe values returned give the Monte-Carlo error of the mean.
 
 The regularization matrix
 -------------------------
@@ -413,4 +433,301 @@ def reconstruction_via_pcg_from(
         rtol=rtol,
         maxiter=maxiter,
         M=preconditioner_operator,
+    )
+
+
+def log_det_preconditioner_from(factor) -> float:
+    """
+    Returns the exact `ln det P` of the Powell preconditioner from its sparse LU factorisation (the
+    second return value of `powell_preconditioner_from`).
+
+    SuperLU factorises `Pr P Pc = L U` with row and column permutations `Pr`, `Pc` and a unit-diagonal
+    `L`, so `|det P| = prod_i |U_ii|` (a permutation has determinant `+-1`). `P` is symmetric positive
+    definite, so `det P > 0` and
+
+        ln det P = sum_i ln |U_ii|.
+
+    Parameters
+    ----------
+    factor
+        The `scipy.sparse.linalg.SuperLU` factorisation of `P`.
+
+    Returns
+    -------
+    The log determinant `ln det P`.
+    """
+    return float(np.sum(np.log(np.abs(factor.U.diagonal()))))
+
+
+def log_det_curvature_reg_via_slq_from(
+    operator: MatrixFreeDataOperator,
+    regularization_matrix_sparse: scipy.sparse.spmatrix,
+    regularization_factor_sparse: scipy.sparse.spmatrix,
+    coefficient: float,
+    n_probes: int = 10,
+    n_steps: int = 40,
+    seed: int = 20221,
+):
+    """
+    Returns a stochastic Lanczos quadrature (SLQ, Ubaru, Chen & Saad 2017) estimate of
+    `ln det(F + λ H)`, the curvature-regularization log determinant of the Bayesian evidence, without
+    forming the dense `(S, S)` matrix `A = F + λ H`.
+
+    With the Powell preconditioner `P = κ₀ MᵀM + λ H` (`powell_preconditioner_from`),
+
+        ln det A = ln det P + ln det(P⁻¹ A),
+
+    where `ln det P` is exact from its sparse LU (`log_det_preconditioner_from`) and only the second
+    term, whose eigenvalues cluster near one because `P` captures the dominant part of `A`, is
+    estimated stochastically:
+
+    - **Probes** `v ~ N(0, P⁻¹)`. Writing `H = RᵀR` (`R` the `regularization_factor_sparse`),
+      `P = BᵀB` with `B = [√κ₀ M; √λ R]`, so `v = P⁻¹ Bᵀ g = P⁻¹(√κ₀ Mᵀ g₁ + √λ Rᵀ g₂)` with `g`
+      standard normal has covariance `P⁻¹ BᵀB P⁻¹ = P⁻¹`. Then `E[vᵀ P f(P⁻¹A) v] = tr f(P⁻¹A)`
+      for `f = ln`, i.e. `E = ln det(P⁻¹A)`.
+    - **Lanczos** on `P⁻¹A`, which is self-adjoint in the `P` inner product `<x, y>_P = xᵀ P y`.
+      Each probe starts from `q₁ = v / ‖v‖_P`; the recurrence keeps every basis vector
+      `P`-orthonormal with full reorthogonalisation (the Krylov space is small, `n_steps` vectors) and
+      stops early once the off-diagonal falls below `1e-10` of the diagonal (an invariant subspace).
+    - **Gauss quadrature** on the tridiagonal `T` with eigenpairs `(θ_k, u_k)`: the probe's value is
+      `‖v‖²_P Σ_k u_k[0]² ln θ_k`.
+
+    The random generator is `np.random.default_rng(seed)` with a fixed default seed, so the estimate
+    is deterministic and, because the same probes are reused, a smooth function of `λ` (and of any
+    other parameter) -- which a non-linear search over the evidence needs.
+
+    Accuracy: on the small rectangular-mesh test cases the estimate lies within 0.5% of the dense
+    `slogdet(F + H)` at the defaults (10 probes, 40 steps); the per-probe spread returned gives the
+    Monte-Carlo error of the mean (`std / sqrt(n_probes)`).
+
+    Parameters
+    ----------
+    operator
+        The data operator providing `F`, `M` and `κ₀`.
+    regularization_matrix_sparse
+        The regularization matrix `H` as a `scipy.sparse` matrix.
+    regularization_factor_sparse
+        A sparse factor `R` of exactly that matrix, `H = RᵀR`. For `MaternSparse`, whose
+        `regularization_matrix_sparse_from` returns `coefficient * R₀ᵀR₀` with
+        `R₀ = regularization_factor_sparse_from(...)`, this is `sqrt(regularization.coefficient) * R₀`.
+        It is checked against `H` on one random vector.
+    coefficient
+        The scalar `λ` multiplying `H`, as in `powell_preconditioner_from`; `1.0` for an autoarray
+        regularization matrix, which already carries its coefficient.
+    n_probes
+        The number of Gaussian probe vectors.
+    n_steps
+        The maximum number of Lanczos steps per probe (capped at `S`).
+    seed
+        The seed of the probe generator.
+
+    Returns
+    -------
+    The estimate of `ln det(F + λ H)` and the `(n_probes,)` array of per-probe estimates (each
+    `ln det P` plus that probe's quadrature value), whose mean is the estimate.
+    """
+    regularization_matrix_sparse = scipy.sparse.csr_matrix(regularization_matrix_sparse)
+    regularization_factor_sparse = scipy.sparse.csr_matrix(regularization_factor_sparse)
+
+    n = operator.params
+
+    rng = np.random.default_rng(seed)
+
+    check = rng.standard_normal(n)
+    h_check = regularization_matrix_sparse @ check
+    rtr_check = regularization_factor_sparse.T @ (regularization_factor_sparse @ check)
+
+    if np.linalg.norm(rtr_check - h_check) > 1.0e-8 * np.linalg.norm(h_check):
+        raise ValueError(
+            "regularization_factor_sparse R does not factor regularization_matrix_sparse H "
+            "(H != RᵀR); include the regularization coefficient in R (e.g. "
+            "sqrt(regularization.coefficient) * regularization.regularization_factor_sparse_from(mapper))."
+        )
+
+    preconditioner, factor = powell_preconditioner_from(
+        operator=operator,
+        regularization_matrix_sparse=regularization_matrix_sparse,
+        coefficient=coefficient,
+    )
+
+    log_det_preconditioner = log_det_preconditioner_from(factor)
+
+    def curvature_reg_matvec(v):
+        return operator.curvature_matvec(v) + coefficient * (
+            regularization_matrix_sparse @ v
+        )
+
+    n_steps = min(int(n_steps), n)
+
+    sqrt_kappa0 = np.sqrt(operator.kappa0)
+    sqrt_coefficient = np.sqrt(coefficient)
+
+    probe_values = np.zeros(n_probes)
+
+    for probe in range(n_probes):
+        g_image = rng.standard_normal(operator.mapping_matrix.shape[0])
+        g_regularization = rng.standard_normal(regularization_factor_sparse.shape[0])
+
+        v = factor.solve(
+            sqrt_kappa0 * (operator.mapping_matrix_transpose @ g_image)
+            + sqrt_coefficient * (regularization_factor_sparse.T @ g_regularization)
+        )
+
+        pv = preconditioner @ v
+        norm2 = float(v @ pv)
+        norm = np.sqrt(norm2)
+
+        q = v / norm
+        pq = pv / norm
+        q_prev = np.zeros(n)
+        beta_prev = 0.0
+
+        basis = []
+        basis_p = []
+        alpha = []
+        beta = []
+
+        for step in range(n_steps):
+            basis.append(q)
+            basis_p.append(pq)
+
+            aq = curvature_reg_matvec(q)
+            a = float(q @ aq)
+
+            r = factor.solve(aq) - a * q - beta_prev * q_prev
+
+            for q_j, pq_j in zip(basis, basis_p):
+                r -= float(pq_j @ r) * q_j
+
+            pr = preconditioner @ r
+            b = float(np.sqrt(max(float(r @ pr), 0.0)))
+
+            alpha.append(a)
+
+            if b < 1.0e-10 * abs(a) or step == n_steps - 1:
+                break
+
+            beta.append(b)
+
+            q_prev, q, pq, beta_prev = q, r / b, pr / b, b
+
+        k = len(alpha)
+
+        tridiagonal = (
+            np.diag(alpha) + np.diag(beta[: k - 1], 1) + np.diag(beta[: k - 1], -1)
+        )
+
+        theta, eigenvectors = np.linalg.eigh(tridiagonal)
+
+        probe_values[probe] = norm2 * float(
+            np.sum(eigenvectors[0] ** 2 * np.log(np.clip(theta, 1.0e-300, None)))
+        )
+
+    log_det_probes = log_det_preconditioner + probe_values
+
+    return float(np.mean(log_det_probes)), log_det_probes
+
+
+def log_evidence_matrix_free_from(
+    operator: MatrixFreeDataOperator,
+    regularization_matrix_sparse: scipy.sparse.spmatrix,
+    regularization_factor_sparse: scipy.sparse.spmatrix,
+    coefficient: float,
+    reconstruction: np.ndarray,
+    log_det_regularization: float,
+    data_term: float,
+    noise_normalization: float,
+    n_probes: int = 10,
+    n_steps: int = 40,
+    seed: int = 20221,
+    log_det_curvature_reg: float = None,
+) -> float:
+    """
+    Returns the log Bayesian evidence of a matrix-free interferometer inversion, assembling the same
+    five terms with the same conventions as `FitInterferometer.log_evidence` /
+    `fit_util.log_evidence_from`:
+
+        ln Z = -0.5 * [χ² + sᵀ(λH)s + ln det(F + λH) - ln det(λH) + Σ ln(2π σ²)]
+
+    with
+
+    - `χ² = dᵀN⁻¹d - 2 sᵀD + sᵀFs`, the dense path's `fast_chi_squared` (`data_term = dᵀN⁻¹d`,
+      `D = operator.data_vector`, `F s = operator.curvature_matvec(s)`);
+    - `sᵀ(λH)s` the regularization term;
+    - `ln det(F + λH)` by stochastic Lanczos quadrature (`log_det_curvature_reg_via_slq_from`), the
+      only approximate term (within 0.5% at the defaults on the test cases), unless
+      `log_det_curvature_reg` is given;
+    - `ln det(λH) = S ln λ + log_det_regularization`, exact (for `MaternSparse`,
+      `log_det_regularization_matrix_term_from`);
+    - the noise normalisation `Σ ln(2π σ²)`.
+
+    With `λ = coefficient = 1.0` and an autoarray regularization matrix (which already carries its
+    coefficient) every term is the dense sparse-path quantity.
+
+    Parameters
+    ----------
+    operator
+        The data operator providing `F` and `D`.
+    regularization_matrix_sparse
+        The regularization matrix `H` as a `scipy.sparse` matrix.
+    regularization_factor_sparse
+        A sparse factor `R` with `H = RᵀR` (see `log_det_curvature_reg_via_slq_from`).
+    coefficient
+        The scalar `λ` multiplying `H`; `1.0` for an autoarray regularization matrix.
+    reconstruction
+        The reconstruction `s` (e.g. from `reconstruction_via_pcg_from`).
+    log_det_regularization
+        The exact `ln det H` of `regularization_matrix_sparse` (without `λ`).
+    data_term
+        `dᵀN⁻¹d = Σ d_r²/σ_r² + Σ d_i²/σ_i²`, as cached on the dataset's `sparse_operator.data_term`
+        (or the dataset interface's own `data_term` for profile-subtracted visibilities).
+    noise_normalization
+        `Σ ln(2π σ²)` over the real and imaginary visibility noise, as cached on the dataset's
+        `sparse_operator.noise_normalization`.
+    n_probes, n_steps, seed
+        The SLQ settings (see `log_det_curvature_reg_via_slq_from`).
+    log_det_curvature_reg
+        An optional precomputed `ln det(F + λH)` used in place of the SLQ estimate (e.g. the dense
+        value, for parity checks of the other terms).
+
+    Returns
+    -------
+    The log evidence.
+    """
+    regularization_matrix_sparse = scipy.sparse.csr_matrix(regularization_matrix_sparse)
+
+    s = np.asarray(reconstruction, dtype=np.float64)
+
+    chi_squared = (
+        float(data_term)
+        - 2.0 * float(s @ operator.data_vector)
+        + float(s @ operator.curvature_matvec(s))
+    )
+
+    regularization_term = coefficient * float(s @ (regularization_matrix_sparse @ s))
+
+    if log_det_curvature_reg is None:
+        log_det_curvature_reg, _ = log_det_curvature_reg_via_slq_from(
+            operator=operator,
+            regularization_matrix_sparse=regularization_matrix_sparse,
+            regularization_factor_sparse=regularization_factor_sparse,
+            coefficient=coefficient,
+            n_probes=n_probes,
+            n_steps=n_steps,
+            seed=seed,
+        )
+
+    log_det_regularization_term = s.size * np.log(coefficient) + float(
+        log_det_regularization
+    )
+
+    return float(
+        -0.5
+        * (
+            chi_squared
+            + regularization_term
+            + log_det_curvature_reg
+            - log_det_regularization_term
+            + float(noise_normalization)
+        )
     )
