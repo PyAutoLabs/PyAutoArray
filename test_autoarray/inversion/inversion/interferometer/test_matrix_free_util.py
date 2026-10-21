@@ -46,7 +46,7 @@ def _dataset_sparse_from(seed=1, n_visibilities=40):
     return mask, dataset.apply_sparse_operator(use_jax=False)
 
 
-def _rectangular_mapper_from(mask, coefficient=1.0, shape=(6, 6)):
+def _rectangular_mapper_from(mask, coefficient=1.0, shape=(6, 6), regularization=None):
     grid = aa.Grid2D.from_mask(mask=mask, over_sample_size=2)
 
     mesh = aa.mesh.RectangularUniform(shape=shape)
@@ -61,7 +61,7 @@ def _rectangular_mapper_from(mask, coefficient=1.0, shape=(6, 6)):
 
     return aa.Mapper(
         interpolator=interpolator,
-        regularization=aa.reg.Constant(coefficient=coefficient),
+        regularization=regularization or aa.reg.Constant(coefficient=coefficient),
     )
 
 
@@ -178,6 +178,56 @@ def test__reconstruction_via_pcg__matches_unconstrained_sparse_path(coefficient)
     regularization_matrix = scipy.sparse.csr_matrix(
         np.asarray(inversion.regularization_matrix)
     )
+
+    reconstruction, info = mf.reconstruction_via_pcg_from(
+        operator=operator,
+        regularization_matrix_sparse=regularization_matrix,
+        coefficient=1.0,
+        rtol=1.0e-12,
+    )
+
+    reconstruction_sparse_path = np.asarray(inversion.reconstruction)
+
+    assert info == 0
+    assert np.max(
+        np.abs(reconstruction - reconstruction_sparse_path)
+    ) <= 1.0e-8 * np.max(np.abs(reconstruction_sparse_path))
+
+
+@pytest.mark.parametrize("coefficient", [1.0, 0.01])
+def test__reconstruction_via_pcg__matern_sparse_matrix__matches_unconstrained_sparse_path(
+    coefficient,
+):
+    """
+    Phase 2: the natively sparse Matérn precision of `MaternSparse` is the `H` of the matrix-free solve.
+    The dense-path inversion uses the same `MaternSparse` instance as the pixelization's regularization
+    (through its dense `regularization_matrix_from`), and since `H` already carries the coefficient the
+    matrix-free `λ` is 1.
+    """
+    mask, dataset_sparse = _dataset_sparse_from()
+
+    regularization = aa.reg.MaternSparse(coefficient=coefficient, scale=1.0)
+
+    mapper = _rectangular_mapper_from(mask=mask, regularization=regularization)
+    inversion = _inversion_from(dataset_sparse=dataset_sparse, mapper=mapper)
+
+    operator = mf.MatrixFreeDataOperator.from_inversion(
+        inversion=inversion, mapper=mapper
+    )
+
+    regularization_matrix = regularization.regularization_matrix_sparse_from(mapper)
+
+    assert np.array_equal(
+        regularization_matrix.toarray(), np.asarray(inversion.regularization_matrix)
+    )
+
+    preconditioner, _ = mf.powell_preconditioner_from(
+        operator=operator,
+        regularization_matrix_sparse=regularization_matrix,
+        coefficient=1.0,
+    )
+
+    assert scipy.sparse.issparse(preconditioner)
 
     reconstruction, info = mf.reconstruction_via_pcg_from(
         operator=operator,
