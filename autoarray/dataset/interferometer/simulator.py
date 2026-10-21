@@ -54,6 +54,8 @@ def _register_interferometer_pytrees() -> None:
             "over_sample_size_pixelization",
             "noise_covariance_matrix",
             "sparse_operator",
+            "primary_beam",
+            "primary_beam_slim",
         ),
     )
 
@@ -70,6 +72,7 @@ class SimulatorInterferometer:
         noise_if_add_noise_false=0.1,
         noise_seed=-1,
         use_jax: bool = False,
+        primary_beam=None,
     ):
         """
         Simulates observations of `Interferometer` data, including transforming a real-space image to
@@ -117,6 +120,11 @@ class SimulatorInterferometer:
             the simulator's internal complex-Gaussian noise generation routes
             through ``jax.random``. The returned ``Interferometer`` carries
             ``jax.Array`` visibilities. Mirror of ``SimulatorImaging.use_jax``.
+        primary_beam
+            The primary beam `P` of the antennas, an `Array2D` on the image's mask (or a native /
+            slim array). The simulated visibilities are then those of the apparent sky
+            `P * image`, and the returned `Interferometer` carries `P` so a fit models the true
+            sky. `None` (default) applies no primary beam.
         """
 
         self.uv_wavelengths = uv_wavelengths
@@ -126,6 +134,7 @@ class SimulatorInterferometer:
         self.noise_if_add_noise_false = noise_if_add_noise_false
         self.noise_seed = noise_seed
         self.use_jax = use_jax
+        self.primary_beam = primary_beam
 
     @property
     def _xp(self):
@@ -172,7 +181,7 @@ class SimulatorInterferometer:
 
         transformer = self.transformer_class(
             uv_wavelengths=self.uv_wavelengths, real_space_mask=image.mask
-        )
+        ).with_primary_beam(self.primary_beam)
 
         visibilities = transformer.visibilities_from(image=image, xp=xp)
 
@@ -204,4 +213,5 @@ class SimulatorInterferometer:
             uv_wavelengths=transformer.uv_wavelengths,
             real_space_mask=image.mask,
             transformer_class=self.transformer_class,
+            primary_beam=self.primary_beam,
         )
