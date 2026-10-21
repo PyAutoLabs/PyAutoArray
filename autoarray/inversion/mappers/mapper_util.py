@@ -276,6 +276,7 @@ def sparse_triplets_from(
     *,
     return_rows_slim: bool = True,
     slim_weights=None,
+    pix_sizes_for_sub=None,
     xp=np,
 ):
     """
@@ -303,6 +304,13 @@ def sparse_triplets_from(
         of `diag(w) A` rather than `A`. The interferometer sparse inversion passes the primary
         beam here so the curvature and data vector use the beamed response `P A`. `None`
         (default) applies no weighting.
+    pix_sizes_for_sub
+        Optional number of used stencil slots per sub-pixel (M_sub,), i.e. the mapper's
+        `pix_sizes_for_sub_slim_index`. When given, every entry that `mapping_matrix_from` drops
+        (slot index `>= pix_sizes_for_sub`, or a negative source pixel index such as the `-1`
+        padding Delaunay meshes write into unused slots) is given value 0 and column 0, so it
+        contributes nothing to any scatter-add and never indexes out of range. `None` (default)
+        returns the raw stencil entries unmasked.
     xp
         Backend module (np or jnp)
 
@@ -340,6 +348,13 @@ def sparse_triplets_from(
         if slim_weights is not None:
             vals = vals * np.asarray(slim_weights, dtype=np.float64)[slim_rows]
 
+        if pix_sizes_for_sub is not None:
+            slot = np.tile(np.arange(P, dtype=np.int32), M_sub)
+            pix_sizes = np.asarray(pix_sizes_for_sub, dtype=np.int32)
+            valid = (slot < np.repeat(pix_sizes, P)) & (cols >= 0)
+            vals = np.where(valid, vals, 0.0)
+            cols = np.where(valid, cols, 0).astype(np.int32)
+
         if return_rows_slim:
             return slim_rows, cols, vals
 
@@ -369,6 +384,13 @@ def sparse_triplets_from(
 
     if slim_weights is not None:
         vals = vals * xp.asarray(slim_weights, dtype=xp.float64)[slim_rows]
+
+    if pix_sizes_for_sub is not None:
+        slot = xp.tile(xp.arange(P, dtype=xp.int32), M_sub)
+        pix_sizes = xp.asarray(pix_sizes_for_sub, dtype=xp.int32)
+        valid = (slot < xp.repeat(pix_sizes, P)) & (cols >= 0)
+        vals = xp.where(valid, vals, 0.0)
+        cols = xp.where(valid, cols, 0)
 
     if return_rows_slim:
         return slim_rows, cols, vals

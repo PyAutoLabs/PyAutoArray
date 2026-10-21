@@ -180,9 +180,7 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
             beamed operator `P A` (used by the data vector); `False` gives those of `A` (used for the
             true-sky reconstructed image).
         """
-        xp = self._xp
-
-        rows, cols, vals = mapper_util.sparse_triplets_from(
+        return mapper_util.sparse_triplets_from(
             pix_indexes_for_sub=mapper.pix_indexes_for_sub_slim_index,
             pix_weights_for_sub=mapper.pix_weights_for_sub_slim_index,
             slim_index_for_sub=mapper.slim_index_for_sub_slim_index,
@@ -190,20 +188,9 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
             sub_fraction_slim=mapper.over_sampler.sub_fraction.array,
             return_rows_slim=True,
             slim_weights=self._primary_beam_slim if apply_primary_beam else None,
-            xp=xp,
+            pix_sizes_for_sub=mapper.pix_sizes_for_sub_slim_index,
+            xp=self._xp,
         )
-
-        pix_indexes = xp.asarray(mapper.pix_indexes_for_sub_slim_index)
-        M_sub, P = pix_indexes.shape
-
-        pix_sizes = xp.asarray(mapper.pix_sizes_for_sub_slim_index, dtype=xp.int32)
-        slot = xp.tile(xp.arange(P, dtype=xp.int32), M_sub)
-        valid = (slot < xp.repeat(pix_sizes, P)) & (cols >= 0)
-
-        vals = xp.where(valid, vals, 0.0)
-        cols = xp.where(valid, cols, 0)
-
-        return rows, cols, vals
 
     def _data_vector_mapper_from(self, mapper: Mapper, dirty_image) -> np.ndarray:
         """

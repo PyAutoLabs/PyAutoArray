@@ -407,6 +407,7 @@ class Mapper(LinearObj):
             slim_index_for_sub=self.slim_index_for_sub_slim_index,
             fft_index_for_masked_pixel=self.mask.fft_index_for_masked_pixel,
             sub_fraction_slim=self.over_sampler.sub_fraction.array,
+            pix_sizes_for_sub=self.pix_sizes_for_sub_slim_index,
             xp=self._xp,
         )
 
@@ -463,6 +464,7 @@ class Mapper(LinearObj):
             slim_index_for_sub=self.slim_index_for_sub_slim_index,
             fft_index_for_masked_pixel=self.mask.fft_index_for_masked_pixel,
             sub_fraction_slim=self.over_sampler.sub_fraction.array,
+            pix_sizes_for_sub=self.pix_sizes_for_sub_slim_index,
             xp=self._xp,
             return_rows_slim=False,
         )
