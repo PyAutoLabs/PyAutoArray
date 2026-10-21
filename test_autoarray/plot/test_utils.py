@@ -619,3 +619,35 @@ def test__plot_regions__single_polygon_region_is_labelled_once():
         )
     finally:
         plt.close(figure)
+
+
+def test__round_ticks__two_significant_figures_by_default():
+    from autoarray.plot.utils import _round_ticks
+
+    assert list(_round_ticks(np.array([-1.875, 0.0, 1.875]))) == [-1.9, 0.0, 1.9]
+
+
+def test__round_ticks__adds_significant_figures_until_ticks_are_distinct():
+    from autoarray.plot.utils import _round_ticks
+
+    # A few milli-arcseconds at 1.2": two (and three) significant figures collapse every tick to 1.2.
+    ticks = _round_ticks(np.array([1.19655, 1.2, 1.20345]))
+
+    assert len(np.unique(ticks)) == 3
+    assert list(ticks) == [1.197, 1.2, 1.203]
+
+
+def test__apply_extent__narrow_extent_far_from_zero_has_distinct_tick_labels():
+    import matplotlib.pyplot as plt
+
+    from autoarray.plot.utils import apply_extent
+
+    fig, ax = plt.subplots()
+    apply_extent(ax, [1.1954, 1.2046, -0.8046, -0.7954])
+
+    xlabels = [label.get_text() for label in ax.get_xticklabels()]
+    ylabels = [label.get_text() for label in ax.get_yticklabels()]
+    plt.close(fig)
+
+    assert len(set(xlabels)) == len(xlabels) == 3
+    assert len(set(ylabels)) == len(ylabels) == 3

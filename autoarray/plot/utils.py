@@ -1143,20 +1143,32 @@ def _inward_ticks(lo: float, hi: float, factor: float, n: int) -> np.ndarray:
     )
 
 
-def _round_ticks(values: np.ndarray, sig: int = 2) -> np.ndarray:
-    """Round *values* to *sig* significant figures.
+def _round_ticks(values: np.ndarray, sig: int = 2, max_sig: int = 10) -> np.ndarray:
+    """Round *values* to *sig* significant figures, adding figures until distinct ticks stay distinct.
+
+    Two significant figures suit an extent that spans its own magnitude (e.g. -2" to 2"), but on a
+    narrow extent far from zero (a few milli-arcseconds at 1.2") every tick rounds to the same value
+    and the labels collapse to one repeated number. The significant figures are therefore raised, up
+    to *max_sig*, until the rounded ticks are as distinct as the input ticks.
 
     After rounding, values smaller than 1e-10 of the overall tick scale are
     clamped to zero so that floating-point noise (e.g. 1e-16 centre ticks on
     symmetric extents) does not appear as scientific notation in labels.
     """
-    with np.errstate(divide="ignore", invalid="ignore"):
-        nonzero = np.where(values != 0, np.abs(values), 1.0)
-        mags = np.where(values != 0, 10 ** (sig - 1 - np.floor(np.log10(nonzero))), 1.0)
-    rounded = np.round(values * mags) / mags
-    scale = float(np.max(np.abs(rounded))) if len(rounded) > 0 else 1.0
-    if scale > 0:
-        rounded[np.abs(rounded) < scale * 1e-10] = 0.0
+    values = np.asarray(values, dtype=float)
+    n_distinct = len(np.unique(values))
+    for n_sig in range(sig, max(sig, max_sig) + 1):
+        with np.errstate(divide="ignore", invalid="ignore"):
+            nonzero = np.where(values != 0, np.abs(values), 1.0)
+            mags = np.where(
+                values != 0, 10 ** (n_sig - 1 - np.floor(np.log10(nonzero))), 1.0
+            )
+        rounded = np.round(values * mags) / mags
+        scale = float(np.max(np.abs(rounded))) if len(rounded) > 0 else 1.0
+        if scale > 0:
+            rounded[np.abs(rounded) < scale * 1e-10] = 0.0
+        if len(np.unique(rounded)) == n_distinct:
+            break
     return rounded
 
 
