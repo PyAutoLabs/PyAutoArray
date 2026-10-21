@@ -169,6 +169,16 @@ def inversion_imaging_from(
     )
 
 
+def primary_beam_is_trivial(primary_beam_slim) -> bool:
+    """
+    Whether a primary beam leaves the interferometer response unchanged: `None`, or every value exactly 1.
+    """
+    if primary_beam_slim is None:
+        return True
+
+    return bool(np.all(np.asarray(primary_beam_slim) == 1.0))
+
+
 def inversion_interferometer_from(
     dataset: Union[Interferometer, DatasetInterface],
     linear_obj_list: List[LinearObj],
@@ -216,7 +226,12 @@ def inversion_interferometer_from(
     # need no mapper). `_use_interferometer_numba` returns False whenever a func-list is present.
     if dataset.sparse_operator is not None:
 
-        if _use_interferometer_numba(
+        # The numba `direct_conv` kernel uses the mapper weights as-is and cannot apply a primary
+        # beam, so a dataset with a non-trivial one (any value other than 1) always takes the FFT
+        # sparse route. `P = ones` keeps the numba route, so it is bit-for-bit `P = None`.
+        if primary_beam_is_trivial(
+            getattr(dataset.sparse_operator, "primary_beam_slim", None)
+        ) and _use_interferometer_numba(
             linear_obj_list=linear_obj_list,
             settings=settings,
             xp=xp,

@@ -11,6 +11,7 @@ from autoarray.structures.visibilities import Visibilities
 
 from autoarray.structures.arrays import array_2d_util
 from autoarray.operators import transformer_util
+from autoarray.dataset.interferometer.primary_beam import primary_beam_slim_from
 
 # nufftax pulls in jax at import (~0.7s), which sessions that never touch an
 # interferometer transformer should not pay for — deferred to _load_nufftax(),
@@ -106,11 +107,68 @@ def nufftax_exception():
     )
 
 
-class TransformerDFT:
+class _PrimaryBeamMixin:
+    """
+    The primary-beam handling shared by `TransformerDFT` and `TransformerNUFFT`.
+
+    The primary beam `P` is stored on the slim (unmasked) real-space grid as
+    `primary_beam_slim`. When set, the forward transforms `visibilities_from` and
+    `transform_mapping_matrix` multiply their input by `P` on the slim grid before the
+    Fourier transform, so they compute `F P i` (the visibilities of the apparent sky) from the
+    true-sky image `i`. The adjoint `image_from` is left un-beamed: the dirty image, dirty
+    beam and the w-tilde precision operator are the same with and without `P`.
+    """
+
+    primary_beam_slim: Optional[np.ndarray] = None
+
+    def _primary_beam_slim_set(self, primary_beam):
+        self.primary_beam_slim = (
+            None
+            if primary_beam is None
+            else primary_beam_slim_from(
+                primary_beam=primary_beam, mask=self.real_space_mask
+            )
+        )
+
+    def with_primary_beam(self, primary_beam):
+        """
+        Returns a shallow copy of this transformer whose forward transforms apply the primary
+        beam `primary_beam` (an `Array2D` on the real-space mask, or a native / slim array), or
+        none if it is `None`.
+
+        This transformer is not modified, so a transformer shared between datasets (e.g. one
+        returned by a `transformer_class` lambda) is safe. Returns `self` when the primary beam
+        is `None` and this transformer has none, so the un-beamed path is unchanged.
+        """
+        if primary_beam is None and self.primary_beam_slim is None:
+            return self
+
+        transformer = copy.copy(self)
+        transformer._primary_beam_slim_set(primary_beam=primary_beam)
+
+        return transformer
+
+    def _image_slim_beamed_from(self, image_slim, xp=np):
+        """Returns `P * image_slim`, or `image_slim` unchanged when there is no primary beam."""
+        if self.primary_beam_slim is None:
+            return image_slim
+
+        return image_slim * xp.asarray(self.primary_beam_slim)
+
+    def _mapping_matrix_beamed_from(self, mapping_matrix, xp=np):
+        """Returns `diag(P) @ mapping_matrix`, or `mapping_matrix` unchanged when there is no primary beam."""
+        if self.primary_beam_slim is None:
+            return mapping_matrix
+
+        return mapping_matrix * xp.asarray(self.primary_beam_slim)[:, None]
+
+
+class TransformerDFT(_PrimaryBeamMixin):
     def __init__(
         self,
         uv_wavelengths: np.ndarray,
         real_space_mask: Mask2D,
+        primary_beam=None,
     ):
         """
         A direct Fourier transform (DFT) operator for radio interferometric imaging.
@@ -128,6 +186,11 @@ class TransformerDFT:
             The (u, v) coordinates in wavelengths of the measured visibilities.
         real_space_mask
             The real-space mask that defines the image grid and which pixels are valid.
+        primary_beam
+            The primary beam `P` of the antennas, an `Array2D` on `real_space_mask` (or a native /
+            slim array). When set, `visibilities_from` and `transform_mapping_matrix` multiply their
+            input by `P` before the transform; `image_from` stays the un-beamed adjoint. `None`
+            (default) applies no primary beam.
 
         Attributes
         ----------
@@ -153,6 +216,8 @@ class TransformerDFT:
         self.total_visibilities = uv_wavelengths.shape[0]
         self.total_image_pixels = self.real_space_mask.pixels_in_mask
 
+        self._primary_beam_slim_set(primary_beam=primary_beam)
+
     def visibilities_from(self, image: Array2D, xp=np) -> Visibilities:
         """
         Computes the visibilities from a real-space image using the direct Fourier transform (DFT).
@@ -166,13 +231,16 @@ class TransformerDFT:
             The real-space image to be transformed to the uv-plane. Must be defined on the
             same grid and mask as this transformer's `real_space_mask`.
 
+        If the transformer has a `primary_beam_slim` the image is multiplied by it on the slim
+        grid first, so the visibilities are those of the apparent sky `P * image`.
+
         Returns
         -------
         The complex visibilities resulting from the Fourier transform of the input image.
         """
 
         visibilities = transformer_util.visibilities_from(
-            image_1d=image.slim.array,
+            image_1d=self._image_slim_beamed_from(image.slim.array, xp=xp),
             grid_radians=self.grid.array,
             uv_wavelengths=self.uv_wavelengths,
             xp=xp,
@@ -187,6 +255,10 @@ class TransformerDFT:
         This is not a true inverse Fourier transform, but rather the adjoint operation, which maps
         complex visibilities back into image space. This is typically used as the first step
         in inverse imaging algorithms like CLEAN or regularized reconstruction.
+
+        The primary beam is deliberately not applied: this is the adjoint of the un-beamed
+        transform, so the dirty image, dirty beam and the w-tilde quantities built from it do
+        not depend on `primary_beam_slim`.
 
         Parameters
         ----------
@@ -229,18 +301,19 @@ class TransformerDFT:
         Returns
         -------
         A 2D complex-valued array of shape (n_visibilities, n_source_pixels) that maps source-plane basis
-        functions directly to the visibilities.
+        functions directly to the visibilities. If the transformer has a `primary_beam_slim` every
+        column is multiplied by it first, giving `F P M`.
         """
 
         return transformer_util.transformed_mapping_matrix_from(
-            mapping_matrix=mapping_matrix,
+            mapping_matrix=self._mapping_matrix_beamed_from(mapping_matrix, xp=xp),
             grid_radians=self.grid.array,
             uv_wavelengths=self.uv_wavelengths,
             xp=xp,
         )
 
 
-class TransformerNUFFT:
+class TransformerNUFFT(_PrimaryBeamMixin):
     def __init__(
         self,
         uv_wavelengths: np.ndarray,
@@ -248,6 +321,7 @@ class TransformerNUFFT:
         eps: float = 1e-12,
         chunk_size: Optional[int] = None,
         xp=np,
+        primary_beam=None,
         **kwargs,
     ):
         """
@@ -299,6 +373,11 @@ class TransformerNUFFT:
             Accepted for signature compatibility with the legacy class; not
             stored. The active backend is selected per-call via the `xp`
             argument to `visibilities_from` / `image_from`.
+        primary_beam
+            The primary beam `P` of the antennas, an `Array2D` on `real_space_mask` (or a native /
+            slim array). When set, `visibilities_from` and `transform_mapping_matrix` multiply their
+            input by `P` on the slim grid before the scatter to the native grid; `image_from` stays
+            the un-beamed adjoint. `None` (default) applies no primary beam.
 
         Attributes
         ----------
@@ -344,6 +423,8 @@ class TransformerNUFFT:
 
         self.total_visibilities = uv_wavelengths.shape[0]
         self.total_image_pixels = real_space_mask.pixels_in_mask
+
+        self._primary_beam_slim_set(primary_beam=primary_beam)
 
     def _forward_native(self, image_native_2d, xp=np):
         """Run nufft2d2 on a 2D native-shape image array, returning visibilities.
@@ -412,16 +493,24 @@ class TransformerNUFFT:
         before being wrapped in `Visibilities`. For JAX callers (`xp=jnp`)
         the result stays as a `jax.Array` so it can flow through `jax.jit`
         / `jax.grad` / `jax.vmap` without device round-trips.
+
+        If the transformer has a `primary_beam_slim` the image is multiplied by it on the
+        slim grid before the scatter to the native grid, so the visibilities are those of
+        `P * image`.
         """
         if xp.__name__.startswith("jax"):
             import jax.numpy as jnp
 
             image_native = jnp.zeros(image.mask.shape, dtype=image.dtype)
             image_native = image_native.at[image.mask.slim_to_native_tuple].set(
-                image.array
+                self._image_slim_beamed_from(image.array, xp=xp)
             )
-        else:
+        elif self.primary_beam_slim is None:
             image_native = image.native.array
+        else:
+            image_slim = self._image_slim_beamed_from(image.slim.array, xp=np)
+            image_native = np.zeros(image.mask.shape, dtype=image_slim.dtype)
+            image_native[image.mask.slim_to_native_tuple] = image_slim
 
         return Visibilities(visibilities=self._forward_native(image_native, xp=xp))
 
@@ -442,6 +531,10 @@ class TransformerNUFFT:
         `TransformerDFT.image_from` exactly, which is what makes
         `Interferometer.apply_sparse_operator` scale-consistent across both
         transformers.
+
+        The primary beam is deliberately not applied: this is the adjoint of the
+        un-beamed transform, so the dirty image, dirty beam and the w-tilde quantities
+        built from it do not depend on `primary_beam_slim`.
         """
         _load_nufftax()
 
@@ -515,8 +608,13 @@ class TransformerNUFFT:
         per-column Python loop that, under ``jax.jit``, would unroll into
         ``n_src`` separate NUFFT invocations and blow up the JIT graph
         for pixelization-heavy fits (notably double-source-plane).
+
+        If the transformer has a `primary_beam_slim` every column is multiplied by it on
+        the slim grid before the scatter, giving `F P M`.
         """
         _load_nufftax()
+
+        mapping_matrix = self._mapping_matrix_beamed_from(mapping_matrix, xp=xp)
 
         n_src = mapping_matrix.shape[1]
         rows, cols = self.real_space_mask.slim_to_native_tuple

@@ -1250,6 +1250,7 @@ class InterferometerSparseOperator:
     w_dtype: np.dtype
     data_term: Optional[float] = None
     noise_normalization: Optional[float] = None
+    primary_beam_slim: Optional[np.ndarray] = None
     """
     Cached FFT operator state for fast interferometer curvature-matrix assembly.
 
@@ -1327,6 +1328,12 @@ class InterferometerSparseOperator:
         visibilities, equal to `fit_util.noise_normalization_complex_from(noise_map)`. When
         set, `FitInterferometer.noise_normalization` reads it instead of reducing over the
         noise-map every likelihood call. `None` falls back to the array reduction.
+    primary_beam_slim
+        The primary beam `P` of the dataset on the slim masked real-space grid, or `None`. The
+        operator itself (`W~`, the dirty image and both scalars) is independent of `P`; the
+        sparse inversion reads it to form the beamed response `A' = P A`, giving the curvature
+        matrix `A^T P W~ P A` and data vector `A^T P d~`, and `sparse_profile_terms_from`
+        applies it to profile images.
 
     Cached properties
     -----------------
@@ -1401,6 +1408,7 @@ class InterferometerSparseOperator:
         batch_size: int = 128,
         data_term: Optional[float] = None,
         noise_normalization: Optional[float] = None,
+        primary_beam_slim: Optional[np.ndarray] = None,
     ):
         """
         Construct an `InterferometerSparseOperator` from a curvature-preload array.
@@ -1429,6 +1437,9 @@ class InterferometerSparseOperator:
             Number of source-pixel columns processed per block when assembling
             the curvature matrix. Higher values typically improve GPU efficiency
             but increase intermediate memory usage.
+        primary_beam_slim
+            The dataset's primary beam on the slim masked grid, or `None` (see the class
+            docstring). Stored as a float64 NumPy array.
 
         Returns
         -------
@@ -1468,6 +1479,11 @@ class InterferometerSparseOperator:
             noise_normalization=(
                 None if noise_normalization is None else float(noise_normalization)
             ),
+            primary_beam_slim=(
+                None
+                if primary_beam_slim is None
+                else np.asarray(primary_beam_slim, dtype=np.float64)
+            ),
         )
 
     @classmethod
@@ -1477,6 +1493,7 @@ class InterferometerSparseOperator:
         *,
         real_space_mask,
         batch_size: int = 128,
+        primary_beam_slim: Optional[np.ndarray] = None,
     ) -> "InterferometerSparseOperator":
         """
         Construct an `InterferometerSparseOperator` from the per-visibility sums of a
@@ -1498,6 +1515,9 @@ class InterferometerSparseOperator:
         batch_size
             Number of source-pixel columns processed per block when assembling the curvature
             matrix (see `from_nufft_precision_operator`).
+        primary_beam_slim
+            The dataset's primary beam on the slim masked grid, or `None`. The `SparseTerms`
+            are independent of it, so the same terms serve any primary beam.
         """
         from autoarray.structures.arrays.uniform_2d import Array2D
 
@@ -1511,6 +1531,7 @@ class InterferometerSparseOperator:
             batch_size=batch_size,
             data_term=terms.data_term,
             noise_normalization=terms.noise_normalization,
+            primary_beam_slim=primary_beam_slim,
         )
 
     @staticmethod
@@ -2136,6 +2157,10 @@ def sparse_profile_terms_from(
     The data term is a difference of large numbers at high signal-to-noise (`data_term >> chi^2`); in float64
     this is accurate to ~1e-15 relative to `data_term`, ample for likelihood comparisons.
 
+    If the operator carries a `primary_beam_slim` `P`, the visibilities of `i_p` are `F P i_p`, so `i_p` is
+    replaced by `P i_p` throughout: `sparse_dirty_image = d~ - W~ P i_p` and
+    `data_term - 2 (P i_p)^T d~ + (P i_p)^T W~ (P i_p)`, and the returned `operated_image` is `W~ P i_p`.
+
     Every operation is an `xp` array operation, so under `jax.jit` the returned scalar is traced with `i_p`.
 
     Parameters
@@ -2161,6 +2186,11 @@ def sparse_profile_terms_from(
         `data_term - 2 i_p^T d~ + i_p^T W~ i_p`, or `None` if the operator carries no `data_term`.
     """
     image = getattr(image, "array", image)
+
+    primary_beam_slim = getattr(sparse_operator, "primary_beam_slim", None)
+
+    if primary_beam_slim is not None:
+        image = image * xp.asarray(primary_beam_slim)
 
     operated_image = sparse_operator.operated_matrix_slim_from(
         matrix_slim=image[:, None],

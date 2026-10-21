@@ -1,4 +1,6 @@
+import dataclasses
 import logging
+import warnings
 import numpy as np
 from typing import Optional, Tuple
 
@@ -25,6 +27,7 @@ except ImportError:
 
 from autoarray.dataset.abstract.dataset import AbstractDataset
 from autoarray.dataset.grids import GridsDataset
+from autoarray.dataset.interferometer.primary_beam import primary_beam_slim_from
 from autoarray.inversion.inversion.interferometer.inversion_interferometer_util import (
     InterferometerSparseOperator,
 )
@@ -54,6 +57,7 @@ class Interferometer(AbstractDataset):
         sparse_operator: Optional[InterferometerSparseOperator] = None,
         raise_error_dft_visibilities_limit: bool = True,
         sparse_terms: Optional["inversion_interferometer_util.SparseTerms"] = None,
+        primary_beam=None,
     ):
         """
         An interferometer dataset, containing the visibilities data, noise-map, real-space msk, Fourier transformer and
@@ -112,6 +116,17 @@ class Interferometer(AbstractDataset):
             `from_stream`, `from_sparse_terms` and `apply_sparse_operator_from_chunks`). It
             carries the naturally weighted dirty image and beam and the provenance of the
             accumulation.
+        primary_beam
+            The primary beam `P` of the antennas, an `Array2D` on `real_space_mask` (or a plain
+            array of its native or slim shape; see `aa.primary_beam_gaussian_from`). The
+            visibilities are then modelled as those of the apparent sky `P x I`, so every light
+            profile, linear light profile and pixelization reconstructs the true sky `I`: the
+            transformer applies `P` in its forward transforms and the sparse operator carries it
+            (as `primary_beam_slim`) for the sparse (w-tilde) inversion. The dirty image, dirty
+            beam and w-tilde precision operator do not depend on `P`. A warning is emitted if any
+            unmasked value of `P` is 0 (source pixels seen only there are unconstrained by the
+            data and set by the regularization); no floor is applied. `None` (default) applies no
+            primary beam.
 
         Array-free datasets
         -------------------
@@ -133,10 +148,33 @@ class Interferometer(AbstractDataset):
 
         self.uv_wavelengths = uv_wavelengths
 
+        self.primary_beam = primary_beam
+        self.primary_beam_slim = (
+            None
+            if primary_beam is None
+            else primary_beam_slim_from(primary_beam=primary_beam, mask=real_space_mask)
+        )
+
+        if self.primary_beam_slim is not None and np.any(self.primary_beam_slim == 0.0):
+            warnings.warn(
+                f"The primary beam of this Interferometer is 0 at "
+                f"{int(np.sum(self.primary_beam_slim == 0.0))} unmasked real-space pixel(s). The "
+                f"data carry no information about the sky there, so the curvature matrix of an "
+                f"inversion is rank-deficient for any source pixel seen only through those pixels "
+                f"(its value is then set by the regularization). No floor is applied; consider "
+                f"masking the pixels where the primary beam is 0."
+            )
+
         if uv_wavelengths is not None and transformer_class is not None:
             self.transformer = transformer_class(
                 uv_wavelengths=uv_wavelengths,
                 real_space_mask=real_space_mask,
+            )
+            # The dataset is the source of truth for the primary beam: the transformer is
+            # replaced by a (shallow) copy carrying it, so a transformer shared through a
+            # `transformer_class` lambda is never modified.
+            self.transformer = self.transformer.with_primary_beam(
+                self.primary_beam_slim
             )
         else:
             self.transformer = None
@@ -149,6 +187,12 @@ class Interferometer(AbstractDataset):
 
         self.sparse_operator = sparse_operator
         self.sparse_terms = sparse_terms
+
+        if sparse_operator is not None and self.primary_beam_slim is not None:
+            if getattr(sparse_operator, "primary_beam_slim", None) is None:
+                self.sparse_operator = dataclasses.replace(
+                    sparse_operator, primary_beam_slim=self.primary_beam_slim
+                )
 
         if raise_error_dft_visibilities_limit and self.uv_wavelengths is not None:
             if (
@@ -178,6 +222,8 @@ class Interferometer(AbstractDataset):
         uv_wavelengths_hdu=0,
         transformer_class=TransformerNUFFT,
         raise_error_dft_visibilities_limit: bool = True,
+        primary_beam_path=None,
+        primary_beam_hdu=0,
     ):
         """
         Load an interferometer dataset from multiple .fits files.
@@ -220,6 +266,12 @@ class Interferometer(AbstractDataset):
             `TransformerDFT` and the dataset has more than 10,000 visibilities. Set to False to
             opt into the slow DFT path at ALMA-scale (e.g. when profiling the JAX-traceable
             DFT path before a JIT-friendly NUFFT is available).
+        primary_beam_path
+            The path to a .fits file containing the primary beam image, of the native shape of
+            `real_space_mask` (see `Interferometer`'s `primary_beam`). `None` (default) loads no
+            primary beam.
+        primary_beam_hdu
+            The HDU index in the primary beam .fits file from which it is loaded.
 
         Returns
         -------
@@ -237,6 +289,13 @@ class Interferometer(AbstractDataset):
             file_path=uv_wavelengths_path, hdu=uv_wavelengths_hdu
         )
 
+        primary_beam = None
+
+        if primary_beam_path is not None:
+            primary_beam = ndarray_via_fits_from(
+                file_path=primary_beam_path, hdu=primary_beam_hdu
+            )
+
         return Interferometer(
             real_space_mask=real_space_mask,
             data=visibilities,
@@ -244,6 +303,7 @@ class Interferometer(AbstractDataset):
             uv_wavelengths=uv_wavelengths,
             transformer_class=transformer_class,
             raise_error_dft_visibilities_limit=raise_error_dft_visibilities_limit,
+            primary_beam=primary_beam,
         )
 
     @classmethod
@@ -253,6 +313,7 @@ class Interferometer(AbstractDataset):
         real_space_mask: Mask2D,
         *,
         batch_size: int = 128,
+        primary_beam=None,
     ) -> "Interferometer":
         """
         Build an array-free `Interferometer` from an accumulated `SparseTerms` record.
@@ -276,6 +337,10 @@ class Interferometer(AbstractDataset):
             The real-space `Mask2D` the terms were accumulated on.
         batch_size
             The number of source-pixel columns processed per batch by the sparse operator.
+        primary_beam
+            The primary beam on `real_space_mask` (see `Interferometer`). The `SparseTerms` do
+            not depend on it, so the same terms serve any primary beam; it is carried on the
+            sparse operator as `primary_beam_slim`.
         """
         shape_native = getattr(terms, "shape_native", None)
 
@@ -310,6 +375,13 @@ class Interferometer(AbstractDataset):
             terms,
             real_space_mask=real_space_mask,
             batch_size=batch_size,
+            primary_beam_slim=(
+                None
+                if primary_beam is None
+                else primary_beam_slim_from(
+                    primary_beam=primary_beam, mask=real_space_mask
+                )
+            ),
         )
 
         return cls(
@@ -320,6 +392,7 @@ class Interferometer(AbstractDataset):
             transformer_class=None,
             sparse_operator=sparse_operator,
             sparse_terms=terms,
+            primary_beam=primary_beam,
         )
 
     @classmethod
@@ -340,6 +413,7 @@ class Interferometer(AbstractDataset):
         pool_noise_map: bool = False,
         oversample: Optional[int] = None,
         oversample_pad: float = 0.25,
+        primary_beam=None,
     ) -> "Interferometer":
         """
         Build an array-free `Interferometer` by accumulating a stream of visibility chunks,
@@ -393,6 +467,9 @@ class Interferometer(AbstractDataset):
             `sparse_terms` (`precision_operator_fine`, `dirty_image_fine`) and need the NUFFT
             transformer. Memory grows as `q^2` (~5-6 GB peak at 400 pixels, `q = 8`); see
             `sparse_terms_from_chunks`, "Fine grids".
+        primary_beam
+            The primary beam on `real_space_mask` (see `Interferometer`), passed to
+            `from_sparse_terms`. The accumulated terms do not depend on it.
 
         Raises
         ------
@@ -420,7 +497,10 @@ class Interferometer(AbstractDataset):
         )
 
         return cls.from_sparse_terms(
-            terms, real_space_mask=real_space_mask, batch_size=batch_size
+            terms,
+            real_space_mask=real_space_mask,
+            batch_size=batch_size,
+            primary_beam=primary_beam,
         )
 
     @property
@@ -606,6 +686,7 @@ class Interferometer(AbstractDataset):
                 ),
                 uv_wavelengths=self.uv_wavelengths,
                 transformer_class=lambda uv_wavelengths, real_space_mask: self.transformer,
+                primary_beam=self.primary_beam,
             )
 
             pooling_record.log()
@@ -694,6 +775,7 @@ class Interferometer(AbstractDataset):
             batch_size=batch_size,
             data_term=data_term,
             noise_normalization=noise_normalization,
+            primary_beam_slim=self.primary_beam_slim,
         )
 
         return Interferometer(
@@ -703,6 +785,7 @@ class Interferometer(AbstractDataset):
             uv_wavelengths=self.uv_wavelengths,
             transformer_class=lambda uv_wavelengths, real_space_mask: self.transformer,
             sparse_operator=sparse_operator,
+            primary_beam=self.primary_beam,
         )
 
     def apply_sparse_operator_from_chunks(
@@ -860,6 +943,7 @@ class Interferometer(AbstractDataset):
             terms,
             real_space_mask=self.real_space_mask,
             batch_size=batch_size,
+            primary_beam_slim=self.primary_beam_slim,
         )
 
         return Interferometer(
@@ -870,6 +954,7 @@ class Interferometer(AbstractDataset):
             transformer_class=lambda uv_wavelengths, real_space_mask: self.transformer,
             sparse_operator=sparse_operator,
             sparse_terms=terms,
+            primary_beam=self.primary_beam,
         )
 
     def psf_precision_operator_from(

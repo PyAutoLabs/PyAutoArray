@@ -141,7 +141,9 @@ class LinearObj:
 
         - `Interferometer`: a complex matrix of dimensions (total_visibilities, total_parameters), e.g. the
           visibilities of each linear object's parameter computed via an analytic Fourier transform. The
-          transformer (NUFFT / DFT) is not applied to the override.
+          transformer (NUFFT / DFT) is not applied to the override, and neither is the dataset's primary
+          beam: if the dataset has a `primary_beam`, applying it (computing the visibilities of `P` times
+          the linear object's image) is the caller's job.
 
         Returns
         -------

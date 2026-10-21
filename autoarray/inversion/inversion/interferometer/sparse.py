@@ -100,6 +100,10 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
         the inversion's data differs from them (e.g. a `DatasetInterface` whose data has the visibilities
         of ordinary light profiles subtracted), the dataset's `sparse_dirty_image` of that data is used
         instead, so that `D` is consistent with the data the chi-squared is computed from.
+
+        If the dataset's `sparse_operator` carries a `primary_beam_slim` `P`, every linear object's
+        real-space mapping matrix `L` is replaced by `P L` (the mapper triplets carry `P` in their
+        `vals`), giving `D = Lᵀ P d~`.
         """
         dirty_image = getattr(self.dataset, "sparse_dirty_image", None)
 
@@ -121,7 +125,10 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
                 )
             else:
                 data_vector_list.append(
-                    self._xp.dot(linear_obj.mapping_matrix.T, dirty_image)
+                    self._xp.dot(
+                        self._mapping_matrix_beamed_from(linear_obj.mapping_matrix).T,
+                        dirty_image,
+                    )
                 )
 
         if len(data_vector_list) == 1:
@@ -129,7 +136,28 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
 
         return self._xp.concatenate(data_vector_list)
 
-    def _sparse_triplets_slim_from(self, mapper: Mapper):
+    @property
+    def _primary_beam_slim(self):
+        """
+        The primary beam `P` on the slim masked grid carried by the dataset's `sparse_operator`
+        (`None` if it has none). Read via `getattr` so a `DatasetInterface` (e.g. PyAutoGalaxy's),
+        whose `sparse_operator` is the dataset's own, works unchanged.
+        """
+        return getattr(self.dataset.sparse_operator, "primary_beam_slim", None)
+
+    def _mapping_matrix_beamed_from(self, mapping_matrix):
+        """
+        Returns `diag(P) @ mapping_matrix` for a linear function's real-space mapping matrix, or the
+        mapping matrix unchanged when there is no primary beam.
+        """
+        primary_beam_slim = self._primary_beam_slim
+
+        if primary_beam_slim is None:
+            return mapping_matrix
+
+        return mapping_matrix * self._xp.asarray(primary_beam_slim)[:, None]
+
+    def _sparse_triplets_slim_from(self, mapper: Mapper, apply_primary_beam: bool = True):
         """
         Returns the sparse COO triplets `(rows, cols, vals)` of a mapper's real-space mapping
         operator `A`, with `rows` indexed on the slim (masked-pixel) grid the dirty image lives on.
@@ -147,6 +175,10 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
         ----------
         mapper
             The mapper whose mapping operator is expressed in sparse triplet form.
+        apply_primary_beam
+            If `True` (default) and the dataset has a primary beam `P`, the triplets are those of the
+            beamed operator `P A` (used by the data vector); `False` gives those of `A` (used for the
+            true-sky reconstructed image).
         """
         xp = self._xp
 
@@ -157,6 +189,7 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
             fft_index_for_masked_pixel=self.mask.extent_index_for_masked_pixel,
             sub_fraction_slim=mapper.over_sampler.sub_fraction.array,
             return_rows_slim=True,
+            slim_weights=self._primary_beam_slim if apply_primary_beam else None,
             xp=xp,
         )
 
@@ -209,6 +242,9 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
         This is the interferometer counterpart of `Mapper.sparse_triplets_curvature`, which
         indexes rows on the imaging FFT grid and therefore cannot be reused here.
 
+        If the dataset has a primary beam `P` the triplets are those of the beamed operator `P A`,
+        so every curvature block built from them is `Aᵀ P W~ P A` with the FFT kernel untouched.
+
         Parameters
         ----------
         mapper
@@ -221,6 +257,7 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
             fft_index_for_masked_pixel=self.mask.extent_index_for_masked_pixel,
             sub_fraction_slim=mapper.over_sampler.sub_fraction.array,
             return_rows_slim=False,
+            slim_weights=self._primary_beam_slim,
             xp=self._xp,
         )
 
@@ -441,8 +478,11 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
             cls=AbstractLinearObjFuncList
         )
 
+        # With a primary beam `P` each linear function's response is `P B_k`, matching the beamed
+        # mapper triplets, so every block is formed with the beamed operator.
         mapping_matrix_list = [
-            linear_func.mapping_matrix for linear_func in linear_func_list
+            self._mapping_matrix_beamed_from(linear_func.mapping_matrix)
+            for linear_func in linear_func_list
         ]
 
         for mapper_index, mapper in enumerate(mapper_list):
@@ -590,7 +630,11 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
         reconstruction
             The mapper's block of the `reconstruction` (its source pixel values `s`).
         """
-        rows, cols, vals = self._sparse_triplets_slim_from(mapper=mapper)
+        # The reconstructed image is the true sky `A s`, so the primary beam is not applied; the
+        # model visibilities `F P A s` pick it up in the transformer.
+        rows, cols, vals = self._sparse_triplets_slim_from(
+            mapper=mapper, apply_primary_beam=False
+        )
 
         contrib = vals * reconstruction[cols]
 
