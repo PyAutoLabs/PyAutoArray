@@ -1,10 +1,11 @@
 """
-Parity tests for the matrix-free interferometer utilities (phases 1-3 of PyAutoArray #638).
+Parity tests for the matrix-free interferometer utilities (phases 1-4 of PyAutoArray #638).
 
 The matrix-free sparse mapping matrix, curvature matrix action, data vector and PCG solve are held
 against the dense quantities of `InversionInterferometerSparse` on a small synthetic dataset, and
 (phase 3) the exact preconditioner log-determinant, the stochastic Lanczos quadrature estimate of
-`ln det(F + H)` and the assembled log evidence against their dense counterparts.
+`ln det(F + H)` and the assembled log evidence against their dense counterparts, and (phase 4) the
+interior-point positive solve against `scipy.optimize.nnls` and the sparse path's positive-only solve.
 
 These tests deliberately carry no `importorskip("jax")`: the module is NumPy / scipy only, so the
 `unittest-nojax` CI leg runs them.
@@ -315,7 +316,7 @@ def test__powell_preconditioner__equals_kappa0_mtm_plus_coefficient_regularizati
     )
 
 
-def _matern_sparse_system_from(coefficient=1.0):
+def _matern_sparse_system_from(coefficient=1.0, mesh_shape=(6, 6)):
     """
     The phase-3 case: a `MaternSparse`-regularized rectangular mesh on the data-dominated dataset
     (500 visibilities on long baselines), returning the dense-path inversion and the matrix-free
@@ -325,7 +326,9 @@ def _matern_sparse_system_from(coefficient=1.0):
 
     regularization = aa.reg.MaternSparse(coefficient=coefficient, scale=1.0)
 
-    mapper = _rectangular_mapper_from(mask=mask, regularization=regularization)
+    mapper = _rectangular_mapper_from(
+        mask=mask, regularization=regularization, shape=mesh_shape
+    )
     inversion = _inversion_from(dataset_sparse=dataset_sparse, mapper=mapper)
 
     operator = mf.MatrixFreeDataOperator.from_inversion(
@@ -544,11 +547,211 @@ def test__log_evidence_matrix_free_from__matches_dense_sparse_path_evidence(
     )
 
 
+# Phase 4: the interior-point positive solve.
+#
+# The case is the phase-3 data-dominated dataset (500 visibilities of pure noise on long baselines) with
+# a 10 x 10 `MaternSparse` rectangular mesh, so roughly half the unconstrained reconstruction is
+# negative. Measured on this case (zero fraction, IP steps, polish solves; all with 0 support mismatch
+# against NNLS and a value error ~1e-10 of the max, set by the polish CG tolerance):
+#
+#   coefficient 0.01 (weak prior):    72% of pixels at zero, 8 interior-point steps, 1 polish solve
+#   coefficient 1e4  (strong prior):  33% of pixels at zero, 10 interior-point steps, 1 polish solve
+#
+# The sparse path's positive-only reconstruction is a NumPy fnnls on the dense `curvature_reg_matrix`
+# (edge-zeroing off so both solve the same problem), itself within ~2e-15 of NNLS, so the matrix-free
+# solve agrees with it at the same ~1e-10 level; the asserted tolerance is 1e-8 of the max.
+
+_POSITIVE_COEFFICIENTS = [(0.01, 0.6), (1.0e4, 0.25)]
+
+
+def _nnls_whitened_dense_from(curvature_reg_matrix, data_vector):
+    """
+    `scipy.optimize.nnls` on the Cholesky-whitened dense system: with `A = L Lᵀ`,
+    `|Lᵀs - L⁻¹D|² = sᵀAs - 2sᵀD + const`, so its minimiser over `s >= 0` is the positive solution of
+    `A s = D`.
+    """
+    from scipy.optimize import nnls
+
+    cholesky = np.linalg.cholesky(curvature_reg_matrix)
+
+    reconstruction, _ = nnls(
+        cholesky.T,
+        np.linalg.solve(cholesky, data_vector),
+        maxiter=50 * curvature_reg_matrix.shape[0],
+    )
+
+    return reconstruction
+
+
+@pytest.mark.parametrize("coefficient, min_zero_fraction", _POSITIVE_COEFFICIENTS)
+def test__reconstruction_positive_via_interior_point__matches_whitened_nnls(
+    coefficient, min_zero_fraction
+):
+    _, _, _, inversion, operator, regularization_matrix, _ = _matern_sparse_system_from(
+        coefficient=coefficient, mesh_shape=(10, 10)
+    )
+
+    reconstruction_nnls = _nnls_whitened_dense_from(
+        curvature_reg_matrix=np.asarray(inversion.curvature_reg_matrix),
+        data_vector=np.asarray(inversion.data_vector),
+    )
+
+    result = mf.reconstruction_positive_via_interior_point_from(
+        operator=operator,
+        regularization_matrix_sparse=regularization_matrix,
+        coefficient=1.0,
+    )
+
+    reconstruction = result.reconstruction
+
+    # A meaningful fraction of the pixels sit at zero (72% weak, 33% strong).
+    assert np.mean(reconstruction_nnls == 0.0) >= min_zero_fraction
+
+    # (a) Exact zeros on exactly the NNLS support.
+    assert np.array_equal(reconstruction == 0.0, reconstruction_nnls == 0.0)
+    assert np.array_equal(result.support, reconstruction_nnls > 0.0)
+    assert np.all(reconstruction >= 0.0)
+
+    # (b) Values within 1e-6 of the max (measured ~1e-10).
+    assert np.max(np.abs(reconstruction - reconstruction_nnls)) <= 1.0e-6 * np.max(
+        reconstruction_nnls
+    )
+
+    # (d) Bounded iteration counts (measured 8-10 interior-point steps, 1 polish solve).
+    assert result.converged
+    assert 0 < result.interior_point_steps <= 60
+    assert result.polish_iterations <= 5
+    assert result.gap < 1.0e-9
+    assert result.residual < 1.0e-9
+
+
+@pytest.mark.parametrize("coefficient, min_zero_fraction", _POSITIVE_COEFFICIENTS)
+def test__reconstruction_positive_via_interior_point__matches_sparse_path_positive_only(
+    coefficient, min_zero_fraction
+):
+    """
+    (c) The sparse path's own positive-only solve on the same `MaternSparse` inversion. The measured
+    difference is ~1e-10 of the max (the polish CG tolerance); the asserted tolerance is 1e-8.
+    """
+    dataset_sparse, _, mapper, _, operator, regularization_matrix, _ = (
+        _matern_sparse_system_from(coefficient=coefficient, mesh_shape=(10, 10))
+    )
+
+    inversion_positive = aa.Inversion(
+        dataset=dataset_sparse,
+        linear_obj_list=[mapper],
+        settings=aa.Settings(
+            use_positive_only_solver=True, use_edge_zeroed_pixels=False
+        ),
+    )
+
+    assert isinstance(inversion_positive, aa.InversionInterferometerSparse)
+
+    reconstruction_sparse_path = np.asarray(inversion_positive.reconstruction)
+
+    result = mf.reconstruction_positive_via_interior_point_from(
+        operator=operator,
+        regularization_matrix_sparse=regularization_matrix,
+        coefficient=1.0,
+    )
+
+    assert np.mean(reconstruction_sparse_path == 0.0) >= min_zero_fraction
+    assert np.array_equal(
+        result.reconstruction == 0.0, reconstruction_sparse_path == 0.0
+    )
+    assert np.max(
+        np.abs(result.reconstruction - reconstruction_sparse_path)
+    ) <= 1.0e-8 * np.max(reconstruction_sparse_path)
+
+
+def test__reconstruction_positive_via_interior_point__truncated_interior_point__active_set_polish_recovers_nnls():
+    """
+    With the interior point stopped after two steps its support is wrong, so the polish must make
+    primal-dual active-set corrections (measured 3 solves) to reach the NNLS support and values.
+    """
+    _, _, _, inversion, operator, regularization_matrix, _ = _matern_sparse_system_from(
+        coefficient=0.01, mesh_shape=(10, 10)
+    )
+
+    reconstruction_nnls = _nnls_whitened_dense_from(
+        curvature_reg_matrix=np.asarray(inversion.curvature_reg_matrix),
+        data_vector=np.asarray(inversion.data_vector),
+    )
+
+    result = mf.reconstruction_positive_via_interior_point_from(
+        operator=operator,
+        regularization_matrix_sparse=regularization_matrix,
+        coefficient=1.0,
+        max_steps=2,
+    )
+
+    assert result.interior_point_steps == 2
+    assert 1 < result.polish_iterations <= 10
+    assert result.converged
+    assert np.array_equal(result.reconstruction == 0.0, reconstruction_nnls == 0.0)
+    assert np.max(
+        np.abs(result.reconstruction - reconstruction_nnls)
+    ) <= 1.0e-6 * np.max(reconstruction_nnls)
+
+
+def test__reconstruction_positive_via_interior_point__all_positive_solution__equals_unconstrained_pcg():
+    """
+    (e) When the unconstrained solution is already positive the constraint is inactive, so the positive
+    solve must reduce to the unconstrained PCG solve. The dirty image is replaced by the noise-free
+    `d~ = W~ M s_true` of a strictly positive source, so `D = F s_true` and, with a weak prior, the
+    unconstrained solution `(F + H)⁻¹ F s_true` stays positive.
+    """
+    _, _, _, _, operator, regularization_matrix, _ = _matern_sparse_system_from(
+        coefficient=0.01, mesh_shape=(10, 10)
+    )
+
+    source_true = 1.0 + 0.5 * np.random.default_rng(seed=5).random(operator.params)
+
+    image_extent = np.zeros(operator.y_shape * operator.x_shape)
+    image_extent[operator.extent_index_for_masked_pixel] = (
+        operator.mapping_matrix @ source_true
+    )
+
+    dirty_image = operator.wtilde_image_from(
+        image_extent.reshape(operator.y_shape, operator.x_shape)
+    ).ravel()[operator.extent_index_for_masked_pixel]
+
+    operator_positive = mf.MatrixFreeDataOperator(
+        nufft_precision_operator=operator.nufft_precision_operator,
+        dirty_image=dirty_image,
+        mapping_matrix=operator.mapping_matrix,
+        mask=operator.mask,
+    )
+
+    reconstruction_pcg, info = mf.reconstruction_via_pcg_from(
+        operator=operator_positive,
+        regularization_matrix_sparse=regularization_matrix,
+        coefficient=1.0,
+        rtol=1.0e-12,
+    )
+
+    assert info == 0
+    assert np.min(reconstruction_pcg) > 0.0
+
+    result = mf.reconstruction_positive_via_interior_point_from(
+        operator=operator_positive,
+        regularization_matrix_sparse=regularization_matrix,
+        coefficient=1.0,
+    )
+
+    assert np.all(result.support)
+    assert result.polish_iterations == 1
+    assert np.max(
+        np.abs(result.reconstruction - reconstruction_pcg)
+    ) <= 1.0e-8 * np.max(np.abs(reconstruction_pcg))
+
+
 def test__matrix_free_util__imports_and_runs_with_jax_blocked():
     """
     The module must work in the `unittest-nojax` leg. JAX is in `sys.modules` for the rest of a
     normal test session, so a subprocess hides `jax`, `jaxlib` and `nufftax` from the import system,
-    imports the module and runs a PCG solve and the phase-3 log-determinant / evidence functions.
+    imports the module and runs a PCG solve, the phase-3 log-determinant / evidence functions and the
+    phase-4 interior-point positive solve.
     """
     script = textwrap.dedent(
         """
@@ -655,6 +858,13 @@ def test__matrix_free_util__imports_and_runs_with_jax_blocked():
             n_probes=2,
         )
         assert np.isfinite(log_evidence)
+
+        result = mf.reconstruction_positive_via_interior_point_from(
+            operator, regularization_matrix, 1.0
+        )
+        assert result.converged
+        assert np.all(result.reconstruction >= 0.0)
+        assert np.all(result.reconstruction[~result.support] == 0.0)
 
         assert not any(
             name.split(".")[0] in ("jax", "jaxlib", "nufftax") for name in sys.modules

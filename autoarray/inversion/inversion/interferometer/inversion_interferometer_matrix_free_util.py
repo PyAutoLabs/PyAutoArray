@@ -29,10 +29,30 @@ by preconditioned conjugate gradients (PCG), with the Powell et al. (2021) preco
 `W~` by its peak, which keeps it sparse; it is factorised once per `λ` by a sparse LU.
 
 Phase 1 landed the operator data term and the solver as library utilities, phase 2 the natively sparse
-Matérn precision (`aa.reg.MaternSparse`), and phase 3 the evidence log-determinants (below), each with
-parity tests against the dense sparse-path quantities. None of it is wired into fits and there is no
-`Settings` flag. Later phases (interior-point positivity, profiling and workspace examples) follow as
-their own tasks.
+Matérn precision (`aa.reg.MaternSparse`), phase 3 the evidence log-determinants (below) and phase 4 the
+positivity constraint (below), each with parity tests against the dense sparse-path quantities. None of
+it is wired into fits and there is no `Settings` flag.
+
+Positivity (phase 4)
+--------------------
+`reconstruction_positive_via_interior_point_from` solves `(F + λH) s = D` subject to `s >= 0` by a
+Mehrotra predictor-corrector primal-dual interior point method whose Newton systems are solved by CG
+preconditioned by the Powell matrix plus the barrier diagonal, followed by an exact solve on the
+detected support with primal-dual active-set corrections (Hintermüller, Ito & Kunisch 2002), so the
+held pixels are exact zeros. On the test case (a `10 x 10` `MaternSparse` mesh on the data-dominated
+dataset, 33-72% of pixels at zero) it reproduces the support of `scipy.optimize.nnls` on the whitened
+dense system exactly and its values to ~1e-10 of the max in 8-10 interior-point steps and one polish
+solve.
+
+Remaining work (phase 5)
+------------------------
+- wiring as an inversion class or a `Settings` option, so fits can select the matrix-free path;
+- a profiling note, dense vs matrix-free at `50^2`, `64^2`, `128^2` and `192^2` mesh pixels, ingested
+  by PyAutoPulse;
+- a workspace example;
+- reconstruction uncertainty maps, the diagonal of `(F + λH)⁻¹`, by a stochastic diagonal estimator
+  (there is no dense inverse to read it from);
+- linear light profiles and multiple mappers (every function here assumes a single mapper's `M`).
 
 The log evidence (phase 3)
 --------------------------
@@ -381,8 +401,8 @@ def reconstruction_via_pcg_from(
     preconditioner (`powell_preconditioner_from`) applied through its sparse LU solve.
 
     This is the matrix-free counterpart of the positive-negative (`use_positive_only_solver=False`)
-    solve of an inversion's `curvature_reg_matrix`. No positivity is imposed (an interior-point
-    positive solve is a later phase).
+    solve of an inversion's `curvature_reg_matrix`. No positivity is imposed (see
+    `reconstruction_positive_via_interior_point_from` for the positive solve).
 
     Parameters
     ----------
@@ -730,4 +750,320 @@ def log_evidence_matrix_free_from(
             - log_det_regularization_term
             + float(noise_normalization)
         )
+    )
+
+
+class PositiveReconstructionResult:
+    def __init__(
+        self,
+        reconstruction: np.ndarray,
+        support: np.ndarray,
+        interior_point_steps: int,
+        polish_iterations: int,
+        gap: float,
+        residual: float,
+        converged: bool,
+    ):
+        """
+        The output of `reconstruction_positive_via_interior_point_from`.
+
+        Parameters
+        ----------
+        reconstruction
+            The non-negative reconstruction `s`, with exact zeros on the held (active) set.
+        support
+            Boolean mask of the free (passive) pixels, those solved for; `reconstruction` is zero
+            wherever it is `False`.
+        interior_point_steps
+            The number of Mehrotra predictor-corrector steps taken.
+        polish_iterations
+            The number of exact free-set solves in the active-set polish (one if the support detected
+            from the interior point was already optimal).
+        gap
+            The normalised duality gap `n μ / |xᵀD|` of the final interior-point iterate.
+        residual
+            The normalised dual residual `|A x - D - z| / |D|` of the final interior-point iterate.
+        converged
+            `True` if the active-set polish ended on a support satisfying the KKT conditions (no
+            negative free pixel and no held pixel with a negative gradient), `False` if it reached
+            its iteration cap and the result was clipped at zero.
+        """
+        self.reconstruction = reconstruction
+        self.support = support
+        self.interior_point_steps = interior_point_steps
+        self.polish_iterations = polish_iterations
+        self.gap = gap
+        self.residual = residual
+        self.converged = converged
+
+
+def _step_to_boundary(v: np.ndarray, dv: np.ndarray) -> float:
+    """
+    The largest step `α <= 1` keeping `v + α dv >= 0` (for `v > 0`).
+    """
+    decreasing = dv < 0.0
+
+    if not np.any(decreasing):
+        return 1.0
+
+    return float(min(1.0, np.min(-v[decreasing] / dv[decreasing])))
+
+
+def reconstruction_positive_via_interior_point_from(
+    operator: MatrixFreeDataOperator,
+    regularization_matrix_sparse: scipy.sparse.spmatrix,
+    coefficient: float,
+    max_steps: int = 60,
+    tol: float = 1.0e-9,
+    cg_rtol_min: float = 1.0e-8,
+    cg_rtol_max: float = 1.0e-2,
+    polish_rtol: float = 1.0e-10,
+    max_polish: int = 10,
+    maxiter: int = 5000,
+) -> PositiveReconstructionResult:
+    """
+    Returns the non-negative reconstruction solving
+
+        min_s  ½ sᵀ(F + λH)s - sᵀD    subject to  s >= 0
+
+    (equivalently `(F + λH) s = D` on the free pixels, zero elsewhere) without forming or factorising
+    the dense `(S, S)` matrix `A = F + λH`: every operation is a matrix-free product with `A` or a
+    sparse factorisation of the Powell preconditioner `P = κ₀ MᵀM + λH` plus a diagonal.
+
+    This is the matrix-free counterpart of the positive-only (`use_positive_only_solver=True`) solve
+    of an inversion's `curvature_reg_matrix`. The method follows @HRSAstro's reference
+    (PyAutoArray #638, phase 4) in two stages.
+
+    **Primal-dual interior point (Mehrotra predictor-corrector).** The KKT conditions are
+    `A x - D = z`, `x >= 0`, `z >= 0`, `x z = 0`. Starting from one Jacobi step,
+    `x₀ = max(D / diag, 0)` shifted by `10⁻² max(x₀)` into the interior (with `diag` the diagonal of
+    `P`, the Powell approximation of the diagonal of `A`), and a dual `z₀` from the positive part of
+    the gradient, each step eliminates `dz` from the linearised KKT system, leaving
+
+        (A + Z X⁻¹) dx = -r_d - z + c,       r_d = A x - D - z,
+
+    with `c = 0` for the affine (predictor) direction and `c = (σμ - dx_aff dz_aff) / x` for the
+    combined direction, centring parameter `σ = (μ_aff / μ)³` and `μ = xᵀz / n`. Each of the two
+    solves is CG preconditioned by the barrier-diagonal-augmented Powell matrix `P + Z X⁻¹`, refactorised
+    by a sparse LU every step (the barrier diagonal changes); the corrector is warm-started at the
+    predictor. The CG tolerance is tied to the progress, `0.1 min(gap, residual + gap)`, clipped to
+    `[cg_rtol_min, cg_rtol_max]`, so early steps are cheap. Steps are damped to 0.99 of the distance to
+    the boundary. Iteration stops when the normalised gap `n μ / |xᵀD|` and dual residual
+    `|r_d| / |D|` are both below `tol`, or after `max_steps`.
+
+    **Exact active-set polish.** The interior point never reaches exact zeros, so its support is read
+    off as the free set `{i : z_i <= diag_i x_i}` and the free pixels are solved exactly,
+    `A_ff s_f = D_f`, by CG preconditioned by the sparse LU of the sub-matrix `P_ff` and warm-started
+    at the interior-point iterate; the held pixels are exactly zero. The KKT conditions are then
+    checked through the multiplier `g = A s - D` and the support updated by the primal-dual active-set
+    rule (Hintermüller, Ito & Kunisch 2002): a pixel is held when `g_i > diag_i s_i`, which releases
+    held pixels with a negative gradient and holds free pixels that came out negative. This repeats
+    until the support is unchanged (normally after one or two solves), or `max_polish` solves, after
+    which the solution is clipped at zero and `converged` is `False`.
+
+    The contributor found projected Newton and a pure active-set method stall at weak priors with
+    ~30% of pixels at zero; the interior point is insensitive to the size of the active set and the
+    polish starts from an essentially correct support, so the result matches `scipy.optimize.nnls`
+    on the whitened dense system.
+
+    Parameters
+    ----------
+    operator
+        The data operator providing `F` and `D`.
+    regularization_matrix_sparse
+        The regularization matrix `H` as a `scipy.sparse` matrix.
+    coefficient
+        The scalar `λ` multiplying `H`; `1.0` for an autoarray regularization matrix, which already
+        carries its coefficient.
+    max_steps
+        The maximum number of interior-point steps.
+    tol
+        The normalised gap and dual residual at which the interior point stops.
+    cg_rtol_min, cg_rtol_max
+        The clip range of the interior-point CG tolerance.
+    polish_rtol
+        The CG tolerance of the exact free-set solves, relative to `|D_f|`.
+    max_polish
+        The maximum number of free-set solves in the active-set polish.
+    maxiter
+        The maximum number of iterations of every CG solve.
+
+    Returns
+    -------
+    A `PositiveReconstructionResult` holding the reconstruction (exact zeros on the held set), the
+    support mask, the interior-point step and polish iteration counts and the final gap and residual.
+    """
+    regularization_matrix_sparse = scipy.sparse.csr_matrix(regularization_matrix_sparse)
+
+    n = operator.params
+    data_vector = operator.data_vector
+    data_vector_norm = float(np.linalg.norm(data_vector))
+
+    def curvature_reg_matvec(v):
+        return operator.curvature_matvec(v) + coefficient * (
+            regularization_matrix_sparse @ v
+        )
+
+    preconditioner, _ = powell_preconditioner_from(
+        operator=operator,
+        regularization_matrix_sparse=regularization_matrix_sparse,
+        coefficient=coefficient,
+    )
+    preconditioner = preconditioner.tocsc()
+    diag = preconditioner.diagonal()
+
+    def splu_from(matrix):
+        return scipy.sparse.linalg.splu(
+            matrix.tocsc(),
+            permc_spec="MMD_AT_PLUS_A",
+            diag_pivot_thresh=0.0,
+            options=dict(SymmetricMode=True),
+        )
+
+    # Starting point: one Jacobi step, shifted into the interior, and a positive dual.
+    x = np.clip(data_vector / diag, 0.0, None)
+    x = x + 1.0e-2 * max(float(np.max(x)), np.finfo(float).tiny)
+
+    gradient = curvature_reg_matvec(x) - data_vector
+    z = np.maximum(gradient, 0.0) + 1.0e-2 * max(
+        float(np.max(np.abs(gradient))), np.finfo(float).tiny
+    )
+
+    interior_point_steps = 0
+    gap = residual = np.inf
+
+    for _ in range(max_steps):
+        dual_residual = gradient - z
+        mu = float(x @ z) / n
+
+        gap = n * mu / abs(float(x @ data_vector))
+        residual = float(np.linalg.norm(dual_residual)) / data_vector_norm
+
+        if gap < tol and residual < tol:
+            break
+
+        interior_point_steps += 1
+
+        barrier_diagonal = z / x
+
+        factor = splu_from(preconditioner + scipy.sparse.diags(barrier_diagonal))
+
+        newton_operator = scipy.sparse.linalg.LinearOperator(
+            (n, n),
+            matvec=lambda v: curvature_reg_matvec(v) + barrier_diagonal * v,
+            dtype=np.float64,
+        )
+        preconditioner_operator = scipy.sparse.linalg.LinearOperator(
+            (n, n), matvec=factor.solve, dtype=np.float64
+        )
+
+        rtol = float(np.clip(0.1 * min(gap, residual + gap), cg_rtol_min, cg_rtol_max))
+
+        # Predictor (affine scaling) direction.
+        dx, _ = scipy.sparse.linalg.cg(
+            newton_operator,
+            -dual_residual - z,
+            rtol=rtol,
+            maxiter=maxiter,
+            M=preconditioner_operator,
+        )
+        dz = -z - barrier_diagonal * dx
+
+        mu_affine = (
+            float(
+                (x + _step_to_boundary(x, dx) * dx)
+                @ (z + _step_to_boundary(z, dz) * dz)
+            )
+            / n
+        )
+        sigma = (mu_affine / mu) ** 3
+
+        # Combined centring + corrector direction, warm-started at the predictor.
+        correction = (sigma * mu - dx * dz) / x
+
+        dx, _ = scipy.sparse.linalg.cg(
+            newton_operator,
+            -dual_residual - z + correction,
+            x0=dx,
+            rtol=rtol,
+            maxiter=maxiter,
+            M=preconditioner_operator,
+        )
+        dz = -z + correction - barrier_diagonal * dx
+
+        x = x + 0.99 * _step_to_boundary(x, dx) * dx
+        z = z + 0.99 * _step_to_boundary(z, dz) * dz
+
+        gradient = curvature_reg_matvec(x) - data_vector
+
+    # Exact active-set polish on the support detected from the interior point.
+    free = z <= diag * x
+    warm_start = x.copy()
+
+    reconstruction = np.zeros(n)
+    polish_iterations = 0
+    converged = False
+
+    for _ in range(max_polish):
+        polish_iterations += 1
+
+        free_indexes = np.flatnonzero(free)
+        reconstruction = np.zeros(n)
+
+        if free_indexes.size > 0:
+
+            def free_matvec(v, free_indexes=free_indexes):
+                return curvature_reg_matvec(
+                    np.bincount(free_indexes, weights=v, minlength=n)
+                )[free_indexes]
+
+            sub_factor = splu_from(preconditioner[free_indexes][:, free_indexes])
+
+            free_operator = scipy.sparse.linalg.LinearOperator(
+                (free_indexes.size, free_indexes.size),
+                matvec=free_matvec,
+                dtype=np.float64,
+            )
+            sub_preconditioner_operator = scipy.sparse.linalg.LinearOperator(
+                (free_indexes.size, free_indexes.size),
+                matvec=sub_factor.solve,
+                dtype=np.float64,
+            )
+
+            reconstruction_free, _ = scipy.sparse.linalg.cg(
+                free_operator,
+                data_vector[free_indexes],
+                x0=warm_start[free_indexes],
+                rtol=polish_rtol,
+                maxiter=maxiter,
+                M=sub_preconditioner_operator,
+            )
+
+            reconstruction[free_indexes] = reconstruction_free
+
+        # Primal-dual active-set update: the multiplier of the held pixels is the gradient.
+        multiplier = curvature_reg_matvec(reconstruction) - data_vector
+        multiplier[free] = 0.0
+
+        free_new = ~(multiplier > diag * reconstruction)
+
+        if np.array_equal(free_new, free):
+            converged = bool(np.all(reconstruction >= 0.0))
+            break
+
+        free = free_new
+        warm_start = np.clip(reconstruction, 0.0, None)
+
+    if not converged:
+        reconstruction = np.clip(reconstruction, 0.0, None)
+        free = reconstruction > 0.0
+
+    return PositiveReconstructionResult(
+        reconstruction=reconstruction,
+        support=free,
+        interior_point_steps=interior_point_steps,
+        polish_iterations=polish_iterations,
+        gap=float(gap),
+        residual=float(residual),
+        converged=converged,
     )
