@@ -14,6 +14,7 @@ from autoarray.inversion.linear_obj.func_list import AbstractLinearObjFuncList
 from autoarray.inversion.mappers import mapper_util
 from autoarray.settings import Settings
 from autoarray.inversion.mappers.abstract import Mapper
+from autoarray.structures.arrays.uniform_2d import Array2D
 from autoarray.structures.visibilities import Visibilities
 
 from autoarray.inversion.inversion import inversion_util
@@ -512,6 +513,93 @@ class InversionInterferometerSparse(AbstractInversionInterferometer):
                         ].set(diag.T)
 
         return curvature_matrix
+
+    @property
+    def mapped_reconstructed_data_dict(
+        self,
+    ) -> Dict[LinearObj, Array2D]:
+        """
+        When constructing the simultaneous linear equations (via vectors and matrices) the quantities of each individual
+        linear object (e.g. their `mapping_matrix`) are combined into single ndarrays. This does not track which
+        quantities belong to which linear objects, therefore the linear equation's solutions (which are returned as
+        ndarrays) do not contain information on which linear object(s) they correspond to.
+
+        This function converts an ndarray of a `reconstruction` to a dictionary of ndarrays containing each linear
+        object's reconstructed image (in real space, before the non-uniform fast Fourier transform), where the keys
+        are the instances of each linear object in the inversion.
+
+        Each linear object's reconstructed image is `L s`, where `L` is its real-space mapping matrix and `s` its
+        block of the `reconstruction`. This is the mirror of the sparse `data_vector` (`Lᵀ d~`):
+
+        - For a `Mapper` the image `A s` is computed from the mapper's sparse COO triplets
+          (`_sparse_triplets_slim_from`), as a scatter-add of `vals * s[cols]` over the slim image pixel
+          rows. The dense (masked pixels x source pixels) mapping matrix is therefore never built, which
+          on a 384 x 384 unmasked grid with a 48² source mesh is 2.7 GB.
+        - For an `AbstractLinearObjFuncList` the mapping matrix is small (one column per linear function),
+          so the dense `mapping_matrix @ reconstruction` product is used directly, as in the inherited
+          implementation.
+
+        The result is used by `mapped_reconstructed_operated_data_dict` (model visibilities) and by fit
+        outputs such as galaxy image dictionaries.
+        """
+        mapped_reconstructed_data_dict = {}
+
+        reconstruction_dict = self.source_quantity_dict_from(
+            source_quantity=self.reconstruction
+        )
+
+        for linear_obj in self.linear_obj_list:
+            reconstruction = reconstruction_dict[linear_obj]
+
+            if isinstance(linear_obj, Mapper):
+                mapped_reconstructed_data = self._mapped_reconstructed_data_mapper_from(
+                    mapper=linear_obj, reconstruction=reconstruction
+                )
+            else:
+                mapped_reconstructed_data = (
+                    inversion_util.mapped_reconstructed_data_via_mapping_matrix_from(
+                        mapping_matrix=linear_obj.mapping_matrix,
+                        reconstruction=reconstruction,
+                        xp=self._xp,
+                    )
+                )
+
+            mapped_reconstructed_data = Array2D(
+                values=mapped_reconstructed_data, mask=self.mask
+            )
+
+            mapped_reconstructed_data_dict[linear_obj] = mapped_reconstructed_data
+
+        return mapped_reconstructed_data_dict
+
+    def _mapped_reconstructed_data_mapper_from(
+        self, mapper: Mapper, reconstruction
+    ) -> np.ndarray:
+        """
+        Returns a mapper's reconstructed image, `A s`, computed from the sparse triplets of its mapping
+        operator `A` without building the dense mapping matrix.
+
+        Entry `i` (a slim image pixel) is the sum over the non-zeros of `A`'s row `i` of `val * s[col]`,
+        i.e. a scatter-add of `vals * reconstruction[cols]` over the slim image pixel rows. This is the
+        transpose of the segment-sum performed by `_data_vector_mapper_from`.
+
+        Parameters
+        ----------
+        mapper
+            The mapper whose reconstructed image is computed.
+        reconstruction
+            The mapper's block of the `reconstruction` (its source pixel values `s`).
+        """
+        rows, cols, vals = self._sparse_triplets_slim_from(mapper=mapper)
+
+        contrib = vals * reconstruction[cols]
+
+        n_slim = self.mask.pixels_in_mask
+
+        if self._xp is np:
+            return np.bincount(rows, weights=contrib, minlength=n_slim)
+
+        return self._xp.zeros(n_slim, dtype=contrib.dtype).at[rows].add(contrib)
 
     @property
     def mapped_reconstructed_operated_data_dict(

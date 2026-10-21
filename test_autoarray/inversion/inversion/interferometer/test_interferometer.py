@@ -1898,3 +1898,221 @@ def test__interferometer_sparse_operator__data_vector_from_triplets_matches_dens
             rtol=1.0e-12,
             atol=1.0e-12 * np.abs(reference).max(),
         )
+
+
+def _rectangular_mapper_from(mask, shape, over_sample_size):
+    from autoarray.inversion.mesh.mesh.rectangular_rtu_adapt_density import (
+        overlay_grid_from,
+    )
+
+    grid = aa.Grid2D.from_mask(mask=mask, over_sample_size=over_sample_size)
+
+    interpolator = aa.mesh.RectangularUniform(shape=shape).interpolator_from(
+        source_plane_data_grid=grid,
+        source_plane_mesh_grid=aa.Grid2DIrregular(
+            overlay_grid_from(shape_native=shape, grid=grid)
+        ),
+        adapt_data=None,
+    )
+
+    return aa.Mapper(
+        interpolator=interpolator, regularization=aa.reg.Constant(coefficient=1.0)
+    )
+
+
+def _mapped_reconstructed_parity_setup(seed):
+    """
+    A 12x12 circular-mask TransformerDFT dataset with its sparse operator, and the linear object lists
+    the sparse `mapped_reconstructed_data_dict` is checked on: a Rectangular mesh, a Delaunay mesh,
+    over-sampled (sub_size 2) Rectangular and Delaunay meshes, two mappers, and a mapper plus a linear
+    function list (in either order).
+    """
+    mask = aa.Mask2D.circular(shape_native=(12, 12), pixel_scales=1.0, radius=4.0)
+
+    rng = np.random.default_rng(seed=seed)
+    n_visibilities = 32
+
+    dataset = aa.Interferometer(
+        data=aa.Visibilities(
+            visibilities=rng.normal(size=(n_visibilities, 2)).astype(np.float64)
+        ),
+        noise_map=aa.VisibilitiesNoiseMap(
+            visibilities=np.ones((n_visibilities, 2), dtype=np.float64)
+        ),
+        uv_wavelengths=rng.normal(size=(n_visibilities, 2)).astype(np.float64),
+        real_space_mask=mask,
+        transformer_class=aa.TransformerDFT,
+    )
+    dataset_sparse = dataset.apply_sparse_operator(use_jax=False)
+
+    rectangular = _rectangular_mapper_from(mask=mask, shape=(4, 4), over_sample_size=1)
+    delaunay = _over_sampled_mapper_from(
+        mask=mask, pixels=16, shape=(4, 4), over_sample_size=1
+    )
+    rectangular_sub_2 = _rectangular_mapper_from(
+        mask=mask, shape=(5, 5), over_sample_size=2
+    )
+    delaunay_sub_2 = _over_sampled_mapper_from(
+        mask=mask, pixels=9, shape=(3, 3), over_sample_size=2
+    )
+    linear_obj = aa.m.MockLinearObjFuncList(
+        parameters=2,
+        mapping_matrix=rng.normal(size=(mask.pixels_in_mask, 2)),
+    )
+
+    linear_obj_lists = [
+        [rectangular],
+        [delaunay],
+        [rectangular_sub_2],
+        [delaunay_sub_2],
+        [delaunay_sub_2, rectangular],
+        [rectangular, linear_obj],
+        [linear_obj, delaunay_sub_2],
+    ]
+
+    return mask, rng, dataset_sparse, linear_obj_lists
+
+
+def _assert_mapped_reconstructed_data_dict_matches_dense(
+    image_dict, linear_obj_list, reconstruction, inversion, rtol
+):
+    """
+    Each entry of `image_dict` must equal the dense `mapping_matrix @ reconstruction` of its linear object,
+    where `reconstruction` is the (NumPy) reconstruction split per linear object.
+    """
+    param_range_list = inversion.param_range_list_from(cls=aa.LinearObj)
+
+    for linear_obj, (start, end) in zip(linear_obj_list, param_range_list):
+        reference = np.asarray(linear_obj.mapping_matrix) @ np.asarray(
+            reconstruction[start:end]
+        )
+
+        np.testing.assert_allclose(
+            np.asarray(image_dict[linear_obj]),
+            reference,
+            rtol=rtol,
+            atol=rtol * np.abs(reference).max(),
+        )
+
+
+def test__interferometer_sparse_operator__mapped_reconstructed_data_dict_matches_dense_mapping_matrix():
+    """
+    `InversionInterferometerSparse.mapped_reconstructed_data_dict` reconstructs each mapper's image by a
+    scatter-add over the mapper's sparse triplets instead of the dense `mapping_matrix @ reconstruction`.
+    It must reproduce the dense product for Rectangular and Delaunay meshes, over-sampled mappers, two
+    mappers and a mapper mixed with a linear function list, and its values must be wrapped as an
+    `Array2D` on the inversion's real-space mask (so the model visibilities are unchanged).
+    """
+    mask, rng, dataset_sparse, linear_obj_lists = _mapped_reconstructed_parity_setup(
+        seed=7
+    )
+
+    for linear_obj_list in linear_obj_lists:
+        inversion = aa.Inversion(
+            dataset=dataset_sparse, linear_obj_list=linear_obj_list
+        )
+
+        assert isinstance(inversion, aa.InversionInterferometerSparse)
+
+        image_dict = inversion.mapped_reconstructed_data_dict
+
+        for linear_obj in linear_obj_list:
+            assert isinstance(image_dict[linear_obj], aa.Array2D)
+            assert (image_dict[linear_obj].mask == mask).all()
+
+        _assert_mapped_reconstructed_data_dict_matches_dense(
+            image_dict=image_dict,
+            linear_obj_list=linear_obj_list,
+            reconstruction=np.asarray(inversion.reconstruction),
+            inversion=inversion,
+            rtol=1.0e-10,
+        )
+
+        # The model visibilities consume the dict and must equal the transform of the dense image.
+        visibilities_dict = inversion.mapped_reconstructed_operated_data_dict
+
+        for linear_obj in linear_obj_list:
+            reference = dataset_sparse.transformer.visibilities_from(
+                image=aa.Array2D(
+                    values=np.asarray(linear_obj.mapping_matrix)
+                    @ np.asarray(inversion.reconstruction_dict[linear_obj]),
+                    mask=mask,
+                )
+            )
+
+            np.testing.assert_allclose(
+                np.asarray(visibilities_dict[linear_obj]),
+                np.asarray(reference),
+                rtol=1.0e-10,
+                atol=1.0e-10 * np.abs(np.asarray(reference)).max(),
+            )
+
+
+def test__interferometer_sparse_operator__mapped_reconstructed_data_dict_matches_dense_mapping_matrix__jax_jit():
+    """
+    The JAX backend of the sparse mapped reconstructed image (a `.at[rows].add` scatter over image pixels)
+    must reproduce the dense `mapping_matrix @ reconstruction` under `jax.jit`, with the dirty image traced
+    so the reconstruction is computed inside the jitted function.
+    """
+    jax = pytest.importorskip("jax")
+
+    import jax.numpy as jnp
+
+    mask, rng, dataset_sparse, linear_obj_lists = _mapped_reconstructed_parity_setup(
+        seed=9
+    )
+
+    dirty_image = np.asarray(dataset_sparse.sparse_operator.dirty_image)
+
+    def inversion_from(dirty_image, linear_obj_list, xp):
+        return aa.Inversion(
+            dataset=aa.DatasetInterface(
+                data=dataset_sparse.data,
+                noise_map=dataset_sparse.noise_map,
+                grids=dataset_sparse.grids,
+                transformer=dataset_sparse.transformer,
+                sparse_operator=dataset_sparse.sparse_operator,
+                sparse_dirty_image=dirty_image,
+            ),
+            linear_obj_list=linear_obj_list,
+            xp=xp,
+        )
+
+    for linear_obj_list in linear_obj_lists:
+        inversion_np = inversion_from(dirty_image, linear_obj_list, xp=np)
+
+        assert isinstance(inversion_np, aa.InversionInterferometerSparse)
+
+        def images_and_reconstruction_from(dirty_image):
+            inversion = inversion_from(dirty_image, linear_obj_list, xp=jnp)
+
+            image_dict = inversion.mapped_reconstructed_data_dict
+
+            return (
+                [image_dict[linear_obj].array for linear_obj in linear_obj_list],
+                inversion.reconstruction,
+            )
+
+        image_list, reconstruction = jax.jit(images_and_reconstruction_from)(
+            jnp.asarray(dirty_image)
+        )
+
+        # A sanity check only: the NumPy and JAX linear solves differ by more than the matrices they are
+        # handed (see `test__interferometer_sparse_operator__numpy_inversion_matches_jax_inversion`), so the
+        # image is compared below against the dense product of the jitted reconstruction itself.
+        reference = np.asarray(inversion_np.reconstruction)
+
+        np.testing.assert_allclose(
+            np.asarray(reconstruction),
+            reference,
+            rtol=0.0,
+            atol=1.0e-3 * np.abs(reference).max(),
+        )
+
+        _assert_mapped_reconstructed_data_dict_matches_dense(
+            image_dict=dict(zip(linear_obj_list, image_list)),
+            linear_obj_list=linear_obj_list,
+            reconstruction=np.asarray(reconstruction),
+            inversion=inversion_np,
+            rtol=1.0e-12,
+        )
