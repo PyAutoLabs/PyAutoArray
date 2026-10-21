@@ -96,6 +96,7 @@ class InversionImagingSparse(AbstractInversionImaging):
                     cols=cols,
                     vals=vals,
                     S=mapper.params,
+                    xp=self._xp,
                 )
             )
             param_range = mapper_param_range[mapper_index]
@@ -149,6 +150,7 @@ class InversionImagingSparse(AbstractInversionImaging):
             cols=cols,
             vals=vals,
             S=linear_obj.params,
+            xp=self._xp,
         )
 
     @property
@@ -174,6 +176,7 @@ class InversionImagingSparse(AbstractInversionImaging):
                     cols=cols,
                     vals=vals,
                     S=mapper.params,
+                    xp=self._xp,
                 )
             )
 
@@ -532,6 +535,7 @@ class InversionImagingSparse(AbstractInversionImaging):
                     vals=vals,
                     fft_index_for_masked_pixel=self.mask.fft_index_for_masked_pixel,
                     data_shape=self.mask.shape_native,
+                    xp=self._xp,
                 )
 
                 mapped = Array2D(values=mapped, mask=self.mask)
