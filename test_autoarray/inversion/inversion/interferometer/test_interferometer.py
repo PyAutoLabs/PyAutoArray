@@ -2116,3 +2116,559 @@ def test__interferometer_sparse_operator__mapped_reconstructed_data_dict_matches
             inversion=inversion_np,
             rtol=1.0e-12,
         )
+
+
+# ----------------------------------------------------------------------------------------
+# Primary beam
+# ----------------------------------------------------------------------------------------
+
+
+_PRIMARY_BEAM_SETTINGS = aa.Settings(no_regularization_add_to_curvature_diag_value=0.0)
+
+
+def _primary_beam_parity_setup(seed=0, primary_beam="random", transformer_class=None):
+    """
+    The 7x7 / Delaunay setup of `_sparse_parity_setup` with a primary beam on the dataset, returning
+    the mask, a random generator, the dense and sparse-operator datasets and the primary beam.
+
+    `primary_beam="random"` draws a non-trivial beam with values in (0.2, 1]; anything else is passed
+    to the dataset as is (`None`, ones, ...). The sparse operator is built with the NumPy brute-force
+    preload builder, so the brute-force comparison below is limited only by float64 round-off.
+    """
+    mask = aa.Mask2D(
+        mask=[
+            [True, True, True, True, True, True, True],
+            [True, True, True, True, True, True, True],
+            [True, True, True, False, True, True, True],
+            [True, True, False, False, False, True, True],
+            [True, True, True, False, True, True, True],
+            [True, True, True, True, True, True, True],
+            [True, True, True, True, True, True, True],
+        ],
+        pixel_scales=2.0,
+    )
+
+    n_visibilities = 5
+    rng = np.random.default_rng(seed=seed)
+    data = aa.Visibilities(
+        visibilities=rng.normal(size=(n_visibilities, 2)).astype(np.float64)
+    )
+    sigma = rng.uniform(0.5, 2.0, size=n_visibilities)
+    noise_map = aa.VisibilitiesNoiseMap(visibilities=np.stack([sigma, sigma], axis=1))
+    uv_wavelengths = rng.normal(size=(n_visibilities, 2)).astype(np.float64)
+
+    if isinstance(primary_beam, str):
+        primary_beam = aa.Array2D(
+            values=np.random.default_rng(seed=seed + 100).uniform(
+                0.2, 1.0, size=mask.pixels_in_mask
+            ),
+            mask=mask,
+        )
+
+    dataset = aa.Interferometer(
+        data=data,
+        noise_map=noise_map,
+        uv_wavelengths=uv_wavelengths,
+        real_space_mask=mask,
+        transformer_class=transformer_class or aa.TransformerDFT,
+        primary_beam=primary_beam,
+    )
+
+    dataset_sparse = dataset.apply_sparse_operator(
+        nufft_precision_operator=dataset.psf_precision_operator_from(method="numpy"),
+        batch_size=4,
+    )
+
+    return mask, rng, dataset, dataset_sparse, primary_beam
+
+
+def _primary_beam_linear_obj_lists(mask, rng):
+    """The linear-object lists exercising every block: one mapper, func list + mapper, two mappers,
+    func list + two mappers and a func list on its own."""
+    mapper_0 = _mapper_from(
+        mask=mask, pixels=9, shape=(3, 3), regularization=aa.reg.Constant(1.0)
+    )
+    mapper_1 = _mapper_from(
+        mask=mask, pixels=16, shape=(4, 4), regularization=aa.reg.Constant(2.0)
+    )
+    linear_obj = aa.m.MockLinearObjFuncList(
+        parameters=2, mapping_matrix=rng.normal(size=(mask.pixels_in_mask, 2))
+    )
+
+    return {
+        "mapper": [mapper_0],
+        "func_list_and_mapper": [linear_obj, mapper_0],
+        "x2_mappers": [mapper_0, mapper_1],
+        "func_list_and_x2_mappers": [linear_obj, mapper_0, mapper_1],
+        "func_list_only": [linear_obj],
+    }
+
+
+def _brute_force_w_tilde_and_dirty_image_from(dataset):
+    """
+    `W~ = Re(F^H N^-1 F)` and `d~ = Re(F^H N^-1 d)` computed densely from the un-beamed DFT response of
+    every image pixel, `T = transform_mapping_matrix(I)`.
+    """
+    transformer = aa.TransformerDFT(
+        uv_wavelengths=dataset.uv_wavelengths, real_space_mask=dataset.real_space_mask
+    )
+
+    assert transformer.primary_beam_slim is None
+
+    response = transformer.transform_mapping_matrix(
+        mapping_matrix=np.eye(dataset.real_space_mask.pixels_in_mask)
+    )
+
+    weights_real = dataset.noise_map.array.real**-2.0
+    weights_imag = dataset.noise_map.array.imag**-2.0
+
+    w_tilde = (response.real.T * weights_real) @ response.real + (
+        response.imag.T * weights_imag
+    ) @ response.imag
+    dirty_image = response.real.T @ (
+        dataset.data.array.real * weights_real
+    ) + response.imag.T @ (dataset.data.array.imag * weights_imag)
+
+    return w_tilde, dirty_image
+
+
+def test__primary_beam__sparse_curvature_and_data_vector_match_brute_force():
+    """
+    The witness: with a non-trivial primary beam `P`, the sparse (w-tilde) inversion's curvature matrix is
+    `Lᵀ diag(P) W~ diag(P) L` and its data vector `Lᵀ diag(P) d~`, with `W~` and `d~` built densely from the
+    un-beamed DFT, for every block structure (mappers, linear function lists and both).
+    """
+    mask, rng, dataset, dataset_sparse, primary_beam = _primary_beam_parity_setup()
+
+    w_tilde, dirty_image = _brute_force_w_tilde_and_dirty_image_from(dataset)
+
+    # The operator's dirty image is independent of P and is the brute-force d~.
+    np.testing.assert_allclose(
+        dataset_sparse.sparse_operator.dirty_image,
+        dirty_image,
+        rtol=1.0e-10,
+        atol=1.0e-10 * np.abs(dirty_image).max(),
+    )
+
+    P = primary_beam.array
+
+    for name, linear_obj_list in _primary_beam_linear_obj_lists(mask, rng).items():
+        inversion = aa.Inversion(
+            dataset=dataset_sparse,
+            linear_obj_list=linear_obj_list,
+            settings=_PRIMARY_BEAM_SETTINGS,
+        )
+
+        assert type(inversion) is aa.InversionInterferometerSparse, name
+
+        mapping_matrix = np.hstack(
+            [np.asarray(linear_obj.mapping_matrix) for linear_obj in linear_obj_list]
+        )
+        beamed = P[:, None] * mapping_matrix
+
+        curvature_matrix = beamed.T @ w_tilde @ beamed
+        data_vector = beamed.T @ dirty_image
+
+        np.testing.assert_allclose(
+            np.asarray(inversion.curvature_matrix),
+            curvature_matrix,
+            rtol=1.0e-10,
+            atol=1.0e-10 * np.abs(curvature_matrix).max(),
+            err_msg=name,
+        )
+        np.testing.assert_allclose(
+            np.asarray(inversion.data_vector),
+            data_vector,
+            rtol=1.0e-10,
+            atol=1.0e-10 * np.abs(data_vector).max(),
+            err_msg=name,
+        )
+
+        # And P genuinely changes them: the un-beamed brute force differs.
+        assert not np.allclose(
+            inversion.data_vector, mapping_matrix.T @ dirty_image, rtol=1.0e-3
+        ), name
+
+
+def test__primary_beam__none_and_ones__bit_for_bit_unchanged__numpy():
+    """
+    `primary_beam=None` and `primary_beam=ones` leave the sparse and mapping curvature matrices, data
+    vectors and `fast_chi_squared` bit-for-bit those of a dataset built without a primary beam.
+    """
+    mask, rng, dataset_ref, dataset_sparse_ref, _ = _primary_beam_parity_setup(
+        primary_beam=None
+    )
+
+    for primary_beam in (None, np.ones(mask.pixels_in_mask)):
+        _, _, dataset, dataset_sparse, _ = _primary_beam_parity_setup(
+            primary_beam=primary_beam
+        )
+
+        for name, linear_obj_list in _primary_beam_linear_obj_lists(
+            mask, np.random.default_rng(seed=1)
+        ).items():
+            for dataset_test, dataset_reference in (
+                (dataset_sparse, dataset_sparse_ref),
+                (dataset, dataset_ref),
+            ):
+                inversion = aa.Inversion(
+                    dataset=dataset_test, linear_obj_list=linear_obj_list
+                )
+                inversion_reference = aa.Inversion(
+                    dataset=dataset_reference, linear_obj_list=linear_obj_list
+                )
+
+                assert type(inversion) is type(inversion_reference)
+
+                for quantity in ("curvature_matrix", "data_vector", "reconstruction"):
+                    assert np.array_equal(
+                        np.asarray(getattr(inversion, quantity)),
+                        np.asarray(getattr(inversion_reference, quantity)),
+                    ), (name, quantity)
+
+                assert inversion.fast_chi_squared == inversion_reference.fast_chi_squared
+
+                for linear_obj in linear_obj_list:
+                    assert np.array_equal(
+                        inversion.mapped_reconstructed_data_dict[linear_obj].array,
+                        inversion_reference.mapped_reconstructed_data_dict[
+                            linear_obj
+                        ].array,
+                    )
+
+
+def _primary_beam_jit_quantities_from(dataset_sparse, mapper, image, xp):
+    """
+    The data vector, curvature matrix and `fast_chi_squared` of a sparse inversion of the visibilities
+    with the profile image `image` subtracted (via `sparse_profile_terms_from`), on a `DatasetInterface`
+    with no visibilities -- the likelihood path a `jax.jit` fit traces.
+    """
+    mask = dataset_sparse.real_space_mask
+
+    _, sparse_dirty_image, data_term = (
+        aa.util.inversion_interferometer.sparse_profile_terms_from(
+            sparse_operator=dataset_sparse.sparse_operator,
+            image=image,
+            extent_index_for_masked_pixel=mask.extent_index_for_masked_pixel,
+            xp=xp,
+        )
+    )
+
+    inversion = aa.Inversion(
+        dataset=aa.DatasetInterface(
+            data=None,
+            noise_map=dataset_sparse.noise_map,
+            grids=dataset_sparse.grids,
+            transformer=dataset_sparse.transformer,
+            sparse_operator=dataset_sparse.sparse_operator,
+            sparse_dirty_image=sparse_dirty_image,
+            data_term=data_term,
+        ),
+        linear_obj_list=[mapper],
+        xp=xp,
+    )
+
+    return inversion.data_vector, inversion.curvature_matrix, inversion.fast_chi_squared
+
+
+def test__primary_beam__none_and_ones__bit_for_bit_unchanged__jax_jit():
+    jax = pytest.importorskip("jax")
+
+    import jax.numpy as jnp
+
+    mask, _, dataset_ref, dataset_sparse_ref, _ = _primary_beam_parity_setup(
+        primary_beam=None
+    )
+
+    mapper = _mapper_from(
+        mask=mask, pixels=9, shape=(3, 3), regularization=aa.reg.Constant(1.0)
+    )
+    image = jnp.asarray(np.random.default_rng(seed=5).normal(size=mask.pixels_in_mask))
+
+    def jitted(dataset_sparse):
+        return [
+            np.asarray(value)
+            for value in jax.jit(
+                lambda i: _primary_beam_jit_quantities_from(
+                    dataset_sparse, mapper, i, xp=jnp
+                )
+            )(image)
+        ]
+
+    reference = jitted(dataset_sparse_ref)
+
+    mapping_reference = aa.Inversion(
+        dataset=dataset_ref, linear_obj_list=[mapper], xp=jnp
+    )
+
+    for primary_beam in (None, np.ones(mask.pixels_in_mask)):
+        _, _, dataset, dataset_sparse, _ = _primary_beam_parity_setup(
+            primary_beam=primary_beam
+        )
+
+        for value, value_reference in zip(jitted(dataset_sparse), reference):
+            assert np.array_equal(value, value_reference)
+
+        mapping = aa.Inversion(dataset=dataset, linear_obj_list=[mapper], xp=jnp)
+
+        for quantity in ("curvature_matrix", "data_vector"):
+            assert np.array_equal(
+                np.asarray(getattr(mapping, quantity)),
+                np.asarray(getattr(mapping_reference, quantity)),
+            )
+
+
+def test__primary_beam__jax_jit_matches_numpy_and_profile_terms_apply_P():
+    """
+    With a non-trivial primary beam the jitted sparse likelihood path matches NumPy, and the
+    profile-subtracted terms are those of the beamed profile image `P i`: the dirty image
+    `d~ - W~ P i` and data term of the un-beamed operator applied to `P i`.
+    """
+    jax = pytest.importorskip("jax")
+
+    import jax.numpy as jnp
+
+    mask, _, _, dataset_sparse, primary_beam = _primary_beam_parity_setup()
+    _, _, _, dataset_sparse_unbeamed, _ = _primary_beam_parity_setup(primary_beam=None)
+
+    mapper = _mapper_from(
+        mask=mask, pixels=9, shape=(3, 3), regularization=aa.reg.Constant(1.0)
+    )
+    image = np.random.default_rng(seed=5).normal(size=mask.pixels_in_mask)
+
+    numpy = _primary_beam_jit_quantities_from(dataset_sparse, mapper, image, xp=np)
+    jitted = jax.jit(
+        lambda i: _primary_beam_jit_quantities_from(dataset_sparse, mapper, i, xp=jnp)
+    )(jnp.asarray(image))
+
+    for value, value_numpy in zip(jitted, numpy):
+        value_numpy = np.asarray(value_numpy)
+        np.testing.assert_allclose(
+            np.asarray(value),
+            value_numpy,
+            rtol=1.0e-9,
+            atol=1.0e-9 * np.abs(value_numpy).max(),
+        )
+
+    extent_index = mask.extent_index_for_masked_pixel
+
+    terms = aa.util.inversion_interferometer.sparse_profile_terms_from(
+        sparse_operator=dataset_sparse.sparse_operator,
+        image=image,
+        extent_index_for_masked_pixel=extent_index,
+    )
+    terms_unbeamed = aa.util.inversion_interferometer.sparse_profile_terms_from(
+        sparse_operator=dataset_sparse_unbeamed.sparse_operator,
+        image=image * primary_beam.array,
+        extent_index_for_masked_pixel=extent_index,
+    )
+
+    for value, value_unbeamed in zip(terms, terms_unbeamed):
+        np.testing.assert_allclose(value, value_unbeamed, rtol=1.0e-12, atol=1.0e-12)
+
+
+def test__primary_beam__sparse_matches_mapping_and_fast_chi_squared_matches_residuals():
+    """
+    With a primary beam, the sparse inversion reproduces the dense (mapping) one -- whose transformer applies
+    `P` in `transform_mapping_matrix` -- and its `fast_chi_squared` equals the chi-squared of the residual
+    visibilities of `mapped_reconstructed_operated_data`, which the transformer forms as `F P (L s)` from the
+    un-beamed (true-sky) reconstructed image `L s`.
+    """
+    mask, rng, dataset, dataset_sparse, primary_beam = _primary_beam_parity_setup()
+
+    for name, linear_obj_list in _primary_beam_linear_obj_lists(mask, rng).items():
+        if name != "func_list_only":
+            _assert_sparse_matches_mapping(
+                dataset=dataset,
+                dataset_sparse=dataset_sparse,
+                linear_obj_list=linear_obj_list,
+            )
+
+        inversion_sparse = aa.Inversion(
+            dataset=dataset_sparse,
+            linear_obj_list=linear_obj_list,
+            settings=_PRIMARY_BEAM_SETTINGS,
+        )
+        inversion_mapping = aa.Inversion(
+            dataset=dataset,
+            linear_obj_list=linear_obj_list,
+            settings=_PRIMARY_BEAM_SETTINGS,
+        )
+
+        for quantity in ("curvature_matrix", "data_vector"):
+            reference = np.asarray(getattr(inversion_mapping, quantity))
+
+            np.testing.assert_allclose(
+                np.asarray(getattr(inversion_sparse, quantity)),
+                reference,
+                rtol=1.0e-10,
+                atol=1.0e-10 * np.abs(reference).max(),
+                err_msg=(name, quantity),
+            )
+
+        # The reconstructed image is the true sky `L s` (no P).
+        reconstruction_dict = inversion_sparse.source_quantity_dict_from(
+            source_quantity=inversion_sparse.reconstruction
+        )
+
+        for linear_obj in linear_obj_list:
+            np.testing.assert_allclose(
+                inversion_sparse.mapped_reconstructed_data_dict[linear_obj].array,
+                np.asarray(linear_obj.mapping_matrix) @ reconstruction_dict[linear_obj],
+                rtol=1.0e-12,
+                atol=1.0e-12,
+            )
+
+        residual_map = aa.util.fit.residual_map_from(
+            data=dataset.data,
+            model_data=inversion_sparse.mapped_reconstructed_operated_data,
+        )
+        chi_squared = aa.util.fit.chi_squared_complex_from(
+            chi_squared_map=aa.util.fit.chi_squared_map_complex_from(
+                residual_map=residual_map, noise_map=dataset.noise_map
+            )
+        )
+
+        # The unregularized linear function list solves to coefficients ~1e4 (no positive-only solver
+        # in the test config), so `s^T F s - 2 s^T D + d^T d` cancels to ~1e-7 relative, with or without P.
+        assert float(inversion_sparse.fast_chi_squared) == pytest.approx(
+            float(chi_squared), rel=1.0e-6
+        ), name
+
+
+def test__primary_beam__dft_and_nufft_sparse_inversions_match():
+    pytest.importorskip("nufftax")
+
+    mask, rng, _, dataset_sparse_dft, _ = _primary_beam_parity_setup()
+    _, _, _, dataset_sparse_nufft, _ = _primary_beam_parity_setup(
+        transformer_class=aa.TransformerNUFFT
+    )
+
+    assert np.array_equal(
+        dataset_sparse_nufft.transformer.primary_beam_slim,
+        dataset_sparse_dft.transformer.primary_beam_slim,
+    )
+
+    for name, linear_obj_list in _primary_beam_linear_obj_lists(mask, rng).items():
+        inversion_dft = aa.Inversion(
+            dataset=dataset_sparse_dft,
+            linear_obj_list=linear_obj_list,
+            settings=_PRIMARY_BEAM_SETTINGS,
+        )
+        inversion_nufft = aa.Inversion(
+            dataset=dataset_sparse_nufft,
+            linear_obj_list=linear_obj_list,
+            settings=_PRIMARY_BEAM_SETTINGS,
+        )
+
+        for quantity in ("curvature_matrix", "data_vector"):
+            reference = np.asarray(getattr(inversion_dft, quantity))
+
+            np.testing.assert_allclose(
+                np.asarray(getattr(inversion_nufft, quantity)),
+                reference,
+                rtol=1.0e-8,
+                atol=1.0e-8 * np.abs(reference).max(),
+                err_msg=(name, quantity),
+            )
+
+        np.testing.assert_allclose(
+            inversion_nufft.mapped_reconstructed_operated_data.array,
+            inversion_dft.mapped_reconstructed_operated_data.array,
+            rtol=1.0e-6,
+            atol=1.0e-8,
+            err_msg=name,
+        )
+
+
+def test__primary_beam__array_free_from_sparse_terms_matches_in_memory():
+    pytest.importorskip("nufftax")
+
+    mask, dataset_memory_unbeamed, dataset_stream_unbeamed, mapper = _array_free_setup()
+
+    primary_beam = aa.Array2D(
+        values=np.random.default_rng(seed=9).uniform(0.2, 1.0, size=mask.pixels_in_mask),
+        mask=mask,
+    )
+
+    dataset_memory = aa.Interferometer(
+        data=dataset_memory_unbeamed.data,
+        noise_map=dataset_memory_unbeamed.noise_map,
+        uv_wavelengths=dataset_memory_unbeamed.uv_wavelengths,
+        real_space_mask=mask,
+        transformer_class=aa.TransformerNUFFT,
+        primary_beam=primary_beam,
+    ).apply_sparse_operator()
+
+    dataset_terms = aa.Interferometer.from_sparse_terms(
+        dataset_stream_unbeamed.sparse_terms, mask, primary_beam=primary_beam
+    )
+
+    inversion_terms = aa.Inversion(dataset=dataset_terms, linear_obj_list=[mapper])
+    inversion_memory = aa.Inversion(dataset=dataset_memory, linear_obj_list=[mapper])
+
+    _assert_array_free_matches_in_memory(inversion_terms, inversion_memory, rel=1.0e-8)
+
+    # The primary beam changes the fit.
+    assert float(inversion_memory.fast_chi_squared) != pytest.approx(
+        float(
+            aa.Inversion(
+                dataset=dataset_memory_unbeamed, linear_obj_list=[mapper]
+            ).fast_chi_squared
+        ),
+        rel=1.0e-6,
+    )
+
+
+def test__primary_beam__dirty_model_image_natural_applies_P():
+    mask, _, _, dataset_sparse, primary_beam = _primary_beam_parity_setup()
+    _, _, _, dataset_sparse_unbeamed, _ = _primary_beam_parity_setup(primary_beam=None)
+
+    image = np.random.default_rng(seed=2).normal(size=mask.pixels_in_mask)
+
+    np.testing.assert_allclose(
+        aa.fit.fit_interferometer.dirty_model_image_natural_from(
+            dataset=dataset_sparse, image=image
+        ).array,
+        aa.fit.fit_interferometer.dirty_model_image_natural_from(
+            dataset=dataset_sparse_unbeamed, image=image * primary_beam.array
+        ).array,
+        rtol=1.0e-12,
+        atol=1.0e-12,
+    )
+
+
+def test__primary_beam__numba_route_is_skipped_and_direct_construction_raises():
+    pytest.importorskip("numba")
+
+    from autoarray.inversion.inversion.interferometer_numba.sparse import (
+        InversionInterferometerSparseNumba,
+    )
+
+    mask, _, _, dataset_sparse, _ = _primary_beam_parity_setup()
+    _, _, _, dataset_sparse_unbeamed, _ = _primary_beam_parity_setup(primary_beam=None)
+
+    mapper = _mapper_from(
+        mask=mask, pixels=9, shape=(3, 3), regularization=aa.reg.Constant(1.0)
+    )
+    settings = aa.Settings(interferometer_route="numba")
+
+    assert isinstance(
+        aa.Inversion(
+            dataset=dataset_sparse_unbeamed, linear_obj_list=[mapper], settings=settings
+        ),
+        InversionInterferometerSparseNumba,
+    )
+    assert (
+        type(
+            aa.Inversion(
+                dataset=dataset_sparse, linear_obj_list=[mapper], settings=settings
+            )
+        )
+        is aa.InversionInterferometerSparse
+    )
+
+    with pytest.raises(aa.exc.InversionException, match="primary beam"):
+        InversionInterferometerSparseNumba(
+            dataset=dataset_sparse, linear_obj_list=[mapper], settings=settings
+        )

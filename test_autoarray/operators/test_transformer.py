@@ -368,3 +368,212 @@ def test__nufftax_exception__keeps_the_plain_install_instruction():
     message = str(exc.value)
     assert "Install it via the command `pip install nufftax`" in message
     assert "Do NOT" not in message
+
+
+def _primary_beam_setup(seed=4):
+    """
+    A non-square, partially masked image grid with random uv-coverage, a random positive image and
+    mapping matrix, and a non-trivial primary beam with values spread over (0.2, 1], for the
+    primary-beam transformer tests below.
+    """
+    rng = np.random.default_rng(seed=seed)
+
+    mask = aa.Mask2D.circular(shape_native=(8, 9), pixel_scales=0.2, radius=0.7)
+    uv_wavelengths = rng.normal(size=(23, 2)) * 2.0e5
+
+    image = aa.Array2D(values=rng.normal(size=mask.pixels_in_mask), mask=mask)
+    mapping_matrix = rng.normal(size=(mask.pixels_in_mask, 4))
+    primary_beam = aa.Array2D(
+        values=rng.uniform(0.2, 1.0, size=mask.pixels_in_mask), mask=mask
+    )
+
+    return mask, uv_wavelengths, image, mapping_matrix, primary_beam
+
+
+def _transformer_classes():
+    classes = [aa.TransformerDFT]
+
+    try:
+        import nufftax  # noqa: F401
+
+        classes.append(aa.TransformerNUFFT)
+    except ModuleNotFoundError:
+        pass
+
+    return classes
+
+
+def test__primary_beam__none_and_ones__bit_for_bit_unchanged():
+    """
+    `primary_beam=None` takes exactly the code path of a transformer built without one, and
+    `primary_beam=ones` multiplies every pixel by exactly 1.0, so both leave the forward transforms and
+    the adjoint bit-for-bit unchanged.
+    """
+    mask, uv_wavelengths, image, mapping_matrix, _ = _primary_beam_setup()
+
+    ones = aa.Array2D.ones(shape_native=mask.shape_native, pixel_scales=0.2).native
+
+    for transformer_class in _transformer_classes():
+        reference = transformer_class(
+            uv_wavelengths=uv_wavelengths, real_space_mask=mask
+        )
+
+        visibilities = reference.visibilities_from(image=image)
+
+        for primary_beam in (None, ones):
+            transformer = transformer_class(
+                uv_wavelengths=uv_wavelengths,
+                real_space_mask=mask,
+                primary_beam=primary_beam,
+            )
+
+            assert np.array_equal(
+                transformer.visibilities_from(image=image).array,
+                visibilities.array,
+            )
+            assert np.array_equal(
+                transformer.transform_mapping_matrix(mapping_matrix=mapping_matrix),
+                reference.transform_mapping_matrix(mapping_matrix=mapping_matrix),
+            )
+            assert np.array_equal(
+                transformer.image_from(visibilities=visibilities).array,
+                reference.image_from(visibilities=visibilities).array,
+            )
+
+
+def test__primary_beam__forward_transforms_equal_unbeamed_transforms_of_beamed_input():
+    """
+    With a primary beam `P`, `visibilities_from(i)` is the un-beamed `visibilities_from(P i)` and
+    `transform_mapping_matrix(M)` is the un-beamed `transform_mapping_matrix(diag(P) M)`, while
+    `image_from` (the adjoint, used for the dirty image and the w-tilde terms) is unchanged.
+    """
+    mask, uv_wavelengths, image, mapping_matrix, primary_beam = _primary_beam_setup()
+
+    beamed_image = aa.Array2D(values=image.array * primary_beam.array, mask=mask)
+
+    for transformer_class in _transformer_classes():
+        unbeamed = transformer_class(uv_wavelengths=uv_wavelengths, real_space_mask=mask)
+        beamed = unbeamed.with_primary_beam(primary_beam)
+
+        assert unbeamed.primary_beam_slim is None
+        assert beamed.primary_beam_slim == pytest.approx(primary_beam.array, 1.0e-14)
+
+        np.testing.assert_allclose(
+            beamed.visibilities_from(image=image).array,
+            unbeamed.visibilities_from(image=beamed_image).array,
+            rtol=1.0e-12,
+            atol=1.0e-12,
+        )
+        np.testing.assert_allclose(
+            beamed.transform_mapping_matrix(mapping_matrix=mapping_matrix),
+            unbeamed.transform_mapping_matrix(
+                mapping_matrix=mapping_matrix * primary_beam.array[:, None]
+            ),
+            rtol=1.0e-12,
+            atol=1.0e-12,
+        )
+
+        visibilities = unbeamed.visibilities_from(image=image)
+
+        assert np.array_equal(
+            beamed.image_from(visibilities=visibilities).array,
+            unbeamed.image_from(visibilities=visibilities).array,
+        )
+
+        # The constructor kwarg and `with_primary_beam` agree, and a native-shape beam is accepted.
+        constructed = transformer_class(
+            uv_wavelengths=uv_wavelengths,
+            real_space_mask=mask,
+            primary_beam=primary_beam.native.array,
+        )
+
+        assert np.array_equal(constructed.primary_beam_slim, beamed.primary_beam_slim)
+
+
+def test__primary_beam__with_primary_beam__shallow_copy_leaves_original_untouched():
+    mask, uv_wavelengths, _, _, primary_beam = _primary_beam_setup()
+
+    transformer = aa.TransformerDFT(uv_wavelengths=uv_wavelengths, real_space_mask=mask)
+
+    assert transformer.with_primary_beam(None) is transformer
+
+    beamed = transformer.with_primary_beam(primary_beam)
+
+    assert beamed is not transformer
+    assert transformer.primary_beam_slim is None
+    assert beamed.grid is transformer.grid
+
+    assert beamed.with_primary_beam(None).primary_beam_slim is None
+    assert beamed.primary_beam_slim is not None
+
+
+def test__primary_beam__wrong_shape_raises():
+    mask, uv_wavelengths, _, _, _ = _primary_beam_setup()
+
+    with pytest.raises(aa.exc.DatasetException):
+        aa.TransformerDFT(
+            uv_wavelengths=uv_wavelengths,
+            real_space_mask=mask,
+            primary_beam=np.ones((5, 5)),
+        )
+
+
+def test__primary_beam__jax_jit_matches_numpy():
+    """
+    The beamed forward transforms trace under `jax.jit` and match NumPy, and with `P = None` / `P = ones`
+    the jitted outputs are bit-for-bit those of the transformer without a primary beam.
+    """
+    jax = pytest.importorskip("jax")
+    import jax.numpy as jnp
+
+    mask, uv_wavelengths, image, mapping_matrix, primary_beam = _primary_beam_setup()
+
+    ones = np.ones(mask.pixels_in_mask)
+
+    for transformer_class in _transformer_classes():
+        unbeamed = transformer_class(uv_wavelengths=uv_wavelengths, real_space_mask=mask)
+
+        def jitted(transformer):
+            @jax.jit
+            def visibilities_from(image_slim):
+                return transformer.visibilities_from(
+                    image=aa.Array2D(values=image_slim, mask=mask), xp=jnp
+                ).array
+
+            @jax.jit
+            def transform_mapping_matrix(mapping_matrix):
+                return transformer.transform_mapping_matrix(
+                    mapping_matrix=mapping_matrix, xp=jnp
+                )
+
+            return (
+                np.asarray(visibilities_from(jnp.asarray(image.array))),
+                np.asarray(transform_mapping_matrix(jnp.asarray(mapping_matrix))),
+            )
+
+        visibilities_reference, mapping_reference = jitted(unbeamed)
+
+        for primary_beam_unit in (None, ones):
+            visibilities, transformed = jitted(
+                unbeamed.with_primary_beam(primary_beam_unit)
+            )
+
+            assert np.array_equal(visibilities, visibilities_reference)
+            assert np.array_equal(transformed, mapping_reference)
+
+        beamed = unbeamed.with_primary_beam(primary_beam)
+
+        visibilities, transformed = jitted(beamed)
+
+        np.testing.assert_allclose(
+            visibilities,
+            beamed.visibilities_from(image=image).array,
+            rtol=1.0e-10,
+            atol=1.0e-10,
+        )
+        np.testing.assert_allclose(
+            transformed,
+            beamed.transform_mapping_matrix(mapping_matrix=mapping_matrix),
+            rtol=1.0e-10,
+            atol=1.0e-10,
+        )

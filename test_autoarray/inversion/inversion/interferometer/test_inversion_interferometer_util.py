@@ -2486,3 +2486,69 @@ def test__interferometer__from_stream_and_apply_sparse_operator_from_chunks__pas
             rtol=1.0e-12,
             atol=1.0e-12 * np.abs(reference.dirty_image_fine).max(),
         )
+
+
+def test__sparse_triplets_from__slim_weights_scale_vals_by_their_slim_row():
+    """
+    `slim_weights` (the interferometer primary beam) multiplies each triplet's value by the weight of its
+    slim image pixel, giving the triplets of `diag(w) A`; `None` and ones leave the triplets bit-for-bit
+    unchanged. Checked on both the NumPy and (when available) JAX branches.
+    """
+    mask = aa.Mask2D.circular(shape_native=(10, 10), pixel_scales=1.0, radius=3.5)
+
+    grid = aa.Grid2D.from_mask(mask=mask, over_sample_size=2)
+
+    image_mesh_grid = aa.image_mesh.Overlay(shape=(4, 4)).image_plane_mesh_grid_from(
+        mask=mask, adapt_data=None
+    )
+    interpolator = aa.mesh.Delaunay(pixels=16).interpolator_from(
+        source_plane_data_grid=grid,
+        source_plane_mesh_grid=image_mesh_grid,
+    )
+    mapper = aa.Mapper(interpolator=interpolator)
+
+    weights = np.random.default_rng(seed=3).uniform(0.2, 1.0, size=mask.pixels_in_mask)
+
+    xps = [np]
+
+    try:
+        import jax.numpy as jnp
+
+        xps.append(jnp)
+    except ModuleNotFoundError:
+        pass
+
+    for xp in xps:
+
+        def triplets_from(slim_weights, return_rows_slim):
+            return [
+                np.asarray(array)
+                for array in aa.util.mapper.sparse_triplets_from(
+                    pix_indexes_for_sub=mapper.pix_indexes_for_sub_slim_index,
+                    pix_weights_for_sub=mapper.pix_weights_for_sub_slim_index,
+                    slim_index_for_sub=mapper.slim_index_for_sub_slim_index,
+                    fft_index_for_masked_pixel=mask.extent_index_for_masked_pixel,
+                    sub_fraction_slim=mapper.over_sampler.sub_fraction.array,
+                    return_rows_slim=return_rows_slim,
+                    slim_weights=slim_weights,
+                    xp=xp,
+                )
+            ]
+
+        rows_slim, cols, vals = triplets_from(None, return_rows_slim=True)
+
+        _, cols_weighted, vals_weighted = triplets_from(weights, return_rows_slim=True)
+
+        assert np.array_equal(cols_weighted, cols)
+        np.testing.assert_allclose(
+            vals_weighted, vals * weights[rows_slim], rtol=1.0e-15, atol=0.0
+        )
+
+        for return_rows_slim in (True, False):
+            reference = triplets_from(None, return_rows_slim=return_rows_slim)
+            ones = triplets_from(
+                np.ones(mask.pixels_in_mask), return_rows_slim=return_rows_slim
+            )
+
+            for array, array_reference in zip(ones, reference):
+                assert np.array_equal(array, array_reference)
