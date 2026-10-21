@@ -105,10 +105,14 @@ class InversionInterferometerSparseNumba(InversionInterferometerSparse):
         NaN mapping weights are not a precondition: they propagate into `F` and give the
         same NaN evidence as the FFT route, which is the intended rejection of the sample.
         """
-        if getattr(self.dataset.sparse_operator, "primary_beam_slim", None) is not None:
+        from autoarray.inversion.inversion.factory import primary_beam_is_trivial
+
+        if not primary_beam_is_trivial(
+            getattr(self.dataset.sparse_operator, "primary_beam_slim", None)
+        ):
             raise exc.InversionException(
                 "`InversionInterferometerSparseNumba` was passed a dataset with a primary "
-                "beam (`sparse_operator.primary_beam_slim`). The `direct_conv` kernel uses "
+                "beam (`sparse_operator.primary_beam_slim`) that is not 1 everywhere. The `direct_conv` kernel uses "
                 "`pix_weights_for_sub_slim_index` as-is, so it would silently compute the "
                 "un-beamed F.\n\n"
                 "Use `InversionInterferometerSparse`, which folds the primary beam into the "
