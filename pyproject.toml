@@ -44,6 +44,15 @@ dependencies = [
     "astropy>=5.0",
     "decorator>=4.0.0",
     "dill>=0.3.1.1",
+    # finufft is the CPU NUFFT of TransformerNUFFT and the precision-operator
+    # builder on the NumPy path, which must never import JAX (a JAX-threaded
+    # parent crashes the numba workers a multiprocessing search forks). The
+    # markers limit it to platforms with wheels (Linux / Windows x86_64, macOS
+    # arm64; Intel macOS is capped to 2.4.x, the last series with an x86_64
+    # macOS wheel, so pip does not try to build 2.5's sdist); elsewhere (e.g.
+    # Linux aarch64) the NumPy path falls back to nufftax with a warning.
+    'finufft>=2.4.0; platform_machine == "AMD64" or (platform_machine == "x86_64" and sys_platform != "darwin") or (sys_platform == "darwin" and platform_machine == "arm64")',
+    'finufft>=2.4.0,<2.5; sys_platform == "darwin" and platform_machine == "x86_64"',
     "matplotlib>=3.7.0",
     "scipy<=1.17.1",
     "scikit-image<=0.26.0",
@@ -87,7 +96,14 @@ optional = [
     "tfp-nightly==0.26.0.dev20260713"
 ]
 test = ["pytest"]
-dev = ["pytest", "black", "numba", "nufftax>=0.6.1,<0.7.0"]
+dev = [
+    "pytest",
+    "black",
+    "numba",
+    "nufftax>=0.6.1,<0.7.0",
+    'finufft>=2.4.0; platform_machine == "AMD64" or (platform_machine == "x86_64" and sys_platform != "darwin") or (sys_platform == "darwin" and platform_machine == "arm64")',
+    'finufft>=2.4.0,<2.5; sys_platform == "darwin" and platform_machine == "x86_64"',
+]
 
 [tool.pytest.ini_options]
 testpaths = ["test_autoarray"]

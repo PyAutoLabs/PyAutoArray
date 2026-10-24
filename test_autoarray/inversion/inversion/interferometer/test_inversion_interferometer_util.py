@@ -562,6 +562,11 @@ def test__nufft_precision_operator_from__method_routes_to_each_builder():
             **inputs
         )
     )
+    operator_via_nufft_jax = np.asarray(
+        aa.util.inversion_interferometer.nufft_precision_operator_via_nufft_from(
+            **inputs, use_jax=True
+        )
+    )
 
     # `"numpy"` and `"jax"` are pure routing, so they return the brute-force arrays unchanged.
     np.testing.assert_array_equal(
@@ -581,8 +586,7 @@ def test__nufft_precision_operator_from__method_routes_to_each_builder():
         operator_via_jax,
     )
 
-    # `use_jax=True` only upgrades a brute-force method, so `method="numpy"` with it set is
-    # the JAX brute force.
+    # `use_jax=True` upgrades `method="numpy"` to the JAX brute force.
     np.testing.assert_array_equal(
         np.asarray(
             aa.util.inversion_interferometer.nufft_precision_operator_from(
@@ -592,23 +596,23 @@ def test__nufft_precision_operator_from__method_routes_to_each_builder():
         operator_via_jax,
     )
 
-    # Under the default `method="nufft"` it is ignored -- the NUFFT already runs on JAX, so
-    # honouring it there would demote every existing `use_jax=True` caller (the workspace
-    # `apply_sparse_operator(use_jax=True)` calls) from seconds to the O(N_pix * K) brute force.
+    # Under the default `method="nufft"` it selects the nufftax NUFFT -- still a fast path, so
+    # every existing `use_jax=True` caller (the workspace `apply_sparse_operator(use_jax=True)`
+    # calls) keeps seconds rather than being demoted to the O(N_pix * K) brute force.
     operator_use_jax = np.asarray(
         aa.util.inversion_interferometer.nufft_precision_operator_from(
             use_jax=True, **inputs
         )
     )
 
-    np.testing.assert_array_equal(operator_use_jax, operator_via_nufft)
+    np.testing.assert_array_equal(operator_use_jax, operator_via_nufft_jax)
     _assert_matches_brute_force(operator_use_jax, operator_via_np)
 
     # The control: the NUFFT array is not the JAX brute-force array, so the assertion above is
     # testing the routing and not two builders that happen to agree bitwise.
     assert not np.array_equal(operator_use_jax, operator_via_jax)
 
-    # The default is the NUFFT builder, and it agrees with the brute force.
+    # The default is the NUFFT builder on finufft, and it agrees with the brute force.
     operator_default = np.asarray(
         aa.util.inversion_interferometer.nufft_precision_operator_from(**inputs)
     )
@@ -635,15 +639,13 @@ def test__nufft_precision_operator_from__disable_jax_falls_back_to_the_numpy_bui
         aa.util.inversion_interferometer.nufft_precision_operator_via_np_from(**inputs)
     )
 
-    # `PYAUTO_DISABLE_JAX=1` is the harness-level kill switch. Both the default NUFFT builder and
-    # the `"jax"` brute force run on JAX, so both must fall back -- and loudly, because the NumPy
-    # brute force is O(N_pix * K) where the NUFFT is O(K * nspread^2 + M log M). `use_jax=True`
-    # falls back either way: ignored under the default, and demoted again when it upgrades
-    # `method="numpy"` to the JAX brute force.
+    # `PYAUTO_DISABLE_JAX=1` is the harness-level kill switch. Every route that runs on JAX --
+    # the `"jax"` brute force and the nufftax NUFFT (`use_jax=True`) -- must fall back, and
+    # loudly, because the NumPy brute force is O(N_pix * K) where the NUFFT is
+    # O(K * nspread^2 + M log M).
     monkeypatch.setenv("PYAUTO_DISABLE_JAX", "1")
 
     for kwargs in (
-        {},
         {"method": "jax"},
         {"use_jax": True},
         {"method": "numpy", "use_jax": True},
@@ -660,11 +662,44 @@ def test__nufft_precision_operator_from__disable_jax_falls_back_to_the_numpy_bui
         np.testing.assert_array_equal(operator, operator_via_np)
         assert "PYAUTO_DISABLE_JAX" in caplog.text
 
+    # The default NUFFT builder runs on finufft, which is not JAX, so the switch leaves it alone.
+    # Only when finufft is missing (and the NumPy NUFFT would fall back to nufftax) is it demoted.
+    if aa.util.inversion_interferometer.nufft_cpu._load_finufft() is not None:
+        caplog.clear()
+
+        with caplog.at_level("WARNING"):
+            operator = np.asarray(
+                aa.util.inversion_interferometer.nufft_precision_operator_from(**inputs)
+            )
+
+        np.testing.assert_array_equal(
+            operator,
+            np.asarray(
+                aa.util.inversion_interferometer.nufft_precision_operator_via_nufft_from(
+                    **inputs
+                )
+            ),
+        )
+        assert "PYAUTO_DISABLE_JAX" not in caplog.text
+
+    monkeypatch.setattr(
+        aa.util.inversion_interferometer.nufft_cpu, "_load_finufft", lambda: None
+    )
+    caplog.clear()
+
+    with caplog.at_level("WARNING"):
+        operator = np.asarray(
+            aa.util.inversion_interferometer.nufft_precision_operator_from(**inputs)
+        )
+
+    np.testing.assert_array_equal(operator, operator_via_np)
+    assert "PYAUTO_DISABLE_JAX" in caplog.text
+
+    monkeypatch.undo()
+
     # Without the variable the default is the NUFFT builder again, so the fallback is the switch's
     # doing and not a permanent demotion.
-    monkeypatch.delenv("PYAUTO_DISABLE_JAX", raising=False)
-
-    pytest.importorskip("nufftax")
+    pytest.importorskip("finufft")
 
     np.testing.assert_array_equal(
         np.asarray(
@@ -687,13 +722,15 @@ def test__nufft_precision_operator_from__nufftax_absent_falls_back_to_the_numpy_
         aa.util.inversion_interferometer.nufft_precision_operator_via_np_from(**inputs)
     )
 
-    # `nufftax` is an optional dependency, so the default builder has to survive its absence --
-    # loudly, naming the O(N_pix * K) cost the caller now pays, rather than silently.
+    # `nufftax` is an optional dependency, so the `use_jax=True` NUFFT route has to survive its
+    # absence -- loudly, naming the O(N_pix * K) cost the caller now pays, rather than silently.
     monkeypatch.setattr(aa.util.inversion_interferometer, "_load_nufftax", lambda: None)
 
     with caplog.at_level("WARNING"):
         operator = np.asarray(
-            aa.util.inversion_interferometer.nufft_precision_operator_from(**inputs)
+            aa.util.inversion_interferometer.nufft_precision_operator_from(
+                use_jax=True, **inputs
+            )
         )
 
     np.testing.assert_array_equal(operator, operator_via_np)
@@ -702,8 +739,35 @@ def test__nufft_precision_operator_from__nufftax_absent_falls_back_to_the_numpy_
     # The builder itself raises rather than falling back: only the dispatcher chooses.
     with pytest.raises(ModuleNotFoundError):
         aa.util.inversion_interferometer.nufft_precision_operator_via_nufft_from(
-            **inputs
+            **inputs, use_jax=True
         )
+
+    # The default route runs on finufft and does not need nufftax at all.
+    if aa.util.inversion_interferometer.nufft_cpu._load_finufft() is not None:
+        np.testing.assert_array_equal(
+            np.asarray(
+                aa.util.inversion_interferometer.nufft_precision_operator_from(**inputs)
+            ),
+            np.asarray(
+                aa.util.inversion_interferometer.nufft_precision_operator_via_nufft_from(
+                    **inputs
+                )
+            ),
+        )
+
+    # With no NUFFT backend at all the default route falls back to the brute force too.
+    monkeypatch.setattr(
+        aa.util.inversion_interferometer.nufft_cpu, "backend_available", lambda: False
+    )
+    caplog.clear()
+
+    with caplog.at_level("WARNING"):
+        operator = np.asarray(
+            aa.util.inversion_interferometer.nufft_precision_operator_from(**inputs)
+        )
+
+    np.testing.assert_array_equal(operator, operator_via_np)
+    assert "finufft" in caplog.text
 
 
 def _numpy_backend_fixtures():
@@ -2069,9 +2133,10 @@ def test__nufft_precision_operator_via_nufft__type1_core_refactor_is_bit_for_bit
 
     for inputs in (_nufft_pin_inputs_7x7(), _nufft_pin_inputs_16x16()):
         for chunk_size in (None, 64):
+            # The reference is the nufftax loop, so it pins the `use_jax=True` route.
             np.testing.assert_array_equal(
                 aa.util.inversion_interferometer.nufft_precision_operator_via_nufft_from(
-                    **inputs, chunk_size=chunk_size
+                    **inputs, chunk_size=chunk_size, use_jax=True
                 ),
                 _nufft_precision_operator_via_nufft_reference_from(
                     **inputs, chunk_size=chunk_size

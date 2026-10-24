@@ -10,6 +10,7 @@ from typing import Callable, Iterable, Optional, Tuple
 
 from autoarray import exc
 
+from autoarray.operators import nufft_cpu
 from autoarray.operators.transformer import _load_nufftax, nufftax_exception
 
 try:
@@ -474,25 +475,31 @@ def nufft_precision_operator_from(
 
     - `"nufft"` (default) -- `nufft_precision_operator_via_nufft_from`, the type-1
       (adjoint) NUFFT. `O(K*nspread^2 + M log M)` for `M = 4*Ny*Nx`, i.e. seconds
-      where the brute-force builders take minutes to hours. Needs `nufftax`.
+      where the brute-force builders take minutes to hours. Runs `finufft` (CPU, no
+      JAX) by default and `nufftax` (JAX) with `use_jax=True`.
     - `"numpy"` -- `nufft_precision_operator_via_np_from`, the brute-force
       `O(N_pix*K)` reference builder. Kept as the reference the NUFFT builder is
       pinned against, and used as the fallback below.
     - `"jax"` -- `nufft_precision_operator_via_jax_from`, the same brute force on
       JAX. `method="jax"` is the explicit way to ask for it.
 
-    `use_jax` is only honoured when a brute-force method is selected: it upgrades
-    `method="numpy"` to `method="jax"` and is otherwise ignored. Under the default
-    `method="nufft"` it does nothing, because the NUFFT already runs on JAX -- an
-    existing `use_jax=True` caller therefore keeps the fast path rather than being
-    demoted to the `O(N_pix*K)` brute force.
+    `use_jax` picks the backend of the chosen method: under the default
+    `method="nufft"`, `use_jax=False` runs the type-1 NUFFT on `finufft` (CPU, never
+    imports JAX, so a NumPy fit does not start XLA before a multiprocessing search
+    forks its workers) and `use_jax=True` runs it on `nufftax` (JAX); under
+    `method="numpy"`, `use_jax=True` upgrades to `method="jax"`. Either way an
+    existing `use_jax=True` caller keeps a NUFFT fast path rather than being demoted
+    to the `O(N_pix*K)` brute force.
 
     Two fallbacks to `"numpy"` are taken, both logged loudly (never silently),
     because they cost `O(N_pix*K)` where the NUFFT is `O(K*nspread^2 + M log M)`:
 
-    1. `disable_jax()` is true (`PYAUTO_DISABLE_JAX=1`, the test-mode kill switch).
-       Both `"nufft"` and `"jax"` run on JAX, so both are demoted.
-    2. `nufftax` is not importable, so `"nufft"` cannot run.
+    1. `disable_jax()` is true (`PYAUTO_DISABLE_JAX=1`, the test-mode kill switch)
+       and the method would run on JAX: `"jax"`, or `"nufft"` with `use_jax=True`
+       (or with `finufft` missing, where the NumPy NUFFT falls back to `nufftax`).
+       `"nufft"` on `finufft` is not JAX, so it is not demoted.
+    2. No NUFFT backend for the requested route is importable: `nufftax` for
+       `use_jax=True`, or neither `finufft` nor `nufftax` for `use_jax=False`.
 
     Any other `method` raises `ValueError`.
 
@@ -519,9 +526,9 @@ def nufft_precision_operator_from(
     chunk_k
         The visibility chunk size of the two brute-force builders.
     use_jax
-        Only honoured when a brute-force method is selected: `method="numpy"` with
-        `use_jax=True` runs the JAX brute force (equivalent to `method="jax"`). It is
-        ignored under the default `method="nufft"`, which already runs on JAX.
+        Under `method="nufft"`, `False` (default) runs the NUFFT on `finufft` and
+        `True` on `nufftax` (JAX). Under `method="numpy"`, `True` runs the JAX brute
+        force (equivalent to `method="jax"`).
     """
     if method == "numpy" and use_jax:
         method = "jax"
@@ -533,23 +540,32 @@ def nufft_precision_operator_from(
             "brute-force reference builders)."
         )
 
-    if method in ("nufft", "jax") and disable_jax():
+    # The NumPy NUFFT runs on JAX only when finufft is missing and it falls back to nufftax.
+    nufft_on_jax = use_jax or nufft_cpu._load_finufft() is None
+
+    if (method == "jax" or (method == "nufft" and nufft_on_jax)) and disable_jax():
         logger.warning(
             f"INTERFEROMETER - `PYAUTO_DISABLE_JAX=1` is set, so the NUFFT precision "
-            f"operator cannot be built with method={method!r} (both the NUFFT and the "
-            f"JAX brute force run on JAX). Falling back to the NumPy brute force, which "
+            f"operator cannot be built with method={method!r} on JAX (use_jax={use_jax}, "
+            f"or `finufft` is not installed). Falling back to the NumPy brute force, which "
             f"is O(N_pix * K) rather than O(K * nspread^2 + M log M) and can take "
             f"minutes to hours on a real dataset."
         )
         method = "numpy"
 
-    if method == "nufft" and _load_nufftax() is None:
+    # nufftax is only looked for on the JAX route; the NumPy route checks for a backend
+    # without importing nufftax (which would start JAX).
+    if method == "nufft" and (
+        (use_jax and _load_nufftax() is None)
+        or (not use_jax and not nufft_cpu.backend_available())
+    ):
         logger.warning(
-            "INTERFEROMETER - `nufftax` is not installed, so the NUFFT precision "
-            "operator cannot be built with the type-1 NUFFT. Falling back to the NumPy "
-            "brute force, which is O(N_pix * K) rather than O(K * nspread^2 + M log M) "
-            "and can take minutes to hours on a real dataset. Install it via "
-            "`pip install nufftax`."
+            f"INTERFEROMETER - No NUFFT backend is installed for use_jax={use_jax} "
+            f"(`nufftax` for use_jax=True, `finufft` or `nufftax` for use_jax=False), so "
+            f"the NUFFT precision operator cannot be built with the type-1 NUFFT. Falling "
+            f"back to the NumPy brute force, which is O(N_pix * K) rather than "
+            f"O(K * nspread^2 + M log M) and can take minutes to hours on a real dataset. "
+            f"Install it via `pip install finufft` (or `pip install nufftax` for JAX)."
         )
         method = "numpy"
 
@@ -561,6 +577,7 @@ def nufft_precision_operator_from(
             grid_radians_2d=grid_radians_2d,
             eps=eps,
             chunk_size=chunk_size,
+            use_jax=use_jax,
         )
 
     if method == "jax":
@@ -666,6 +683,7 @@ def _type1_real_grid_from(
     centred: bool = False,
     zero_nyquist: bool = False,
     out: Optional[np.ndarray] = None,
+    use_jax: bool = False,
 ) -> np.ndarray:
     """
     The real part of a **type-1 (adjoint) NUFFT** of per-visibility `values` onto a regular
@@ -713,18 +731,23 @@ def _type1_real_grid_from(
         which is returned; nothing of the grid's size is allocated beyond `nufft2d1`'s own output
         and its real part per chunk. This is how `sparse_terms_from_chunks` accumulates the
         fine grids across a stream. If `None` a new array is returned.
+    use_jax
+        If `False` (default) the transform runs on `finufft` via `nufft_cpu` (CPU, never imports
+        JAX); if `True` it runs on `nufftax` (JAX). The two agree to ~1e-14 relative and return
+        the same NumPy array.
 
     Returns
     -------
     np.ndarray
         `[N_y, N_x]` float64.
     """
-    nufftax = _load_nufftax()
+    if use_jax:
+        nufftax = _load_nufftax()
 
-    if nufftax is None:
-        nufftax_exception()
+        if nufftax is None:
+            nufftax_exception()
 
-    import jax.numpy as jnp
+        import jax.numpy as jnp
 
     uv_wavelengths = np.asarray(uv_wavelengths, dtype=np.float64)
 
@@ -761,14 +784,24 @@ def _type1_real_grid_from(
     for k0 in range(0, total_visibilities, chunk_size):
         k1 = min(total_visibilities, k0 + chunk_size)
 
-        f = nufftax.nufft2d1(
-            jnp.asarray(-x[k0:k1]),
-            jnp.asarray(y[k0:k1]),
-            jnp.asarray(values[k0:k1], dtype=jnp.complex128),
-            n_modes,
-            eps,
-            1,
-        )
+        if use_jax:
+            f = nufftax.nufft2d1(
+                jnp.asarray(-x[k0:k1]),
+                jnp.asarray(y[k0:k1]),
+                jnp.asarray(values[k0:k1], dtype=jnp.complex128),
+                n_modes,
+                eps,
+                1,
+            )
+        else:
+            f = nufft_cpu.nufft2d1(
+                -x[k0:k1],
+                y[k0:k1],
+                np.asarray(values[k0:k1], dtype=np.complex128),
+                n_modes,
+                eps,
+                1,
+            )
 
         if real_modes is not None:
             real_modes += np.asarray(np.real(f), dtype=np.float64)
@@ -803,6 +836,7 @@ def nufft_precision_operator_via_nufft_from(
     *,
     eps: float = 1.0e-12,
     chunk_size: Optional[int] = None,
+    use_jax: bool = False,
 ) -> np.ndarray:
     """
     Returns the `W~` precision operator built as the real part of a **type-1 (adjoint)
@@ -833,7 +867,8 @@ def nufft_precision_operator_via_nufft_from(
         P[i, j] = Re sum_k w_k exp(i(-j * x_k + i * y_k))
 
     i.e. the real part of a type-1 NUFFT of the weights onto the `(2Ny, 2Nx)` mode grid.
-    `nufftax.nufft2d1(x, y, c, n_modes=(N1, N2), eps, isign)` returns
+    `nufftax.nufft2d1(x, y, c, n_modes=(N1, N2), eps, isign)` (and `nufft_cpu.nufft2d1`, the
+    `finufft` wrapper that mirrors it) returns
     `f[m2, m1] = sum_k c_k exp(isign * i(m1 * x_k + m2 * y_k))` on the **centred** mode
     grid, shape `(N2, N1)`, so the mapping is
 
@@ -902,6 +937,9 @@ def nufft_precision_operator_via_nufft_from(
         The requested NUFFT precision.
     chunk_size
         Cap on the visibilities passed to `nufft2d1` in one call, or `None` for one shot.
+    use_jax
+        If `False` (default) the NUFFT runs on `finufft` (CPU, never imports JAX); if `True`
+        on `nufftax` (JAX). Both return the same NumPy array to ~1e-14 relative.
 
     Returns
     -------
@@ -927,6 +965,7 @@ def nufft_precision_operator_via_nufft_from(
         chunk_size=chunk_size,
         centred=False,
         zero_nyquist=True,
+        use_jax=use_jax,
     )
 
 
@@ -2543,7 +2582,7 @@ def fine_grid_shapes_from(
 def _log_fine_grid_memory(shape_operator_fine, shape_dirty_image_fine, oversample):
     """
     Log one line estimating the memory the `oversample` fine grids need: the two float64 grids
-    held for the whole stream, plus the largest per-call `nufftax.nufft2d1` working set (its 2x
+    held for the whole stream, plus the largest per-call `nufft2d1` working set (its 2x
     upsampled complex128 grid, its complex128 output and that output's float64 real part).
     """
     held = 8 * (
@@ -2665,7 +2704,7 @@ def sparse_terms_from_chunks(
     grids need the NUFFT: `oversample` with a transformer other than `TransformerNUFFT` raises.
 
     Memory and cost. At a 400 x 400 native grid and `q = 8`, `precision_operator_fine` is 8000^2
-    float64 (512 MB) and `dirty_image_fine` 6400^2 (328 MB), and `nufftax`'s 2x upsampled complex
+    float64 (512 MB) and `dirty_image_fine` 6400^2 (328 MB), and the NUFFT's 2x upsampled complex
     work grid adds ~4 GB during each call: plan for 5-6 GB peak (`q = 4` is ~1.5 GB; ~112 pixels
     at `q = 8` is under 0.5 GB). One info line logs the estimate for the actual shapes. The FFT
     part of each fine NUFFT costs the same whatever the chunk length (seconds per chunk at
@@ -2709,6 +2748,8 @@ def sparse_terms_from_chunks(
     method, eps, chunk_size, chunk_k, use_jax, show_progress
         Passed to `nufft_precision_operator_from` for each chunk (`chunk_size` is the NUFFT
         builder's own inner chunk, a memory ceiling within a chunk). `eps=None` is `1e-12`.
+        `use_jax` also picks the backend of the `oversample` fine grids (`finufft` for `False`,
+        `nufftax` for `True`); the dirty image and beam always use the transformer's NumPy path.
     phase_centre
         The `(y, x)` phase-centre shift in arcseconds applied to every chunk's visibilities
         before forming the dirty image (see "Phase-centre shift" above). `None` applies no
@@ -2889,6 +2930,7 @@ def sparse_terms_from_chunks(
                 centred=False,
                 zero_nyquist=False,
                 out=precision_operator_fine,
+                use_jax=use_jax,
             )
 
             _type1_real_grid_from(
@@ -2904,6 +2946,7 @@ def sparse_terms_from_chunks(
                 centred=True,
                 zero_nyquist=False,
                 out=dirty_image_fine,
+                use_jax=use_jax,
             )
 
         dirty_beam_native = np.asarray(

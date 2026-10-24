@@ -351,13 +351,18 @@ def test__apply_sparse_operator__disable_jax_overrides_an_explicit_use_jax(
 
     assert recorded == [False, True, True, True, True]
 
-    # The default builder is the type-1 NUFFT, which runs on JAX too (nufftax is a JAX library),
-    # so the same kill switch has to demote it to the NumPy brute force rather than to the JAX
-    # one. Nothing above tests that: `use_jax` only ever selected between the two brute forces.
+    # Under `use_jax=True` the type-1 NUFFT builder runs on nufftax (JAX), so the same kill switch
+    # has to demote it to the NumPy brute force rather than to the JAX one. The default
+    # `use_jax=False` builder runs on finufft, which is not JAX, so the switch leaves it alone.
     monkeypatch.setattr(aa.Interferometer, "psf_precision_operator_from", original)
 
     monkeypatch.setenv("PYAUTO_DISABLE_JAX", "1")
-    operator_under_kill_switch = np.asarray(dataset().psf_precision_operator_from())
+    operator_under_kill_switch = np.asarray(
+        dataset().psf_precision_operator_from(use_jax=True)
+    )
+    operator_default_under_kill_switch = np.asarray(
+        dataset().psf_precision_operator_from()
+    )
 
     monkeypatch.delenv("PYAUTO_DISABLE_JAX", raising=False)
     operator_via_numpy = np.asarray(
@@ -365,6 +370,13 @@ def test__apply_sparse_operator__disable_jax_overrides_an_explicit_use_jax(
     )
 
     np.testing.assert_array_equal(operator_under_kill_switch, operator_via_numpy)
+
+    pytest.importorskip("finufft")
+
+    np.testing.assert_array_equal(
+        operator_default_under_kill_switch,
+        np.asarray(dataset().psf_precision_operator_from()),
+    )
 
 
 def _interferometer_for_precision_operator(mask_2d_7x7, transformer_class):
@@ -466,14 +478,14 @@ def test__apply_sparse_operator__method_and_nufft_kwargs_reach_the_builder(mask_
     # The operator only keeps `Khat`, so the plumbing is checked through it: routing to the brute
     # force and to the NUFFT must give the same operator to the pin's tolerance.
     np.testing.assert_allclose(
-        np.asarray(dataset_default.sparse_operator.Khat),
-        np.asarray(dataset_via_numpy.sparse_operator.Khat),
+        np.asarray(dataset_default.sparse_operator.khat_np),
+        np.asarray(dataset_via_numpy.sparse_operator.khat_np),
         rtol=1.0e-10,
         atol=1.0e-10 * np.abs(operator_via_numpy[0, 0]),
     )
     np.testing.assert_allclose(
-        np.asarray(dataset_chunked.sparse_operator.Khat),
-        np.asarray(dataset_default.sparse_operator.Khat),
+        np.asarray(dataset_chunked.sparse_operator.khat_np),
+        np.asarray(dataset_default.sparse_operator.khat_np),
         rtol=1.0e-10,
         atol=1.0e-10 * np.abs(operator_via_numpy[0, 0]),
     )

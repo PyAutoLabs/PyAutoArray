@@ -283,25 +283,24 @@ def make_acs_quadrant():
 
 
 def pytest_collection_modifyitems(config, items):
-    """Skip interferometer tests that need the default ``nufftax`` backend when
-    it is not installed.
+    """Skip interferometer tests that need a ``TransformerNUFFT`` backend when
+    none is installed.
 
-    The default ``Interferometer`` transformer is the JAX-native
-    ``TransformerNUFFT``, backed by the optional ``nufftax`` dependency. When
-    that backend is absent, any test that builds a default interferometer or
-    transformer raises ``ModuleNotFoundError`` at construction. Skip exactly
-    those tests while keeping the explicit ``DFT`` transformer tests, which
-    have no ``nufftax`` dependency.
+    The default ``Interferometer`` transformer is ``TransformerNUFFT``, backed
+    by ``finufft`` on the NumPy path (a base dependency on platforms with
+    wheels) and the optional ``nufftax`` on the JAX path. When neither is
+    importable, any test that builds a default interferometer or transformer
+    raises ``ModuleNotFoundError`` at construction. Skip exactly those tests
+    while keeping the explicit ``DFT`` transformer tests, which need neither.
+    Tests of the JAX path skip themselves via ``pytest.importorskip``.
     """
-    try:
-        import nufftax  # noqa: F401
+    from autoarray.operators import nufft_cpu
 
+    if nufft_cpu.backend_available():
         return
-    except ImportError:
-        pass
 
     skip_nufftax = pytest.mark.skip(
-        reason="nufftax (the default JAX interferometer backend) is not installed"
+        reason="no TransformerNUFFT backend (finufft or nufftax) is installed"
     )
     for item in items:
         name = item.nodeid.rsplit("::", 1)[-1]
