@@ -154,12 +154,13 @@ def nufft2d1(
     on the centred mode grid (mode 0 at index `N // 2`), returned with shape
     `(..., n_modes[1], n_modes[0])` -- `nufftax`'s orientation, not `finufft`'s.
 
-    Runs `finufft.nufft2d1`, whose thread count is left to `finufft`: it uses OpenMP and honours
-    `OMP_NUM_THREADS`, so pinning `OMP_NUM_THREADS=1` per process (e.g. one thread per Nautilus
-    worker) pins this transform too. The one exception is a process forked from one that already
-    ran finufft, which is pinned to one thread because libgomp deadlocks otherwise (see
-    `_threads_kwargs`). Falls back to `nufftax` (with a one-time warning) when
-    `finufft` is not importable.
+    Runs `finufft.nufft2d1` on **one thread**. A multithreaded type-1 spread adds each thread's
+    subgrid into the output in a non-deterministic order, so two identical calls can differ in
+    the last bits; the products built from this transform (the dirty image and the NUFFT
+    precision operator) are one-off precomputations that must be bitwise reproducible, and one
+    thread is still ~10x faster than `nufftax` on the CPU (~0.9 s for 5.5M visibilities). It also
+    keeps this transform out of the libgomp fork deadlock `_threads_kwargs` guards against.
+    Falls back to `nufftax` (with a one-time warning) when `finufft` is not importable.
 
     Parameters
     ----------
@@ -191,7 +192,7 @@ def nufft2d1(
         tuple(int(n) for n in n_modes),
         eps=float(eps),
         isign=int(isign),
-        **_threads_kwargs(),
+        nthreads=1,
     )
 
     return np.swapaxes(f, -1, -2)
