@@ -487,7 +487,16 @@ def _sparse_parity_setup(seed=0):
         transformer_class=aa.TransformerDFT,
     )
 
-    return mask, rng, dataset, dataset.apply_sparse_operator(use_jax=False)
+    # The brute-force builder (25 pixel-visibility pairs here) keeps the operator exact: the
+    # curvature matrices below have a condition number of ~4e9, which would amplify even the
+    # NUFFT builder's ~1e-12 (`eps`) error past the reconstruction tolerance, and these tests
+    # pin the sparse algebra, not the builder (pinned in test_inversion_interferometer_util).
+    return (
+        mask,
+        rng,
+        dataset,
+        dataset.apply_sparse_operator(method="numpy", use_jax=False),
+    )
 
 
 def _mapper_from(mask, pixels, shape, regularization=None):

@@ -551,8 +551,11 @@ class Interferometer(AbstractDataset):
         the inversion module.
 
         The backend the operator is *applied* with follows the inversion's `xp` (NumPy/scipy for
-        `xp=np`, JAX for `xp=jnp`); `use_jax` below only selects which brute-force builder computes
-        the preload, and never puts JAX on a NumPy fit's application path.
+        `xp=np`, JAX for `xp=jnp`); `use_jax` below only selects the backend that *builds* the
+        preload, and never puts JAX on a NumPy fit's application path. With the default
+        `use_jax=False` the whole call -- precision operator and dirty image, both on `finufft` --
+        never imports JAX, so a NumPy fit does not start XLA before a multiprocessing search forks
+        its workers.
 
         The default builder (`method="nufft"`) computes the precision operator as a type-1 NUFFT, so
         it costs `O(N_vis * nspread^2 + M log M)` for `M = 4 * Ny * Nx` — seconds even at a million
@@ -589,11 +592,11 @@ class Interferometer(AbstractDataset):
         show_memory
             If `True`, memory usage statistics are printed while computing the NUFFT precision matrix.
         use_jax
-            Only honoured when a brute-force builder is selected: `method="numpy"` with
-            `use_jax=True` runs the JAX brute force (equivalent to `method="jax"`). Under the
-            default `method="nufft"` it is ignored, because the NUFFT already runs on JAX --
-            so an existing `use_jax=True` call keeps the fast path rather than being demoted
-            to the `O(N_vis * N_pix)` brute force.
+            Selects the backend that builds the precision operator. Under the default
+            `method="nufft"`, `False` runs the type-1 NUFFT on `finufft` (CPU, no JAX) and
+            `True` on `nufftax` (JAX); both are fast paths. Under `method="numpy"`, `True` runs
+            the JAX brute force (equivalent to `method="jax"`). The dirty image is always formed
+            on the NumPy path (`finufft`), whatever this says.
 
             `PYAUTO_DISABLE_JAX=1` overrides this to `False`. That variable is a
             harness-level switch, not a preference: it is the documented way to force the
@@ -602,7 +605,8 @@ class Interferometer(AbstractDataset):
             explicit `use_jax=True` in a script -- which is the right thing for a script
             demonstrating the production path to say -- must therefore not defeat it, or
             the harness pays 2.3-3.2 s of compile for a backend it asked to disable. (The
-            same switch demotes the `"nufft"` builder to the NumPy brute force inside
+            `"nufft"` builder then runs on `finufft`, which is not JAX; only if `finufft` is
+            missing does the switch demote it to the NumPy brute force inside
             `nufft_precision_operator_from`.)
         pool_noise_map
             If `True`, pool the real and imaginary noise sigma of every visibility in
@@ -653,9 +657,9 @@ class Interferometer(AbstractDataset):
             is `False`.
         """
 
-        # `use_jax` now only selects between the two brute forces (the `"nufft"` builder
-        # runs on JAX whatever it says), so this clears it before it can upgrade
-        # `method="numpy"` to the JAX brute force under the kill switch.
+        # `use_jax` selects the builder's backend (`finufft` vs `nufftax` under `"nufft"`, the
+        # NumPy vs JAX brute force under `"numpy"`), so this clears it before it can put the
+        # build on JAX under the kill switch.
         if disable_jax():
             use_jax = False
 
@@ -992,9 +996,10 @@ class Interferometer(AbstractDataset):
         show_memory
             If `True`, memory usage statistics are printed during computation.
         use_jax
-            Only honoured when a brute-force builder is selected: `method="numpy"` with
-            `use_jax=True` runs the JAX brute force (equivalent to `method="jax"`). It is
-            ignored under the default `method="nufft"`, which already runs on JAX.
+            Selects the backend that builds the operator. Under the default `method="nufft"`,
+            `False` runs the type-1 NUFFT on `finufft` (CPU, never imports JAX) and `True` on
+            `nufftax` (JAX). Under `method="numpy"`, `True` runs the JAX brute force
+            (equivalent to `method="jax"`).
         method
             Which builder computes the operator: `"nufft"` (default), `"numpy"` or `"jax"`.
         eps

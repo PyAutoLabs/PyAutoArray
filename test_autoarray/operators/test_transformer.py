@@ -142,10 +142,13 @@ def test__nufft__transform_mapping_matrix__ones_mapping_matrix__first_element_ma
 def test__nufft__transform_mapping_matrix__real_scatter_matches_complex_scatter_exactly():
     """Scattering the real mapping matrix and casting afterwards
     (autolens_profiling#308) must be bit-identical to the previous
-    cast-then-scatter formula, for NumPy and under ``jax.jit``."""
+    cast-then-scatter formula, for NumPy (on ``finufft``) and under ``jax.jit``
+    (on ``nufftax``)."""
+    pytest.importorskip("nufftax")
     import jax
     import jax.numpy as jnp
 
+    from autoarray.operators import nufft_cpu
     from autoarray.operators import transformer as transformer_module
 
     rng = np.random.default_rng(seed=4)
@@ -170,7 +173,7 @@ def test__nufft__transform_mapping_matrix__real_scatter_matches_complex_scatter_
     )
     expected_numpy = np.array(
         np.asarray(
-            nufftax.nufft2d2(
+            nufft_cpu.nufft2d2(
                 transformer._x,
                 transformer._y,
                 source_images[:, ::-1, :],
@@ -278,6 +281,7 @@ def test__nufft__chunk_size__image_from_numpy_matches_unchunked():
 
 
 def test__nufft__chunk_size__jax_paths_match_unchunked():
+    pytest.importorskip("nufftax")
     import jax
     import jax.numpy as jnp
 
@@ -324,6 +328,7 @@ def test__nufft__chunk_size__jax_jit_traces_with_scan():
     without unrolling the chunk loop. We exercise this by JIT-ing and
     confirming the compiled HLO graph has bounded size (no per-chunk
     re-emission)."""
+    pytest.importorskip("nufftax")
     import jax
     import jax.numpy as jnp
 
