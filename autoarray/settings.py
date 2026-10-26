@@ -209,6 +209,15 @@ class Settings:
             (`InversionInterferometerSparseNumba`) whenever it can represent the inversion
             (NumPy backend, one mapper, no linear functions, no over-sampling, numba
             installed), overriding the geometry gate and the `0` kill switch.
+            ``"matrix_free"`` uses `InversionInterferometerMatrixFree`, which never forms the
+            dense curvature matrix `F` or regularization matrix `H`: `F s` is applied as an FFT
+            convolution, the reconstruction is a preconditioned CG (or interior-point positive)
+            solve and `ln det(F + H)` a stochastic Lanczos quadrature estimate. It requires the
+            NumPy backend, one `RectangularUniform` mapper with `aa.reg.MaternSparse`
+            regularization, no linear functions and, with the positive-only solver,
+            `use_edge_zeroed_pixels=False`; it raises on anything else rather than falling
+            back, and dense-only attributes (e.g. `curvature_matrix`,
+            `reconstruction_noise_map`) are unavailable.
         interferometer_direct_conv_symmetric_max_work_fraction
             When the serial numba `direct_conv` route runs, the largest geometry work
             fraction at which it uses the symmetric, row-restricted kernel
@@ -449,18 +458,21 @@ class Settings:
     def interferometer_route(self) -> Optional[str]:
         """
         A forced interferometer curvature route: `None` (route by
-        `interferometer_numba_nnz_per_source_max`), ``"numba"`` or ``"fft"``.
+        `interferometer_numba_nnz_per_source_max`), ``"numba"``, ``"fft"`` or
+        ``"matrix_free"``.
 
         See the constructor docstring; ``"numba"`` still requires an inversion the
-        `direct_conv` kernel can represent.
+        `direct_conv` kernel can represent, and ``"matrix_free"`` raises on an inversion
+        `InversionInterferometerMatrixFree` cannot represent.
         """
         value = self._interferometer_route
         if value is None:
             value = self._inversion_config_value("interferometer_route", None)
 
-        if value not in (None, "numba", "fft"):
+        if value not in (None, "numba", "fft", "matrix_free"):
             raise ValueError(
-                f"interferometer_route={value!r} is invalid; expected None, 'numba' or 'fft'."
+                f"interferometer_route={value!r} is invalid; expected None, 'numba', 'fft' "
+                "or 'matrix_free'."
             )
 
         return value

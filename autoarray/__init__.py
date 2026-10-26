@@ -51,6 +51,9 @@ from .inversion.inversion.imaging.inversion_imaging_util import ImagingSparseOpe
 from .inversion.inversion.interferometer.sparse import (
     InversionInterferometerSparse,
 )
+from .inversion.inversion.interferometer.matrix_free import (
+    InversionInterferometerMatrixFree,
+)
 from .inversion.inversion.interferometer.mapping import InversionInterferometerMapping
 from .inversion.inversion.interferometer.inversion_interferometer_util import (
     InterferometerSparseOperator,
