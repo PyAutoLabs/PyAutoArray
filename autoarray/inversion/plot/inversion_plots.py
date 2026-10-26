@@ -192,7 +192,8 @@ def subplot_of_mapper(
             mesh_grid=mesh_grid,
             lines=lines,
         )
-    except (KeyError, TypeError, np.linalg.LinAlgError):
+    except (KeyError, TypeError, np.linalg.LinAlgError, exc.InversionException):
+        # `InversionException`: the matrix-free interferometer route has no noise map.
         pass
 
     # panel 7: regularization weights
@@ -512,11 +513,12 @@ def save_reconstruction_csv(
 
         try:
             noise_map = inversion.reconstruction_noise_map_dict[mapper]
-        except np.linalg.LinAlgError:
+        except (np.linalg.LinAlgError, exc.InversionException) as error:
             logger.warning(
                 f"save_reconstruction_csv: could not compute the reconstruction noise map for "
-                f"mapper {i} (singular curvature_reg_matrix); writing the noise_map column of "
-                f"source_plane_reconstruction_{i}.csv as nan."
+                f"mapper {i} ({type(error).__name__}: e.g. a singular curvature_reg_matrix, or "
+                f"an inversion route with no noise map such as the matrix-free one); writing "
+                f"the noise_map column of source_plane_reconstruction_{i}.csv as nan."
             )
             noise_map = None
 

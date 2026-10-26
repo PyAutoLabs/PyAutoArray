@@ -30,8 +30,8 @@ by preconditioned conjugate gradients (PCG), with the Powell et al. (2021) preco
 
 Phase 1 landed the operator data term and the solver as library utilities, phase 2 the natively sparse
 Matérn precision (`aa.reg.MaternSparse`), phase 3 the evidence log-determinants (below) and phase 4 the
-positivity constraint (below), each with parity tests against the dense sparse-path quantities. None of
-it is wired into fits and there is no `Settings` flag.
+positivity constraint (below), each with parity tests against the dense sparse-path quantities. Phase 5a
+wires them into fits (`InversionInterferometerMatrixFree`, `Settings(interferometer_route="matrix_free")`).
 
 Positivity (phase 4)
 --------------------
@@ -46,7 +46,8 @@ solve.
 
 Remaining work (phase 5)
 ------------------------
-- wiring as an inversion class or a `Settings` option, so fits can select the matrix-free path;
+- wiring into fits: landed in phase 5a (#657) as `InversionInterferometerMatrixFree`
+  (`interferometer/matrix_free.py`), selected by `Settings(interferometer_route="matrix_free")`;
 - a profiling note, dense vs matrix-free at `50^2`, `64^2`, `128^2` and `192^2` mesh pixels, ingested
   by PyAutoPulse;
 - a workspace example;

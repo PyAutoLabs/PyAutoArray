@@ -1,6 +1,7 @@
 import numpy as np
 from typing import List, Optional, Tuple, Union
 
+from autoarray import exc
 from autoarray.dataset.imaging.dataset import Imaging
 from autoarray.dataset.interferometer.dataset import Interferometer
 from autoarray.inversion.inversion.imaging.mapping import InversionImagingMapping
@@ -16,6 +17,9 @@ from autoarray.inversion.inversion.interferometer.abstract import (
 )
 from autoarray.inversion.inversion.interferometer_numba.sparse import (
     InversionInterferometerSparseNumba,
+)
+from autoarray.inversion.inversion.interferometer.matrix_free import (
+    InversionInterferometerMatrixFree,
 )
 from autoarray.inversion.inversion.interferometer_numba import (
     sparse as interferometer_numba_sparse,
@@ -224,7 +228,24 @@ def inversion_interferometer_from(
     # `transform_mapping_matrix` of shape (N_vis, S), which dominates run time and memory at large N_vis, and
     # `InversionInterferometerSparse` handles zero mappers (the func-func curvature blocks and the data vector
     # need no mapper). `_use_interferometer_numba` returns False whenever a func-list is present.
+    route_is_matrix_free = (
+        settings is not None and settings.interferometer_route == "matrix_free"
+    )
+
     if dataset.sparse_operator is not None:
+
+        # The matrix-free route is opt-in only. `InversionInterferometerMatrixFree` raises on
+        # every configuration it cannot represent (JAX, linear functions, several mappers, a
+        # non-rectangular mesh, a regularization without a sparse form, ...); there is no silent
+        # fallback to the dense routes.
+        if route_is_matrix_free:
+            return InversionInterferometerMatrixFree(
+                dataset=dataset,
+                linear_obj_list=linear_obj_list,
+                settings=settings,
+                xp=xp,
+                preloads=preloads,
+            )
 
         # The numba `direct_conv` kernel uses the mapper weights as-is and cannot apply a primary
         # beam, so a dataset with a non-trivial one (any value other than 1) always takes the FFT
@@ -258,6 +279,14 @@ def inversion_interferometer_from(
             settings=settings,
             xp=xp,
             preloads=preloads,
+        )
+
+    if route_is_matrix_free:
+        raise exc.InversionException(
+            '`Settings(interferometer_route="matrix_free")` was set but the interferometer '
+            "dataset has no `sparse_operator`. The matrix-free route reads the w-tilde kernel "
+            "and dirty image from it; call `dataset.apply_sparse_operator(...)` first, or use "
+            '`interferometer_route="fft"` (or leave it unset).'
         )
 
     return InversionInterferometerMapping(
