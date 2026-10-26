@@ -6,7 +6,7 @@
 dataset:                                   # Settings for plots of all datasets (e.g. Imaging, Interferometer).
   subplot_dataset: true                    # Plot subplot containing all dataset quantities (e.g. the data, noise-map, etc.)?
 imaging:                                   # Settings for plots of imaging datasets (e.g. Imaging)
-   psf: false
+   psf: false # If True, output the imaging dataset PSF plot.
 fit:                                       # Settings for plots of all fits (e.g. FitImaging, FitInterferometer).
   subplot_fit: true                        # Plot subplot of all fit quantities for any dataset (e.g. the model data, residual-map, etc.)?
   subplot_fit_log10: false                  # Plot subplot of all fit quantities for any dataset using log10 color maps (e.g. the model data, residual-map, etc.)?
