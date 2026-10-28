@@ -474,7 +474,18 @@ class MeshGeometryRectangular(AbstractMeshGeometry):
         mapper scatters its flux (issue #372). Guard-node edges fall outside
         the CDF domain and clamp to the data span in the inverse interp,
         squashing the border guard cells to the region they actually cover.
+
+        ``RectangularUniform`` (``transform="uniform"``) is the exception: its
+        mapper interpolates bilinearly between the overlay grid's pixel
+        centres with no CDF and no guard ring, so its edges are the uniform
+        cell boundaries half a node spacing either side of every node (the
+        same cells its ``imshow`` plot draws). Routing it through the kernel
+        CDF and guard-ring convention instead biased its
+        ``areas_for_magnification`` by -77% to +259% across the audited
+        configurations (PyAutoArray#659).
         """
+        if self.transform == "uniform":
+            return self._edges_uniform
 
         # Node-midpoint edges in unit CDF space (see docstring); the guard
         # denominator keeps the degenerate n <= 3 meshes finite (their
@@ -514,6 +525,25 @@ class MeshGeometryRectangular(AbstractMeshGeometry):
             transform=self.transform,
             xp=self._xp,
         )
+
+    @property
+    def _edges_uniform(self):
+        """
+        The cell edges of the uniform rectangular mesh, shape ``(n + 1, 2)``
+        packing (y_edges descending, x_edges ascending): every overlay-grid
+        node sits at the centre of its cell, so the cells tile the overlay's
+        bounding box with one node spacing per cell.
+        """
+        xp = self._xp
+        grid = self.mesh_grid.array
+        n_y, n_x = self.shape_native
+        y_max = xp.max(grid[:, 0])
+        x_min = xp.min(grid[:, 1])
+        dy = (y_max - xp.min(grid[:, 0])) / (n_y - 1)
+        dx = (xp.max(grid[:, 1]) - x_min) / (n_x - 1)
+        edges_y = y_max + 0.5 * dy - xp.arange(n_y + 1) * dy
+        edges_x = x_min - 0.5 * dx + xp.arange(n_x + 1) * dx
+        return xp.stack([edges_y, edges_x]).T
 
     @property
     def neighbors(self) -> Neighbors:
