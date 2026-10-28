@@ -53,13 +53,17 @@ GAUSS_SIGMA = 0.5
 # with this exact configuration (PyAutoArray#659) and set ~1.5-2x above the
 # measurement, quoted in brackets.
 #
-# Exact quadrature (tight):
+# Tight:
 #   - Delaunay: barycentric dual areas are the exact quadrature of the linear
 #     interpolant (PyAutoArray#524) [-1.1e-4].
-#   - RectangularUniform: uniform cells centred on the overlay nodes, the trapezoid
-#     weights of its bilinear interpolant [-1.2e-3]. Before PyAutoArray#659 its areas
-#     came from the adaptive meshes' kernel-CDF guard-ring geometry, which does not
-#     describe the uniform mapper at all, and this error was +55%.
+#   - RectangularUniform: uniform cells centred on the overlay nodes. They tile the
+#     overlay box exactly (the area SUM is exact), but per node they only
+#     approximate the quadrature of the clipped + extrapolated bilinear interpolant
+#     near the boundary ring (measured Q/A ~1.74 corner, ~1.32 edge, ~0.81 second
+#     ring, ~1.0 interior); negligible for a source away from the mesh edge, hence
+#     [-1.2e-3]. Before PyAutoArray#659 its areas came from the adaptive meshes'
+#     kernel-CDF guard-ring geometry, which does not describe the uniform mapper at
+#     all, and this error was +55%.
 #
 # Documented approximations (flagged in PyAutoArray#659 for a ruling):
 #   - RectangularRTUAdaptDensity: node-midpoint cells, accurate here because a

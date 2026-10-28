@@ -434,11 +434,14 @@ class MeshGeometryRectangular(AbstractMeshGeometry):
     @property
     def areas_transformed(self):
         """
-        The source-plane area of every pixel in the rectangular pixelization,
-        transformed through the kernel-density CDF the mapper adapts with.
+        The source-plane area of every pixel in the rectangular pixelization:
+        the outer product of the cell spacings of ``edges_transformed``.
 
-        Cell boundaries are the mapper's node-midpoint edges, including
-        clamped guard cells. Reusing ``edges_transformed`` also keeps the
+        For the adaptive meshes the cells are transformed through the CDF the
+        mapper adapts with (rank or kernel) and their boundaries are the
+        mapper's node-midpoint edges, including clamped guard cells. For
+        ``RectangularUniform`` (``transform="uniform"``) they are the uniform
+        cells centred on the overlay nodes (see ``edges_transformed``). Reusing ``edges_transformed`` also keeps the
         slim data grid aligned with its adapt-image weights.
         """
         edges = self.edges_transformed
@@ -461,8 +464,9 @@ class MeshGeometryRectangular(AbstractMeshGeometry):
     @property
     def edges_transformed(self):
         """
-        The source-plane cell edges of every mesh pixel, transformed through
-        the adaptive CDF — one more edge than pixels per axis, shape
+        The source-plane cell edges of every mesh pixel — transformed through
+        the adaptive CDF for the adaptive meshes, uniform for
+        ``RectangularUniform`` — one more edge than pixels per axis, shape
         ``(n + 1, 2)`` packing (y_edges, x_edges).
 
         The interpolation mapper is node-based: reconstruction value
@@ -479,7 +483,11 @@ class MeshGeometryRectangular(AbstractMeshGeometry):
         mapper interpolates bilinearly between the overlay grid's pixel
         centres with no CDF and no guard ring, so its edges are the uniform
         cell boundaries half a node spacing either side of every node (the
-        same cells its ``imshow`` plot draws). Routing it through the kernel
+        same cells its ``imshow`` plot draws). These cells tile the overlay
+        box exactly, so the area sum is exact; per node they approximate the
+        quadrature of the clipped + extrapolated bilinear interpolant only
+        near the boundary ring, which is negligible for a source away from the
+        mesh edge. Routing it through the kernel
         CDF and guard-ring convention instead biased its
         ``areas_for_magnification`` by -77% to +259% across the audited
         configurations (PyAutoArray#659).

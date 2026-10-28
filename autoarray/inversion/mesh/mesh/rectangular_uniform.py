@@ -15,9 +15,10 @@ class RectangularUniform(RectangularRTUAdaptDensity):
         - Indices increase left-to-right across rows and top-to-bottom
           between rows.
 
-    Each source-plane coordinate is associated with the rectangular pixel
-    in which it lies. No interpolation is performed — every coordinate
-    contributes fully to a single pixel.
+    Each source-plane coordinate is interpolated bilinearly between the four
+    surrounding pixel centres of the uniform overlay grid (extrapolating
+    linearly beyond the outermost centres), so it contributes to up to four
+    pixels.
 
     Uniform behaviour
     -----------------
