@@ -60,10 +60,12 @@ GAUSS_SIGMA = 0.5
 #     weights of its bilinear interpolant [-1.2e-3]. Before PyAutoArray#659 its areas
 #     came from the adaptive meshes' kernel-CDF guard-ring geometry, which does not
 #     describe the uniform mapper at all, and this error was +55%.
-#   - RectangularRTUAdaptDensity: node-midpoint cells of a near-linear kernel CDF
-#     [+2.5e-3].
 #
 # Documented approximations (flagged in PyAutoArray#659 for a ruling):
+#   - RectangularRTUAdaptDensity: node-midpoint cells, accurate here because a
+#     density-adapted kernel CDF of an unlensed grid is near-linear [+2.5e-3]; the
+#     lensed workspace check (autolens_workspace_test
+#     scripts/imaging/mesh_magnification.py) measures -1.8%.
 #   - RectangularBilinearAdaptDensity / RectangularBilinearAdaptImage /
 #     RectangularRTUAdaptImage: `areas_for_magnification` is each node's
 #     node-midpoint cell pushed through the inverse CDF. That is not the integral of
