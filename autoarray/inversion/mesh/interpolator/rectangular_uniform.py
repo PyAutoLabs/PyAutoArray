@@ -158,6 +158,7 @@ class InterpolatorRectangularUniform(AbstractInterpolator):
             mesh_grid=self.mesh_grid,
             data_grid=self.data_grid,
             mesh_weight_map=self.mesh_weight_map,
+            transform="uniform",
             xp=self._xp,
         )
 

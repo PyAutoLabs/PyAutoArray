@@ -434,11 +434,14 @@ class MeshGeometryRectangular(AbstractMeshGeometry):
     @property
     def areas_transformed(self):
         """
-        The source-plane area of every pixel in the rectangular pixelization,
-        transformed through the kernel-density CDF the mapper adapts with.
+        The source-plane area of every pixel in the rectangular pixelization:
+        the outer product of the cell spacings of ``edges_transformed``.
 
-        Cell boundaries are the mapper's node-midpoint edges, including
-        clamped guard cells. Reusing ``edges_transformed`` also keeps the
+        For the adaptive meshes the cells are transformed through the CDF the
+        mapper adapts with (rank or kernel) and their boundaries are the
+        mapper's node-midpoint edges, including clamped guard cells. For
+        ``RectangularUniform`` (``transform="uniform"``) they are the uniform
+        cells centred on the overlay nodes (see ``edges_transformed``). Reusing ``edges_transformed`` also keeps the
         slim data grid aligned with its adapt-image weights.
         """
         edges = self.edges_transformed
@@ -449,20 +452,56 @@ class MeshGeometryRectangular(AbstractMeshGeometry):
     @property
     def areas_for_magnification(self):
         """
-        The area of every pixel in the rectangular pixelization.
+        The quadrature weight of every pixel in the rectangular pixelization:
+        ``sum(reconstruction * areas_for_magnification)`` is the integral of
+        the reconstructed source.
+
+        For the adaptive meshes this is the exact integral of each node's
+        bilinear basis function through the mapper's forward CDF (see
+        ``adaptive_rectangular_hat_areas_from``), not the node-midpoint cell
+        area of ``areas_transformed``, which was biased by up to ~20% per node
+        wherever the CDF bends across a cell (PyAutoArray#659). For
+        ``RectangularUniform`` it is the uniform cell area.
 
         Returns
         -------
         ndarray
-            The area of every pixel in the rectangular pixelization.
+            The quadrature weight of every pixel in the rectangular pixelization.
         """
-        return self.areas_transformed
+        if self.transform == "uniform":
+            return self.areas_transformed
+
+        from autoarray.inversion.mesh.interpolator.rectangular import (
+            KERNEL_CDF_DEFAULT_BANDWIDTH,
+            KERNEL_CDF_DEFAULT_KNOTS,
+            adaptive_rectangular_hat_areas_from,
+        )
+
+        return adaptive_rectangular_hat_areas_from(
+            source_grid_size=self.shape_native[0],
+            data_grid=self.data_grid.array,
+            data_grid_over_sampled=self.data_grid.over_sampled.array,
+            mesh_weight_map=self.mesh_weight_map,
+            bandwidth=(
+                self.kernel_bandwidth
+                if self.kernel_bandwidth is not None
+                else KERNEL_CDF_DEFAULT_BANDWIDTH
+            ),
+            n_knots=(
+                self.kernel_knots
+                if self.kernel_knots is not None
+                else KERNEL_CDF_DEFAULT_KNOTS
+            ),
+            transform=self.transform,
+            xp=self._xp,
+        )
 
     @property
     def edges_transformed(self):
         """
-        The source-plane cell edges of every mesh pixel, transformed through
-        the adaptive CDF — one more edge than pixels per axis, shape
+        The source-plane cell edges of every mesh pixel — transformed through
+        the adaptive CDF for the adaptive meshes, uniform for
+        ``RectangularUniform`` — one more edge than pixels per axis, shape
         ``(n + 1, 2)`` packing (y_edges, x_edges).
 
         The interpolation mapper is node-based: reconstruction value
@@ -474,7 +513,22 @@ class MeshGeometryRectangular(AbstractMeshGeometry):
         mapper scatters its flux (issue #372). Guard-node edges fall outside
         the CDF domain and clamp to the data span in the inverse interp,
         squashing the border guard cells to the region they actually cover.
+
+        ``RectangularUniform`` (``transform="uniform"``) is the exception: its
+        mapper interpolates bilinearly between the overlay grid's pixel
+        centres with no CDF and no guard ring, so its edges are the uniform
+        cell boundaries half a node spacing either side of every node (the
+        same cells its ``imshow`` plot draws). These cells tile the overlay
+        box exactly, so the area sum is exact; per node they approximate the
+        quadrature of the clipped + extrapolated bilinear interpolant only
+        near the boundary ring, which is negligible for a source away from the
+        mesh edge. Routing it through the kernel
+        CDF and guard-ring convention instead biased its
+        ``areas_for_magnification`` by -77% to +259% across the audited
+        configurations (PyAutoArray#659).
         """
+        if self.transform == "uniform":
+            return self._edges_uniform
 
         # Node-midpoint edges in unit CDF space (see docstring); the guard
         # denominator keeps the degenerate n <= 3 meshes finite (their
@@ -514,6 +568,25 @@ class MeshGeometryRectangular(AbstractMeshGeometry):
             transform=self.transform,
             xp=self._xp,
         )
+
+    @property
+    def _edges_uniform(self):
+        """
+        The cell edges of the uniform rectangular mesh, shape ``(n + 1, 2)``
+        packing (y_edges descending, x_edges ascending): every overlay-grid
+        node sits at the centre of its cell, so the cells tile the overlay's
+        bounding box with one node spacing per cell.
+        """
+        xp = self._xp
+        grid = self.mesh_grid.array
+        n_y, n_x = self.shape_native
+        y_max = xp.max(grid[:, 0])
+        x_min = xp.min(grid[:, 1])
+        dy = (y_max - xp.min(grid[:, 0])) / (n_y - 1)
+        dx = (xp.max(grid[:, 1]) - x_min) / (n_x - 1)
+        edges_y = y_max + 0.5 * dy - xp.arange(n_y + 1) * dy
+        edges_x = x_min - 0.5 * dx + xp.arange(n_x + 1) * dx
+        return xp.stack([edges_y, edges_x]).T
 
     @property
     def neighbors(self) -> Neighbors:

@@ -478,6 +478,84 @@ def adaptive_rectangular_areas_from(
     return xp.abs(xp.outer(dy, dx).flatten())
 
 
+# Samples per axis of the 1D quadrature in `adaptive_rectangular_hat_areas_from`.
+# Against 40001 samples on a 12x12 mesh (PyAutoArray#659) the per-node error is
+# ~1e-6 on the smooth kernel CDF and ~6e-4 on the rank CDF's staircase over an
+# unlensed (fully tied) grid, its worst case.
+HAT_AREA_QUADRATURE_SAMPLES: int = 4097
+
+
+def adaptive_rectangular_hat_areas_from(
+    source_grid_size: int,
+    data_grid,
+    data_grid_over_sampled,
+    mesh_weight_map=None,
+    bandwidth: float = KERNEL_CDF_DEFAULT_BANDWIDTH,
+    n_knots: int = KERNEL_CDF_DEFAULT_KNOTS,
+    transform: str = "kernel",
+    n_samples: int = HAT_AREA_QUADRATURE_SAMPLES,
+    xp=np,
+):
+    """
+    The exact source-plane integral of every node's interpolation basis
+    function on the adaptive rectangular mesh — the quadrature weights for which
+    ``sum(reconstruction * areas)`` is the integral of the reconstructed source.
+
+    The mapper of ``adaptive_rectangular_mappings_weights_via_interpolation_from``
+    gives node ``(r, c)`` the separable basis function
+
+        phi_rc(y, x) = hat_r(g_y(y)) * hat_c(g_x(x)),
+        g(.) = (source_grid_size - 3) * U(.) + 1,
+
+    where ``U`` is the forward CDF transform and ``hat_k(g) = max(0, 1 - |g - k|)``
+    in index space (rows flipped, ``row = n - i``). Its integral is therefore
+    the outer product of two 1D integrals, ``q_y(r) * q_x(c)``, each evaluated
+    here by trapezoid quadrature of ``hat_k(g(t))`` along the axis through the
+    SAME forward transform the mapper uses. Pushing the node-midpoint cell edges
+    through the inverse CDF instead (``areas_transformed``) is only correct where
+    the CDF is linear across a cell; on a steep adapt-image CDF or the rank CDF's
+    tied-coordinate staircase it was biased by up to ~20% per node.
+
+    The domain is the bounding box of the over-sampled data grid — the region the
+    mapper actually samples — so the areas sum to that box's area. Guard nodes
+    (rows 0 and 1, columns 0 and n - 1) are never reached by ``g`` and get zero.
+    Differentiable under JAX (no sorts on the kernel path; the rank path's sort
+    is the same one the mapper already uses).
+    """
+    mu = data_grid.mean(axis=0)
+    scale = data_grid.std(axis=0).min()
+    source_grid_scaled = (data_grid - mu) / scale
+
+    transform_func, _ = _transforms_from(
+        source_grid_scaled,
+        mesh_pixels=source_grid_size,
+        mesh_weight_map=mesh_weight_map,
+        bandwidth=bandwidth,
+        n_knots=n_knots,
+        transform=transform,
+        xp=xp,
+    )
+
+    lo = xp.min(data_grid_over_sampled, axis=0)
+    hi = xp.max(data_grid_over_sampled, axis=0)
+    u = xp.linspace(0.0, 1.0, n_samples)
+    samples = lo[None, :] + u[:, None] * (hi - lo)[None, :]
+
+    g = (source_grid_size - 3) * transform_func((samples - mu) / scale) + 1
+
+    # The mapper's `flatten` puts y index-space node k on row n - k and x node k
+    # on column k, so row r holds y node n - r (row 0 is node n, never reached).
+    n = source_grid_size
+    nodes = xp.stack([n - xp.arange(n), xp.arange(n)], axis=0)
+    hats = xp.clip(1.0 - xp.abs(g[:, :, None] - nodes[None, :, :]), 0.0, None)
+
+    # trapezoid rule along each axis: (n_samples, 2, n) -> (2, n)
+    dt = ((hi - lo) / (n_samples - 1))[:, None]
+    q = dt * (xp.sum(hats, axis=0) - 0.5 * (hats[0] + hats[-1]))
+
+    return xp.outer(q[0], q[1]).ravel()
+
+
 def adaptive_rectangular_mappings_weights_via_interpolation_from(
     source_grid_size: int,
     data_grid,

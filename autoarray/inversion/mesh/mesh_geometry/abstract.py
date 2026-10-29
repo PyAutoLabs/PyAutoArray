@@ -24,9 +24,10 @@ class AbstractMeshGeometry:
         self.kernel_bandwidth = kernel_bandwidth
         self.kernel_knots = kernel_knots
         # The rectangular lattice transform the areas / edges route through:
-        # "kernel" (the RTU meshes and the uniform mesh's fallback) or "rank"
-        # (the Bilinear meshes) — must match the mapper's transform so the
-        # geometry is consistent with where the mapper scatters its flux.
+        # "kernel" (the RTU meshes), "rank" (the Bilinear meshes) or "uniform"
+        # (RectangularUniform: no CDF, cells centred on the overlay nodes) —
+        # must match the mapper's transform so the geometry is consistent
+        # with where the mapper scatters its flux.
         self.transform = transform
         self._use_jax = xp is not np
 
