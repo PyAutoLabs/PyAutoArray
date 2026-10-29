@@ -76,11 +76,18 @@ GAUSS_SIGMA = 0.5
 #     not the integral of the node's hat once the CDF bends across the cell (the
 #     rank CDF's staircase on tied coordinates; a steep adapt-image CDF).
 #
-# Documented approximations (flagged in PyAutoArray#659; phase 4b):
-#   - DelaunayNN / KNearestNeighbor / KNNBarycentric inherit the Delaunay dual
-#     areas, which are exact only for the linear interpolant; for the Sibson,
-#     Wendland-kNN and 3-nearest-barycentric interpolants they are an approximation
-#     [-4.3e-3, +1.6e-2, -4.4e-2].
+#   - KNearestNeighbor / KNNBarycentric: the integral of each vertex's kNN basis
+#     function over the convex hull, by midpoint quadrature of the interpolator's
+#     own weights (`MeshGeometryKNearestNeighbor`, PyAutoArray#665)
+#     [+1.3e-5, +1.8e-3; KNNBarycentric's clipped weights are discontinuous, so
+#     the coarse sub-pixel `Q` is the limit there]. The Delaunay dual areas they
+#     used before measured [+1.6e-2, -4.4e-2]. The quadrature integrates whatever
+#     neighbours the interpolator selects, so it stays exact with or without the
+#     open partial-block neighbour bug PyAutoArray#609.
+#
+# Documented approximation:
+#   - DelaunayNN inherits the Delaunay dual areas, exact only for the linear
+#     interpolant; for its Sibson interpolant they are an approximation [-4.3e-3].
 MAGNIFICATION_TOLERANCE = {
     "RectangularUniform": 2.5e-3,
     "RectangularBilinearAdaptDensity": 1.0e-3,
@@ -89,8 +96,8 @@ MAGNIFICATION_TOLERANCE = {
     "RectangularRTUAdaptImage": 1.0e-2,
     "Delaunay": 3.0e-4,
     "DelaunayNN": 1.0e-2,
-    "KNearestNeighbor": 3.0e-2,
-    "KNNBarycentric": 7.0e-2,
+    "KNearestNeighbor": 1.0e-4,
+    "KNNBarycentric": 4.0e-3,
 }
 
 RECTANGULAR_ADAPTIVE = [

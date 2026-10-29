@@ -150,6 +150,25 @@ class InterpolatorKNearestNeighbor(InterpolatorDelaunay):
     # Excluding them would change pixel signals broadly and add a jump in the likelihood (PyAutoArray#627).
     exclude_zero_weight_mappings = False
 
+    @cached_property
+    def mesh_geometry(self):
+        """
+        The kNN geometry: Delaunay vertex geometry whose
+        `areas_for_magnification` integrates this interpolator's own basis
+        functions (see `MeshGeometryKNearestNeighbor`).
+        """
+        from autoarray.inversion.mesh.mesh_geometry.delaunay import (
+            MeshGeometryKNearestNeighbor,
+        )
+
+        return MeshGeometryKNearestNeighbor(
+            mesh=self.mesh,
+            mesh_grid=self.mesh_grid,
+            data_grid=self.data_grid,
+            interpolator_cls=type(self),
+            xp=self._xp,
+        )
+
     @property
     def dual_areas(self):
         """
