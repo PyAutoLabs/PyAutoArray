@@ -69,6 +69,7 @@ def plot_array(
     output_path: Optional[str] = None,
     output_filename: str = "array",
     output_format: str = None,
+    stretch: Optional[float] = None,
 ) -> None:
     """
     Plot a 2D array (image) using ``plt.imshow``.
@@ -127,6 +128,10 @@ def plot_array(
         Explicit color scale limits.
     use_log10
         When ``True`` a ``LogNorm`` is applied.
+    stretch
+        Optional positive asinh linear-width fraction of the displayed range,
+        e.g. 0.01 to reveal faint structure beside a bright peak. Only changes
+        the colour mapping; incompatible with ``use_log10=True``.
     origin_imshow
         Passed directly to ``imshow`` (``"upper"`` or ``"lower"``).
     arcsec_after_decimal
@@ -194,7 +199,7 @@ def plot_array(
         fig = ax.get_figure()
 
     # --- colour normalisation --------------------------------------------------
-    norm = norm_from(array=array, use_log10=use_log10, vmin=vmin, vmax=vmax)
+    norm = norm_from(array=array, use_log10=use_log10, vmin=vmin, vmax=vmax, stretch=stretch)
 
     # Compute the axes-box aspect ratio from the data extent so that the
     # physical cell is correctly shaped and tight_layout has no whitespace

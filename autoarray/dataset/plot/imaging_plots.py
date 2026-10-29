@@ -146,6 +146,97 @@ def subplot_imaging_dataset(
 
 
 
+def _intro_panel(array, radius=None, excluded_pixels=None):
+    """Prepare a display-only crop with excluded values missing, not zeroed.
+
+    Preserve the native pixel/coordinate registration; fitting arrays are never
+    mutated. Coordinates, ticks and colour mapping remain the renderer's job.
+    """
+    import numpy as np
+    from autoarray.plot.utils import zoom_array
+
+    if radius is not None and (not np.isfinite(radius) or radius <= 0):
+        raise ValueError("radius must be a finite positive number")
+    if radius is None and excluded_pixels is None:
+        array = zoom_array(array)
+    values = np.array(array.native.array, dtype=float, copy=True)
+    values[np.asarray(array.mask.array, dtype=bool)] = np.nan
+    if excluded_pixels is not None:
+        excluded = np.asarray(excluded_pixels, dtype=bool)
+        if excluded.shape != values.shape:
+            raise ValueError("excluded_pixels must have the dataset image shape")
+        values[excluded] = np.nan
+    xmin, xmax, ymin, ymax = array.geometry.extent
+    if radius is not None:
+        ny, nx = values.shape
+        dx, dy = (xmax - xmin) / nx, (ymax - ymin) / ny
+        x = xmin + (np.arange(nx) + 0.5) * dx
+        y = ymax - (np.arange(ny) + 0.5) * dy
+        rows, cols = np.flatnonzero(abs(y) <= radius), np.flatnonzero(abs(x) <= radius)
+        if not len(rows) or not len(cols):
+            raise ValueError("radius does not include any pixel centres")
+        r0, r1, c0, c1 = rows[0], rows[-1] + 1, cols[0], cols[-1] + 1
+        values = values[r0:r1, c0:c1]
+        xmin, xmax, ymin, ymax = xmin + c0 * dx, xmin + c1 * dx, ymax - r1 * dy, ymax - r0 * dy
+    return values, (xmin, xmax, ymin, ymax)
+
+
+def subplot_imaging_dataset_intro(
+    dataset,
+    output_path: Optional[str] = None,
+    output_filename: str = "dataset_intro",
+    output_format: str = None,
+    colormap=None,
+    stretch: Optional[float] = 0.01,
+    radius: Optional[float] = None,
+    excluded_pixels=None,
+):
+    """Four-panel introduction: Image, Noise map, Signal-to-noise map and PSF.
+
+    Uses the ordinary plot renderer and configured colormap, fonts, titles,
+    arcsecond ticks, colourbars and saving. Unlike the diagnostic 3x3 subplot,
+    it omits duplicate log panels and over-sampling maps. Numerical sampling
+    and the dataset itself are unchanged.
+
+    ``stretch`` is the image's asinh linear-width fraction: smaller values
+    reveal faint structure next to bright light; None selects linear display.
+    The S/N and PSF panels use asinh fractions 0.1 and 0.003, respectively;
+    noise remains linear. All colourbars retain original measurement values.
+    ``colormap=None`` inherits configuration on every panel.
+
+    ``radius`` optionally crops the first three panels about (0, 0), in
+    arcseconds, for display only. None follows the usual mask-zoom convention.
+    ``excluded_pixels`` is a native-shaped boolean array (True = exclude) for
+    deliberately down-weighted neighbours. These pixels, dataset-masked values
+    and non-finite measurements use the colormap's standard bad-value colour;
+    they do not determine the display scale. No clipping or data mutation.
+    """
+    from autoarray.plot.array import plot_array
+    from autoarray.plot.utils import apply_labels
+
+    panels = [
+        (dataset.data, "Image", stretch, None),
+        (dataset.noise_map, "Noise map", None, None),
+        (dataset.signal_to_noise_map, "Signal-to-noise map", 0.1, ""),
+    ]
+    prepared = [(_intro_panel(array, radius, excluded_pixels), title, scale, unit)
+                for array, title, scale, unit in panels]
+    fig, axes = subplots(2, 2, figsize=conf_subplot_figsize(2, 2))
+    for ax, ((values, extent), title, scale, unit) in zip(axes.flat, prepared):
+        plot_array(values, ax=ax, extent=extent, title=title,
+                   colormap=colormap, stretch=scale, cb_unit=unit)
+    if dataset.psf is not None:
+        plot_array(dataset.psf.kernel, ax=axes[1, 1], title="PSF",
+                   colormap=colormap, stretch=0.003, cb_unit="")
+    else:
+        apply_labels(axes[1, 1], title="PSF", is_subplot=True)
+        axes[1, 1].text(0.5, 0.5, "No PSF supplied", ha="center", va="center",
+                        transform=axes[1, 1].transAxes)
+    tight_layout()
+    subplot_save(fig, output_path, output_filename, output_format)
+    return fig
+
+
 def subplot_imaging_dataset_list(
     dataset_list,
     output_path=None,
