@@ -255,6 +255,17 @@ def symmetric_cmap_from(array, symmetric_value=None):
         If given, fix the half-range to this value (``vmin=-symmetric_value``,
         ``vmax=+symmetric_value``).
 
+    stretch
+        Optional positive asinh linear-width fraction of the displayed range.
+        Smaller values bring up faint structure; negative values remain defined.
+        Mutually exclusive with ``use_log10``. ``None`` preserves the existing
+        linear/log behavior.
+
+    stretch : float or None
+        Positive asinh linear-width fraction of the displayed value range.
+        Mutually exclusive with ``use_log10``. Non-finite values are ignored
+        when deriving limits. ``None`` retains the existing linear/log scale.
+
     Returns
     -------
     matplotlib.colors.Normalize or None
@@ -272,7 +283,7 @@ def symmetric_cmap_from(array, symmetric_value=None):
     return colors.Normalize(vmin=-abs_max, vmax=abs_max)
 
 
-def norm_from(array=None, use_log10=False, vmin=None, vmax=None):
+def norm_from(array=None, use_log10=False, vmin=None, vmax=None, stretch=None):
     """Build the matplotlib colour norm for *array* from flat arguments.
 
     The single implementation behind every colour scale the plot functions
@@ -307,8 +318,8 @@ def norm_from(array=None, use_log10=False, vmin=None, vmax=None):
     Parameters
     ----------
     array
-        The values being coloured. Only read when *use_log10* is ``True`` and
-        no finite *vmax* is given; ``None`` is accepted and takes the fallback.
+        The values being coloured. Read for log or asinh scaling when limits
+        are omitted; ``None`` is accepted and takes a finite fallback.
     use_log10
         When ``True`` a ``LogNorm`` is returned, floored at the configured
         ``log10_min_value``.
@@ -320,6 +331,22 @@ def norm_from(array=None, use_log10=False, vmin=None, vmax=None):
     -------
     matplotlib.colors.Normalize or None
     """
+    if stretch is not None:
+        if use_log10:
+            raise ValueError("stretch and use_log10 are mutually exclusive")
+        if not np.isfinite(stretch) or stretch <= 0:
+            raise ValueError("stretch must be a finite positive fraction")
+        from matplotlib.colors import AsinhNorm
+
+        values = np.ma.masked_invalid(np.ma.asarray(array, dtype=float)).compressed() if array is not None else np.array([])
+        lo = float(vmin) if vmin is not None else (float(values.min()) if values.size else 0.0)
+        hi = float(vmax) if vmax is not None else (float(values.max()) if values.size else 1.0)
+        if not np.isfinite(lo) or not np.isfinite(hi):
+            raise ValueError("asinh colour limits must be finite")
+        if hi <= lo:
+            hi = lo + max(abs(lo) * 0.01, 1e-6)
+        return AsinhNorm(linear_width=stretch * (hi - lo), vmin=lo, vmax=hi)
+
     if use_log10:
         log10_min = _conf_log10_min_value()
 
@@ -693,8 +720,8 @@ def _colorbar_tick_values(norm) -> Optional[List[float]]:
     import matplotlib.colors as mcolors
 
     lo, hi = float(norm.vmin), float(norm.vmax)
-    if isinstance(norm, mcolors.LogNorm):
-        mid = 10 ** ((np.log10(lo) + np.log10(hi)) / 2.0)
+    if isinstance(norm, (mcolors.LogNorm, mcolors.AsinhNorm)):
+        mid = float(norm.inverse(0.5))
     else:
         mid = (lo + hi) / 2.0
     return [lo, mid, hi]
