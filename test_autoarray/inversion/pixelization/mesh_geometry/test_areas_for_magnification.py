@@ -139,6 +139,10 @@ def _setup(name):
     The mapper, its areas, its exact quadrature `Q` and a Gaussian reconstruction,
     cached per mesh so the parametrized tests share one build.
     """
+    if name in ("KNearestNeighbor", "KNNBarycentric"):
+        # the KNN interpolators import jax (unittest-nojax leg)
+        pytest.importorskip("jax")
+
     if name in _CACHE:
         return _CACHE[name]
 
