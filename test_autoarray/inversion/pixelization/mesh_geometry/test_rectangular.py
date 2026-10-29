@@ -294,4 +294,16 @@ def test__areas_transformed__adapt_image_matches_cell_edges(over_sample_size):
     assert np.all(np.isfinite(areas))
     assert np.all(areas >= 0.0)
     np.testing.assert_allclose(areas, expected, rtol=1e-12, atol=1e-12)
-    np.testing.assert_array_equal(geometry.areas_for_magnification, areas)
+
+    # `areas_for_magnification` is the exact hat quadrature, not these cells
+    # (PyAutoArray#659): positive exactly where the mapper puts flux (the cells
+    # above give this coarse mesh's live bottom row zero area), summing to the
+    # over-sampled data box.
+    hat_areas = np.asarray(geometry.areas_for_magnification)
+    mapped = np.asarray(mapper.mapping_matrix_over_sampled).sum(axis=0) > 0.0
+    assert hat_areas.shape == (36,)
+    assert np.all(hat_areas >= 0.0)
+    np.testing.assert_array_equal(hat_areas > 0.0, mapped)
+    assert hat_areas.sum() == pytest.approx(
+        np.prod(np.ptp(np.asarray(grid.over_sampled.array), axis=0)), rel=1e-10
+    )

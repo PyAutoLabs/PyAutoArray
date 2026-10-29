@@ -16,10 +16,11 @@ so every data sub-pixel covers a known source-plane area. For any reconstruction
 and `sum_k s_k * A_k / sum_k s_k * Q_k` is the identity-lens magnification, which
 must be 1. The checks are:
 
-(a) the areas sum to the analytic area of the domain the mesh covers — the data
-    grid's bounding box for the adaptive rectangular meshes (the CDF maps that box
-    onto the unit square), the overlay box for `RectangularUniform`, and the convex
-    hull of the vertices for the Delaunay family (barycentric dual areas tile it);
+(a) the areas sum to the analytic area of the domain the mesh covers — the
+    over-sampled data grid's bounding box for the rectangular meshes (the adaptive
+    meshes integrate their basis functions over it; `RectangularUniform`'s overlay
+    grid spans it), and the convex hull of the vertices for the Delaunay family
+    (barycentric dual areas tile it);
 (b) for a smooth Gaussian source reconstructed on the mesh, the identity-lens
     magnification is 1 and the integrated reconstruction matches the analytic
     integral, within a per-mesh tolerance;
@@ -65,28 +66,27 @@ GAUSS_SIGMA = 0.5
 #     kernel-CDF guard-ring geometry, which does not describe the uniform mapper at
 #     all, and this error was +55%.
 #
-# Documented approximations (flagged in PyAutoArray#659 for a ruling):
-#   - RectangularRTUAdaptDensity: node-midpoint cells, accurate here because a
-#     density-adapted kernel CDF of an unlensed grid is near-linear [+2.5e-3]; the
-#     lensed workspace check (autolens_workspace_test
-#     scripts/imaging/mesh_magnification.py) measures -1.8%.
-#   - RectangularBilinearAdaptDensity / RectangularBilinearAdaptImage /
-#     RectangularRTUAdaptImage: `areas_for_magnification` is each node's
-#     node-midpoint cell pushed through the inverse CDF. That is not the integral of
-#     the node's bilinear hat once the CDF is non-linear across a cell (the rank
-#     CDF's staircase on tied coordinates; a steep adapt-image CDF). The exact
-#     per-axis hat quadrature brings these to ~1e-3 in a prototype
-#     [+3.1e-2, +2.4e-1, +8.0e-2; ~1-3% for all three at 20x20 and finer].
+#   - The adaptive rectangular meshes: the exact per-axis integral of each node's
+#     bilinear hat through the mapper's forward CDF
+#     (`adaptive_rectangular_hat_areas_from`). The residual is this coarse grid's
+#     sub-pixel quadrature `Q`, not the areas [BilinearAdaptDensity -3.1e-4,
+#     BilinearAdaptImage -4.2e-3, RTUAdaptDensity +2.3e-3, RTUAdaptImage -5.3e-3].
+#     The node-midpoint cells they replaced (PyAutoArray#659) were off by
+#     [+3.1e-2, +2.4e-1, +2.5e-3, +8.0e-2]: the inverse CDF of a cell's edges is
+#     not the integral of the node's hat once the CDF bends across the cell (the
+#     rank CDF's staircase on tied coordinates; a steep adapt-image CDF).
+#
+# Documented approximations (flagged in PyAutoArray#659; phase 4b):
 #   - DelaunayNN / KNearestNeighbor / KNNBarycentric inherit the Delaunay dual
 #     areas, which are exact only for the linear interpolant; for the Sibson,
 #     Wendland-kNN and 3-nearest-barycentric interpolants they are an approximation
 #     [-4.3e-3, +1.6e-2, -4.4e-2].
 MAGNIFICATION_TOLERANCE = {
     "RectangularUniform": 2.5e-3,
-    "RectangularBilinearAdaptDensity": 5.0e-2,
-    "RectangularBilinearAdaptImage": 3.5e-1,
+    "RectangularBilinearAdaptDensity": 1.0e-3,
+    "RectangularBilinearAdaptImage": 8.0e-3,
     "RectangularRTUAdaptDensity": 5.0e-3,
-    "RectangularRTUAdaptImage": 1.2e-1,
+    "RectangularRTUAdaptImage": 1.0e-2,
     "Delaunay": 3.0e-4,
     "DelaunayNN": 1.0e-2,
     "KNearestNeighbor": 3.0e-2,
@@ -190,8 +190,9 @@ def test__areas_sum_to_the_covered_domain(name):
         domain = np.prod(np.ptp(np.asarray(grid.over_sampled.array), axis=0))
         rel = 1.0e-6
     else:
-        # the adaptive CDF maps the data grid's bounding box onto the unit square
-        domain = np.prod(np.ptp(np.asarray(grid.array), axis=0))
+        # the hats are integrated over the over-sampled data's bounding box and
+        # partition unity on it
+        domain = np.prod(np.ptp(np.asarray(grid.over_sampled.array), axis=0))
         rel = 1.0e-10
 
     assert areas.sum() == pytest.approx(domain, rel=rel)
@@ -219,8 +220,8 @@ def test__rectangular_adaptive__guard_cells_have_zero_area_and_no_flux(name):
     """
     The adaptive rectangular mapper is node-based with a guard ring in unit CDF
     space: rows 0 and 1 (above U_y = 1) and columns 0 and n - 1 (outside
-    [0, 1] in U_x) never receive mapping weight, and their node-midpoint edges clamp
-    to the data span so their area is exactly zero. Every other cell is live and
+    [0, 1] in U_x) never receive mapping weight, and their hats are never reached
+    by the transformed coordinate so their area is exactly zero. Every other cell is live and
     carries a positive area — including the bottom row (U_y = 0), which is live
     although it sits in the `zeroed_pixels` edge ring.
     """

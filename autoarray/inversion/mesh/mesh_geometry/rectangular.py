@@ -452,14 +452,49 @@ class MeshGeometryRectangular(AbstractMeshGeometry):
     @property
     def areas_for_magnification(self):
         """
-        The area of every pixel in the rectangular pixelization.
+        The quadrature weight of every pixel in the rectangular pixelization:
+        ``sum(reconstruction * areas_for_magnification)`` is the integral of
+        the reconstructed source.
+
+        For the adaptive meshes this is the exact integral of each node's
+        bilinear basis function through the mapper's forward CDF (see
+        ``adaptive_rectangular_hat_areas_from``), not the node-midpoint cell
+        area of ``areas_transformed``, which was biased by up to ~20% per node
+        wherever the CDF bends across a cell (PyAutoArray#659). For
+        ``RectangularUniform`` it is the uniform cell area.
 
         Returns
         -------
         ndarray
-            The area of every pixel in the rectangular pixelization.
+            The quadrature weight of every pixel in the rectangular pixelization.
         """
-        return self.areas_transformed
+        if self.transform == "uniform":
+            return self.areas_transformed
+
+        from autoarray.inversion.mesh.interpolator.rectangular import (
+            KERNEL_CDF_DEFAULT_BANDWIDTH,
+            KERNEL_CDF_DEFAULT_KNOTS,
+            adaptive_rectangular_hat_areas_from,
+        )
+
+        return adaptive_rectangular_hat_areas_from(
+            source_grid_size=self.shape_native[0],
+            data_grid=self.data_grid.array,
+            data_grid_over_sampled=self.data_grid.over_sampled.array,
+            mesh_weight_map=self.mesh_weight_map,
+            bandwidth=(
+                self.kernel_bandwidth
+                if self.kernel_bandwidth is not None
+                else KERNEL_CDF_DEFAULT_BANDWIDTH
+            ),
+            n_knots=(
+                self.kernel_knots
+                if self.kernel_knots is not None
+                else KERNEL_CDF_DEFAULT_KNOTS
+            ),
+            transform=self.transform,
+            xp=self._xp,
+        )
 
     @property
     def edges_transformed(self):
