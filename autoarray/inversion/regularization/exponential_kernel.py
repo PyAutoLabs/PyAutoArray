@@ -7,6 +7,7 @@ if TYPE_CHECKING:
 
 from autoarray.inversion.regularization.abstract import AbstractRegularization
 from autoarray.inversion.regularization.abstract import validate_coefficient
+from autoarray.inversion.regularization.abstract import regularization_mesh_grid_from
 
 
 def exp_cov_matrix_from(
@@ -161,7 +162,7 @@ class ExponentialKernel(AbstractRegularization):
 
         covariance_matrix = exp_cov_matrix_from(
             scale=self.scale,
-            pixel_points=linear_obj.source_plane_mesh_grid.array,
+            pixel_points=regularization_mesh_grid_from(linear_obj).array,
             jitter=self.jitter_value,
             jitter_relative=self.jitter_relative,
             xp=xp,
@@ -185,7 +186,7 @@ class ExponentialKernel(AbstractRegularization):
         """
         covariance_matrix = exp_cov_matrix_from(
             scale=self.scale,
-            pixel_points=linear_obj.source_plane_mesh_grid.array,
+            pixel_points=regularization_mesh_grid_from(linear_obj).array,
             jitter=self.jitter_value,
             jitter_relative=self.jitter_relative,
             xp=xp,
@@ -217,7 +218,7 @@ class ExponentialKernel(AbstractRegularization):
 
         covariance_matrix = exp_cov_matrix_from(
             scale=self.scale,
-            pixel_points=linear_obj.source_plane_mesh_grid.array,
+            pixel_points=regularization_mesh_grid_from(linear_obj).array,
             jitter=self.jitter_value,
             jitter_relative=self.jitter_relative,
             xp=xp,

@@ -52,6 +52,12 @@ class MockMapper(Mapper):
         return self._source_plane_mesh_grid
 
     @property
+    def regularization_mesh_grid(self):
+        if self._source_plane_mesh_grid is None:
+            return super().regularization_mesh_grid
+        return self._source_plane_mesh_grid
+
+    @property
     def adapt_data(self):
         if self._adapt_data is None:
             return super().adapt_data

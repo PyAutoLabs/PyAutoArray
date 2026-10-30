@@ -478,6 +478,73 @@ def adaptive_rectangular_areas_from(
     return xp.abs(xp.outer(dy, dx).flatten())
 
 
+def adaptive_rectangular_node_centres_from(
+    source_grid_shape,
+    data_grid,
+    mesh_weight_map=None,
+    bandwidth: float = KERNEL_CDF_DEFAULT_BANDWIDTH,
+    n_knots: int = KERNEL_CDF_DEFAULT_KNOTS,
+    transform: str = "kernel",
+    xp=np,
+):
+    """
+    The source-plane (y,x) centre of every node of the adaptive rectangular mesh,
+    in the mapper's pixel order — the position where node ``(r, c)``'s
+    interpolation basis function peaks, so that reconstruction value ``k`` lives
+    at centre ``k``.
+
+    The mapper of ``adaptive_rectangular_mappings_weights_via_interpolation_from``
+    places the source plane in index space via ``g = (source_grid_size - 3) * U + 1``
+    with ``U`` the forward CDF transform, and its ``flatten`` puts y index-space
+    node ``k`` on row ``n - k`` and x node ``k`` on column ``k``. Node ``(r, c)``
+    is therefore at unit-square coordinate
+
+        U_y = (n - r - 1) / (n - 3),    U_x = (c - 1) / (n - 3),
+
+    mapped back through the SAME inverse CDF. The transform is separable, so each
+    axis is inverted once and the centres are their outer grid (row-major from
+    the top-left, like the uniform overlay this replaces).
+
+    Guard nodes (rows 0 and 1, columns 0 and ``n - 1``) have ``U`` outside
+    ``[0, 1]``; the inverse CDF clamps them to the edge of the data span, so they
+    sit on the border of the region the mapper samples (they carry zero
+    interpolation weight and zero area).
+
+    The mapper indexes a square mesh; for a non-square ``source_grid_shape`` each
+    axis uses its own pixel count, so there is still one centre per pixel.
+    """
+    n_y, n_x = source_grid_shape
+
+    mu = data_grid.mean(axis=0)
+    scale = data_grid.std(axis=0).min()
+    source_grid_scaled = (data_grid - mu) / scale
+
+    _, inv_transform = _transforms_from(
+        source_grid_scaled,
+        mesh_pixels=n_y,
+        mesh_weight_map=mesh_weight_map,
+        bandwidth=bandwidth,
+        n_knots=n_knots,
+        transform=transform,
+        xp=xp,
+    )
+
+    # the transform is per axis, so invert each axis's node coordinates in its own
+    # column (the other column is unused)
+    rows = xp.arange(n_y)
+    cols = xp.arange(n_x)
+    unit_y = (n_y - rows - 1) / (n_y - 3)
+    unit_x = (cols - 1) / (n_x - 3)
+
+    y_nodes = inv_transform(xp.stack([unit_y, xp.zeros(n_y)], axis=1))[:, 0]
+    x_nodes = inv_transform(xp.stack([xp.zeros(n_x), unit_x], axis=1))[:, 1]
+
+    y = xp.repeat(y_nodes * scale + mu[0], n_x)
+    x = xp.tile(x_nodes * scale + mu[1], n_y)
+
+    return xp.stack([y, x], axis=1)
+
+
 # Samples per axis of the 1D quadrature in `adaptive_rectangular_hat_areas_from`.
 # Against 40001 samples on a 12x12 mesh (PyAutoArray#659) the per-node error is
 # ~1e-6 on the smooth kernel CDF and ~6e-4 on the rank CDF's staircase over an
@@ -764,6 +831,23 @@ class InterpolatorRectangular(AbstractInterpolator):
             transform=self.transform,
             xp=self._xp,
         )
+
+    @cached_property
+    def source_plane_mesh_grid(self):
+        """
+        The source-plane (y,x) centre of every mesh pixel, where the interpolant takes each reconstruction value
+        (``mesh_geometry.node_centres``). Use these to place, plot, export or interpolate the reconstruction.
+
+        ``mesh_grid`` is the uniform lattice before the adaptive CDF is applied. It is kept for the mesh
+        geometry's extent and is the ``regularization_mesh_grid``: kernel regularizations (``MaternKernel``,
+        ``GaussianKernel``, ...) and ``MaternSparse`` measure distances on it, i.e. in the mesh's stretched
+        coordinates, so a kernel's ``scale`` shrinks in the source plane where the mesh packs its pixels.
+        Distances on the true pixel centres gave a lower Bayesian evidence on a test lens, so the lattice is the
+        deliberate choice (PyAutoArray#667).
+        """
+        from autoarray.structures.grids.irregular_2d import Grid2DIrregular
+
+        return Grid2DIrregular(values=self.mesh_geometry.node_centres)
 
     @cached_property
     def _mappings_sizes_weights(self):
