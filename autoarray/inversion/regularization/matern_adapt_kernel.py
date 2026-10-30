@@ -15,6 +15,7 @@ from autoarray.inversion.regularization.matern_kernel import (
 )
 from autoarray.inversion.regularization.adapt import adapt_regularization_weights_from
 from autoarray.inversion.regularization.abstract import validate_coefficient
+from autoarray.inversion.regularization.abstract import regularization_mesh_grid_from
 
 
 class MaternAdaptKernel(MaternKernel):
@@ -146,7 +147,7 @@ class MaternAdaptKernel(MaternKernel):
             linear_obj=linear_obj, xp=xp
         )
 
-        pixel_points = linear_obj.source_plane_mesh_grid.array
+        pixel_points = regularization_mesh_grid_from(linear_obj).array
 
         covariance_matrix = matern_cov_matrix_from(
             scale=self.scale,
@@ -178,7 +179,7 @@ class MaternAdaptKernel(MaternKernel):
 
         covariance_matrix = matern_cov_matrix_from(
             scale=self.scale,
-            pixel_points=linear_obj.source_plane_mesh_grid.array,
+            pixel_points=regularization_mesh_grid_from(linear_obj).array,
             nu=self.nu,
             weights=kernel_weights,
             jitter=self.jitter_value,
@@ -210,7 +211,7 @@ class MaternAdaptKernel(MaternKernel):
 
         covariance_matrix = matern_cov_matrix_from(
             scale=self.scale,
-            pixel_points=linear_obj.source_plane_mesh_grid.array,
+            pixel_points=regularization_mesh_grid_from(linear_obj).array,
             nu=self.nu,
             weights=kernel_weights,
             jitter=self.jitter_value,

@@ -41,7 +41,7 @@ def _laplacian_operator_by_hand_from(mapper, scale, nu=1.0):
     geometrically (same row and one x-spacing apart, or same column and one y-spacing apart) rather than
     from the row-major index arithmetic the class uses, so this also checks the mesh ordering.
     """
-    grid = np.asarray(mapper.source_plane_mesh_grid.array)
+    grid = np.asarray(mapper.regularization_mesh_grid.array)
     pixels = grid.shape[0]
 
     ys = np.unique(grid[:, 0])

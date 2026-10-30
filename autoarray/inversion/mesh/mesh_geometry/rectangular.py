@@ -497,6 +497,47 @@ class MeshGeometryRectangular(AbstractMeshGeometry):
         )
 
     @property
+    def node_centres(self):
+        """
+        The source-plane (y,x) centre of every pixel, in the order of the
+        reconstruction: the position at which the mapper's interpolant takes
+        each pixel's value.
+
+        For the adaptive meshes these are the nodes of the regular lattice in
+        CDF space mapped back through the mapper's inverse CDF (see
+        ``adaptive_rectangular_node_centres_from``), so they bunch up where the
+        mesh adapts. The uniform overlay ``mesh_grid`` is the lattice before
+        that mapping and is not where the values live. For
+        ``RectangularUniform`` the two are the same.
+        """
+        if self.transform == "uniform":
+            return self.mesh_grid.array
+
+        from autoarray.inversion.mesh.interpolator.rectangular import (
+            KERNEL_CDF_DEFAULT_BANDWIDTH,
+            KERNEL_CDF_DEFAULT_KNOTS,
+            adaptive_rectangular_node_centres_from,
+        )
+
+        return adaptive_rectangular_node_centres_from(
+            source_grid_shape=self.shape_native,
+            data_grid=self.data_grid.array,
+            mesh_weight_map=self.mesh_weight_map,
+            bandwidth=(
+                self.kernel_bandwidth
+                if self.kernel_bandwidth is not None
+                else KERNEL_CDF_DEFAULT_BANDWIDTH
+            ),
+            n_knots=(
+                self.kernel_knots
+                if self.kernel_knots is not None
+                else KERNEL_CDF_DEFAULT_KNOTS
+            ),
+            transform=self.transform,
+            xp=self._xp,
+        )
+
+    @property
     def edges_transformed(self):
         """
         The source-plane cell edges of every mesh pixel — transformed through

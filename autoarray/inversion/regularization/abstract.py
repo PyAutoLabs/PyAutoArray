@@ -44,6 +44,22 @@ def validate_coefficient(coefficient, name: str = "coefficient"):
     )
 
 
+def regularization_mesh_grid_from(linear_obj):
+    """
+    The (y,x) positions a kernel regularization measures pixel-to-pixel distances on.
+
+    Mappers expose `regularization_mesh_grid` (the regular lattice for the adaptive rectangular meshes, see
+    `InterpolatorRectangular.source_plane_mesh_grid`). Other linear objects, including duck-typed ones in
+    downstream libraries, only define `source_plane_mesh_grid`, which is used for them.
+    """
+    grid = getattr(linear_obj, "regularization_mesh_grid", None)
+
+    if grid is None:
+        return linear_obj.source_plane_mesh_grid
+
+    return grid
+
+
 class AbstractRegularization:
     is_split_regularization = False
     """

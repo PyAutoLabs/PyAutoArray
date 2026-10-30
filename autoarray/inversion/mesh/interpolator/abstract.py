@@ -31,6 +31,24 @@ class AbstractInterpolator:
         return np
 
     @property
+    def source_plane_mesh_grid(self):
+        """
+        The source-plane (y,x) position of every mesh pixel, in the order of the reconstruction. For most meshes
+        this is the `mesh_grid` the interpolator was built from; the adaptive rectangular interpolator overrides it.
+        """
+        return self.mesh_grid
+
+    @property
+    def regularization_mesh_grid(self):
+        """
+        The (y,x) positions kernel regularizations measure pixel-to-pixel distances on. For most meshes these are
+        the source-plane pixel positions. For the adaptive rectangular meshes they are the regular lattice
+        `mesh_grid`, so distances are measured in the mesh's stretched (CDF) coordinates, see
+        `InterpolatorRectangular.source_plane_mesh_grid`.
+        """
+        return self.mesh_grid
+
+    @property
     def _mappings_sizes_weights(self):
         raise NotImplementedError(
             "Subclasses of AbstractInterpolator must implement the _mappings_sizes_weights property."

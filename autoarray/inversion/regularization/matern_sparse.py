@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 from autoarray.inversion.regularization.abstract import AbstractRegularization
 from autoarray.inversion.regularization.abstract import validate_coefficient
+from autoarray.inversion.regularization.abstract import regularization_mesh_grid_from
 
 
 def rectangular_laplacian_sparse_from(
@@ -33,8 +34,8 @@ def rectangular_laplacian_sparse_from(
     Returns the 5-point discrete Laplacian of a rectangular mesh with reflecting (zero-flux Neumann)
     edges, as a `scipy.sparse` CSR matrix of shape `(pixels, pixels)`.
 
-    Mesh pixels are indexed in row-major order, which is the order of a rectangular mesh's
-    `source_plane_mesh_grid` (built by `grid_2d_slim_via_shape_native_not_mask_from`): pixel
+    Mesh pixels are indexed in row-major order, which is the order of a rectangular mesh's lattice
+    (its `regularization_mesh_grid`, built by `grid_2d_slim_via_shape_native_not_mask_from`): pixel
     `k = i * total_x_pixels + j` is in row `i` (row 0 is the top row, the largest y) and column `j`
     (column 0 is the left column, the smallest x). Pixel `k` therefore neighbours `k +- 1` along x (within
     its row) and `k +- total_x_pixels` along y.
@@ -142,10 +143,11 @@ class MaternSparse(AbstractRegularization):
 
         **Meshes**: only rectangular meshes (`RectangularUniform`, `RectangularRTUAdaptDensity` and their
         subclasses) are supported, because the 5-point Laplacian needs the mesh's grid topology. The
-        Laplacian is built on the mapper's `source_plane_mesh_grid` (the uniform overlay grid, also the
-        grid the dense kernel measures distances on), whose pixels are in row-major order from the
-        top-left (see `rectangular_laplacian_sparse_from`). Other meshes (e.g. `Delaunay`) raise
-        `NotImplementedError`.
+        Laplacian is built on the mesh's `regularization_mesh_grid`, the regular lattice that the dense
+        kernels also measure distances on, whose pixels are in row-major order from the top-left (see
+        `rectangular_laplacian_sparse_from`). On an adaptive rectangular mesh that lattice is the mesh's
+        stretched coordinates, not the source-plane pixel centres (`source_plane_mesh_grid`). Other meshes
+        (e.g. `Delaunay`) raise `NotImplementedError`.
 
         **Smoothness**: only `nu = 1` is implemented. Higher integer `nu` is `c L^(nu + 1)`, a follow-up;
         non-integer `alpha` has no exact sparse precision.
@@ -243,7 +245,8 @@ class MaternSparse(AbstractRegularization):
     ) -> Tuple[Tuple[int, int], Tuple[float, float]]:
         """
         Returns the `(total_y_pixels, total_x_pixels)` shape and the `(y, x)` spacing of pixel centres of
-        a linear object's rectangular mesh, read from its `source_plane_mesh_grid`.
+        a linear object's rectangular mesh, read from its `regularization_mesh_grid` (the regular lattice, which
+        for the adaptive meshes is not the source-plane pixel centres `source_plane_mesh_grid`).
 
         Raises `NotImplementedError` if the linear object is not a mapper with a rectangular mesh.
         """
@@ -263,7 +266,7 @@ class MaternSparse(AbstractRegularization):
 
         shape_native = (int(mesh.shape[0]), int(mesh.shape[1]))
 
-        grid = np.asarray(linear_obj.source_plane_mesh_grid.array).reshape(
+        grid = np.asarray(regularization_mesh_grid_from(linear_obj).array).reshape(
             shape_native[0], shape_native[1], 2
         )
 

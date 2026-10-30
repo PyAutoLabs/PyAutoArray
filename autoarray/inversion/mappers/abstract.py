@@ -140,7 +140,11 @@ class Mapper(LinearObj):
 
     @property
     def source_plane_mesh_grid(self):
-        return self.interpolator.mesh_grid
+        return self.interpolator.source_plane_mesh_grid
+
+    @property
+    def regularization_mesh_grid(self):
+        return self.interpolator.regularization_mesh_grid
 
     @property
     def adapt_data(self):
