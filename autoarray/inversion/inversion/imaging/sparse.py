@@ -60,10 +60,24 @@ class InversionImagingSparse(AbstractInversionImaging):
                 "(convolve_over_sample_size > 1)."
             )
 
-        return inversion_imaging_util.psf_weighted_data_from(
-            weight_map_native=self.dataset.sparse_operator.weight_map.array,
-            kernel_native=self.psf.kernel.native,
-            native_index_for_slim_index=self.data.mask.derive_indexes.native_for_slim,
+        # The weight map is formed from this inversion's own `data` and `noise_map`, NOT the
+        # `sparse_operator.weight_map` baked when the operator was built. A fit hands the inversion
+        # a `DatasetInterface` whose `data` has the ordinary light profiles subtracted, while the
+        # operator still carries the original image's weights (PyAutoArray#680). Only the operator's
+        # noise-dependent curvature terms are reused.
+        neighbour_indexes = (
+            inversion_imaging_util.psf_weighted_data_neighbour_indexes_from(
+                native_index_for_slim_index=self.data.mask.derive_indexes.native_for_slim,
+                shape_native=self.data.mask.shape_native,
+                kernel_shape_native=self.psf.kernel.shape_native,
+            )
+        )
+
+        return inversion_imaging_util.psf_weighted_data_via_slim_from(
+            data=self.data.array,
+            noise_map=self.noise_map.array,
+            kernel_native=self.psf.kernel.native.array,
+            neighbour_indexes=neighbour_indexes,
             xp=self._xp,
         )
 
