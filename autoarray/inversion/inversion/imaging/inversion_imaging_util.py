@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from functools import partial
+from functools import lru_cache, partial
 import numpy as np
 from typing import Optional, List, Tuple
 
@@ -534,6 +534,40 @@ class ImagingSparseOperator:
 
         return back.reshape((B, M)).T  # (M, B)
 
+    def _kernel_operands(self):
+        """
+        The array operands of the jitted curvature kernels, unwrapped to raw arrays.
+
+        `inverse_variances_native` can be an autoarray structure (e.g. `Array2D`) in the NumPy
+        path, which is not a valid JAX argument, so `.array` is taken where present.
+        """
+        import jax.numpy as jnp
+
+        return tuple(
+            jnp.asarray(getattr(a, "array", a))
+            for a in (
+                self.inverse_variances_native,
+                self.Khat_r,
+                self.Khat_flip_r,
+                self.col_offsets,
+            )
+        )
+
+    def _kernel_statics(self):
+        """
+        The static (compile-time) sizes of the jitted curvature kernels. Calls sharing these
+        and the array shapes reuse one compiled kernel.
+        """
+        return dict(
+            B=int(self.batch_size),
+            y_shape=int(self.y_shape),
+            x_shape=int(self.x_shape),
+            Ky=int(self.Ky),
+            Kx=int(self.Kx),
+            Fy=int(self.fft_shape[0]),
+            Fx=int(self.fft_shape[1]),
+        )
+
     def curvature_matrix_diag_from(self, rows, cols, vals, *, S: int):
         """
         Compute the diagonal (mapper–mapper) curvature matrix block F = Aᵀ W A.
@@ -578,45 +612,15 @@ class ImagingSparseOperator:
           even when S is not a multiple of batch_size.
         """
         import jax.numpy as jnp
-        from jax import lax
-        from jax.ops import segment_sum
 
-        rows = jnp.asarray(rows, dtype=jnp.int32)
-        cols = jnp.asarray(cols, dtype=jnp.int32)
-        vals = jnp.asarray(vals, dtype=jnp.float64)
-
-        y_shape, x_shape = self.y_shape, self.x_shape
-        M = y_shape * x_shape
-        B = self.batch_size
-
-        n_blocks = (S + B - 1) // B
-        S_pad = n_blocks * B
-
-        C0 = jnp.zeros((S, S_pad), dtype=jnp.float64)
-
-        def body(block_i, C):
-            start = block_i * B
-
-            in_block = (cols >= start) & (cols < (start + B))
-            bc = jnp.where(in_block, cols - start, 0).astype(jnp.int32)
-            v = jnp.where(in_block, vals, 0.0)
-
-            F = jnp.zeros((M, B), dtype=jnp.float64)
-            F = F.at[rows, bc].add(v)
-
-            G = self.apply_operator(F)  # (M, B)
-
-            contrib = vals[:, None] * G[rows, :]
-            Cblock = segment_sum(contrib, cols, num_segments=S)  # (S, B)
-
-            width = jnp.minimum(B, jnp.maximum(0, S - start))
-            Cblock = Cblock * (self.col_offsets < width)[None, :]
-
-            return lax.dynamic_update_slice(C, Cblock, (0, start))
-
-        C_pad = lax.fori_loop(0, n_blocks, body, C0)
-        C = C_pad[:, :S]
-        return 0.5 * (C + C.T)
+        return _curvature_matrix_diag_kernel()(
+            jnp.asarray(rows, dtype=jnp.int32),
+            jnp.asarray(cols, dtype=jnp.int32),
+            jnp.asarray(vals, dtype=jnp.float64),
+            *self._kernel_operands(),
+            S=int(S),
+            **self._kernel_statics(),
+        )
 
     def curvature_matrix_off_diag_from(
         self, rows0, cols0, vals0, rows1, cols1, vals1, *, S0: int, S1: int
@@ -662,48 +666,19 @@ class ImagingSparseOperator:
         - Padding to `S1_pad = ceil(S1/B)*B` ensures `dynamic_update_slice` is always legal.
         """
         import jax.numpy as jnp
-        from jax import lax
-        from jax.ops import segment_sum
 
-        rows0 = jnp.asarray(rows0, dtype=jnp.int32)
-        cols0 = jnp.asarray(cols0, dtype=jnp.int32)
-        vals0 = jnp.asarray(vals0, dtype=jnp.float64)
-
-        rows1 = jnp.asarray(rows1, dtype=jnp.int32)
-        cols1 = jnp.asarray(cols1, dtype=jnp.int32)
-        vals1 = jnp.asarray(vals1, dtype=jnp.float64)
-
-        y_shape, x_shape = self.y_shape, self.x_shape
-        M = y_shape * x_shape
-        B = self.batch_size
-
-        n_blocks = (S1 + B - 1) // B
-        S1_pad = n_blocks * B
-
-        F01_0 = jnp.zeros((S0, S1_pad), dtype=jnp.float64)
-
-        def body(block_i, F01):
-            start = block_i * B
-
-            in_block = (cols1 >= start) & (cols1 < (start + B))
-            bc = jnp.where(in_block, cols1 - start, 0).astype(jnp.int32)
-            v = jnp.where(in_block, vals1, 0.0)
-
-            F = jnp.zeros((M, B), dtype=jnp.float64)
-            F = F.at[rows1, bc].add(v)
-
-            G = self.apply_operator(F)  # (M, B)
-
-            contrib = vals0[:, None] * G[rows0, :]
-            block = segment_sum(contrib, cols0, num_segments=S0)
-
-            width = jnp.minimum(B, jnp.maximum(0, S1 - start))
-            block = block * (self.col_offsets < width)[None, :]
-
-            return lax.dynamic_update_slice(F01, block, (0, start))
-
-        F01_pad = lax.fori_loop(0, n_blocks, body, F01_0)
-        return F01_pad[:, :S1]
+        return _curvature_matrix_off_diag_kernel()(
+            jnp.asarray(rows0, dtype=jnp.int32),
+            jnp.asarray(cols0, dtype=jnp.int32),
+            jnp.asarray(vals0, dtype=jnp.float64),
+            jnp.asarray(rows1, dtype=jnp.int32),
+            jnp.asarray(cols1, dtype=jnp.int32),
+            jnp.asarray(vals1, dtype=jnp.float64),
+            *self._kernel_operands(),
+            S0=int(S0),
+            S1=int(S1),
+            **self._kernel_statics(),
+        )
 
     def curvature_matrix_off_diag_func_list_from(
         self,
@@ -807,3 +782,150 @@ class ImagingSparseOperator:
         # 4) accumulate to source pixels
         contrib = vals[:, None] * back_at_rows
         return segment_sum(contrib, cols, num_segments=S)  # (S, n_funcs)
+
+
+# ---------------------------------------------------------------------------
+# Jitted curvature kernels for `ImagingSparseOperator`.
+#
+# The block loops used to be eager `lax.fori_loop` calls closing over a fresh
+# `body` function on every call, so JAX retraced and recompiled on every call
+# (HowToLens chapter_3 tutorial_6: 132 backend compiles over 118 calls). Here
+# each kernel is a single module-level `jax.jit` function with its sizes
+# static, so calls with the same sizes and array shapes (e.g. a regularization
+# scan over a fixed mesh) reuse one compile. Inside an outer `jax.jit` the
+# kernel is simply inlined.
+#
+# The kernels are built lazily behind `lru_cache` so importing autoarray never
+# imports JAX. Numerics are identical to the previous closures: same blocking,
+# same masking of the padded tail, same symmetrisation.
+# ---------------------------------------------------------------------------
+
+_KERNEL_STATICS = ("B", "y_shape", "x_shape", "Ky", "Kx", "Fy", "Fx")
+
+
+def _apply_operator_kernel(
+    Fbatch_flat, inv_var, Khat_r, Khat_flip_r, *, y_shape, x_shape, Ky, Kx, Fy, Fx
+):
+    """
+    Pure-function form of `ImagingSparseOperator.apply_operator` (W = Hᵀ N⁻¹ H applied to a
+    batch), used inside the jitted curvature kernels.
+    """
+    import jax.numpy as jnp
+
+    M = y_shape * x_shape
+    B = Fbatch_flat.shape[1]
+    Fimg = Fbatch_flat.T.reshape((B, y_shape, x_shape))
+
+    Fpad = jnp.pad(Fimg, ((0, 0), (0, Fy - y_shape), (0, Fx - x_shape)))
+    Fhat = jnp.fft.rfft2(Fpad, s=(Fy, Fx))
+    blurred_pad = jnp.fft.irfft2(Fhat * Khat_r[None, :, :], s=(Fy, Fx))
+
+    cy, cx = Ky // 2, Kx // 2
+    blurred = blurred_pad[:, cy : cy + y_shape, cx : cx + x_shape]
+
+    weighted = blurred * inv_var[None, :, :]
+
+    Wpad = jnp.pad(weighted, ((0, 0), (0, Fy - y_shape), (0, Fx - x_shape)))
+    What = jnp.fft.rfft2(Wpad, s=(Fy, Fx))
+    back_pad = jnp.fft.irfft2(What * Khat_flip_r[None, :, :], s=(Fy, Fx))
+    back = back_pad[:, cy : cy + y_shape, cx : cx + x_shape]
+
+    return back.reshape((B, M)).T
+
+
+@lru_cache(maxsize=None)
+def _curvature_matrix_diag_kernel():
+    """The jitted F = Aᵀ W A kernel behind `ImagingSparseOperator.curvature_matrix_diag_from`."""
+    import jax
+    import jax.numpy as jnp
+    from jax import lax
+    from jax.ops import segment_sum
+
+    @partial(jax.jit, static_argnames=("S",) + _KERNEL_STATICS)
+    def kernel(
+        rows, cols, vals, inv_var, Khat_r, Khat_flip_r, col_offsets,
+        *, S, B, y_shape, x_shape, Ky, Kx, Fy, Fx,
+    ):
+        M = y_shape * x_shape
+        n_blocks = (S + B - 1) // B
+        S_pad = n_blocks * B
+
+        C0 = jnp.zeros((S, S_pad), dtype=jnp.float64)
+
+        def body(block_i, C):
+            start = block_i * B
+
+            in_block = (cols >= start) & (cols < (start + B))
+            bc = jnp.where(in_block, cols - start, 0).astype(jnp.int32)
+            v = jnp.where(in_block, vals, 0.0)
+
+            F = jnp.zeros((M, B), dtype=jnp.float64)
+            F = F.at[rows, bc].add(v)
+
+            G = _apply_operator_kernel(
+                F, inv_var, Khat_r, Khat_flip_r,
+                y_shape=y_shape, x_shape=x_shape, Ky=Ky, Kx=Kx, Fy=Fy, Fx=Fx,
+            )  # (M, B)
+
+            contrib = vals[:, None] * G[rows, :]
+            Cblock = segment_sum(contrib, cols, num_segments=S)  # (S, B)
+
+            width = jnp.minimum(B, jnp.maximum(0, S - start))
+            Cblock = Cblock * (col_offsets < width)[None, :]
+
+            return lax.dynamic_update_slice(C, Cblock, (0, start))
+
+        C_pad = lax.fori_loop(0, n_blocks, body, C0)
+        C = C_pad[:, :S]
+        return 0.5 * (C + C.T)
+
+    return kernel
+
+
+@lru_cache(maxsize=None)
+def _curvature_matrix_off_diag_kernel():
+    """The jitted F01 = A0ᵀ W A1 kernel behind `ImagingSparseOperator.curvature_matrix_off_diag_from`."""
+    import jax
+    import jax.numpy as jnp
+    from jax import lax
+    from jax.ops import segment_sum
+
+    @partial(jax.jit, static_argnames=("S0", "S1") + _KERNEL_STATICS)
+    def kernel(
+        rows0, cols0, vals0, rows1, cols1, vals1,
+        inv_var, Khat_r, Khat_flip_r, col_offsets,
+        *, S0, S1, B, y_shape, x_shape, Ky, Kx, Fy, Fx,
+    ):
+        M = y_shape * x_shape
+        n_blocks = (S1 + B - 1) // B
+        S1_pad = n_blocks * B
+
+        F01_0 = jnp.zeros((S0, S1_pad), dtype=jnp.float64)
+
+        def body(block_i, F01):
+            start = block_i * B
+
+            in_block = (cols1 >= start) & (cols1 < (start + B))
+            bc = jnp.where(in_block, cols1 - start, 0).astype(jnp.int32)
+            v = jnp.where(in_block, vals1, 0.0)
+
+            F = jnp.zeros((M, B), dtype=jnp.float64)
+            F = F.at[rows1, bc].add(v)
+
+            G = _apply_operator_kernel(
+                F, inv_var, Khat_r, Khat_flip_r,
+                y_shape=y_shape, x_shape=x_shape, Ky=Ky, Kx=Kx, Fy=Fy, Fx=Fx,
+            )  # (M, B)
+
+            contrib = vals0[:, None] * G[rows0, :]
+            block = segment_sum(contrib, cols0, num_segments=S0)
+
+            width = jnp.minimum(B, jnp.maximum(0, S1 - start))
+            block = block * (col_offsets < width)[None, :]
+
+            return lax.dynamic_update_slice(F01, block, (0, start))
+
+        F01_pad = lax.fori_loop(0, n_blocks, body, F01_0)
+        return F01_pad[:, :S1]
+
+    return kernel

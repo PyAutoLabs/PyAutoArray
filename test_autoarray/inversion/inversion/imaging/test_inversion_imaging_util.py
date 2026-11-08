@@ -1017,3 +1017,81 @@ def test__curvature_matrix_via_sparse_operator_from__dispatches_on_the_two_stage
             **kwargs
         ),
     )
+
+
+@pytest.fixture
+def _sparse_operator_and_triplets(masked_imaging_7x7):
+    pytest.importorskip("jax")
+
+    operator = masked_imaging_7x7.apply_sparse_operator(batch_size=4).sparse_operator
+
+    rng = np.random.default_rng(1)
+    M = operator.y_shape * operator.x_shape
+
+    def triplets(S, nnz):
+        rows = rng.integers(0, M, size=nnz)
+        cols = rng.integers(0, S, size=nnz)
+        vals = rng.random(nnz)
+        return rows, cols, vals
+
+    return operator, triplets
+
+
+def _dense_from(rows, cols, vals, M, S):
+    A = np.zeros((M, S))
+    np.add.at(A, (rows, cols), vals)
+    return A
+
+
+def test__imaging_sparse_operator__curvature_blocks_match_dense_reference(
+    _sparse_operator_and_triplets,
+):
+    operator, triplets = _sparse_operator_and_triplets
+    M = operator.y_shape * operator.x_shape
+
+    # S deliberately not a multiple of the batch size, so the padded tail is exercised.
+    rows0, cols0, vals0 = triplets(S=7, nnz=40)
+    rows1, cols1, vals1 = triplets(S=5, nnz=30)
+    A0 = _dense_from(rows0, cols0, vals0, M, 7)
+    A1 = _dense_from(rows1, cols1, vals1, M, 5)
+
+    WA0 = np.asarray(operator.apply_operator(A0))
+    WA1 = np.asarray(operator.apply_operator(A1))
+
+    diag = np.asarray(operator.curvature_matrix_diag_from(rows0, cols0, vals0, S=7))
+    off = np.asarray(
+        operator.curvature_matrix_off_diag_from(
+            rows0, cols0, vals0, rows1, cols1, vals1, S0=7, S1=5
+        )
+    )
+
+    ref = A0.T @ WA0
+    assert diag == pytest.approx(0.5 * (ref + ref.T), rel=1e-10, abs=1e-12)
+    assert off == pytest.approx(A0.T @ WA1, rel=1e-10, abs=1e-12)
+
+
+def test__imaging_sparse_operator__repeated_same_shape_calls_reuse_one_compile(
+    _sparse_operator_and_triplets,
+):
+    """
+    A regularization scan over a fixed mesh calls the curvature kernels repeatedly with the
+    same sizes and shapes. They must reuse one compile, not retrace per call as the former
+    per-call `fori_loop` closures did.
+    """
+    from autoarray.inversion.inversion.imaging import inversion_imaging_util as util
+
+    operator, triplets = _sparse_operator_and_triplets
+    kernel = util._curvature_matrix_diag_kernel()
+
+    rows, cols, vals = triplets(S=6, nnz=33)
+    first = np.asarray(operator.curvature_matrix_diag_from(rows, cols, vals, S=6))
+    compiled = kernel._cache_size()
+    assert compiled >= 1  # the kernel really was compiled, so the check below is not vacuous
+
+    for _ in range(3):
+        again = np.asarray(
+            operator.curvature_matrix_diag_from(rows, cols, vals * 1.0, S=6)
+        )
+
+    assert kernel._cache_size() == compiled
+    assert again == pytest.approx(first, rel=0, abs=0)
