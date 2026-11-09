@@ -2,8 +2,8 @@
 
 The Delaunay connectivity still comes from the small qhull callback used by
 ``delaunay.py``.  Everything depending continuously on the mesh and query
-coordinates -- circumcircles, cavity traversal, Watson areas, normalization
-and stencil compaction -- is array code and therefore differentiable by JAX.
+coordinates -- circumcircles, cavity traversal, natural-neighbour areas from the cavity boundary
+(PyAutoArray#610), normalization and stencil compaction -- is array code and therefore differentiable by JAX.
 
 ``InterpolatorDelaunayNN`` exposes the implementation through the public
 ``mesh.DelaunayNN`` mesh.  Overflow and degeneracy diagnostics remain part of
@@ -36,6 +36,13 @@ from autoarray.inversion.regularization.regularization_util import (
 SIBSON_MAX_CAVITY_TRIANGLES = 32
 SIBSON_MAX_NEIGHBORS = 32
 
+# Natural-neighbour areas within this fraction of the total are round-off around a true zero (e.g. a
+# cocircular neighbour): they are snapped to exactly 0 before normalising, so the NumPy, JAX and numba bodies
+# (which sum in different orders) select the same support. An area below minus SIBSON_NEGATIVE_AREA_TOLERANCE
+# times the total cannot come from round-off and marks the row degenerate (PyAutoArray#610).
+SIBSON_ZERO_AREA_TOLERANCE = 1.0e-12
+SIBSON_NEGATIVE_AREA_TOLERANCE = 1.0e-10
+
 
 def _positive_int_env(name, raw):
     """Parse a positive-integer environment override; ``None`` when unset."""
@@ -63,8 +70,8 @@ def _bool_env(name, raw):
 # ``jax.lax.map`` block size for the JAX Sibson query loop, bound onto the mesh
 # as ``DelaunayNN.query_chunk``.  It is a MEMORY GUARD and nothing else: it
 # bounds the ``(C, 3, 2)`` per-query intermediates of the cavity -- the
-# inserted Watson circumcircle centres and their contributions, of order
-# 15-25 kB per query per lane at cap 32 -- so the live footprint stays bounded
+# new circumcentres of the cavity-boundary edges and the per-edge area terms, of
+# order 15-25 kB per query per lane at cap 32 -- so the live footprint stays bounded
 # when the likelihood is vmapped over many live points.
 #
 # It is emphatically not a speed knob to be kept small.  The walk and the two
@@ -219,10 +226,15 @@ def _contains_query(
     circumradii_squared,
     circumcircle_valid,
     xp,
+    elementwise=False,
 ):
+    """Whether ``query`` lies inside (or on, to round-off) the circumcircle of ``triangle_index``.
+
+    ``elementwise=True`` accepts an array of triangle indexes and returns one boolean per index.
+    """
     safe_index = xp.maximum(triangle_index, 0)
     delta = circumcentres[safe_index] - query
-    distance_squared = xp.sum(delta * delta)
+    distance_squared = xp.sum(delta * delta, axis=-1) if elementwise else xp.sum(delta * delta)
     radius_squared = circumradii_squared[safe_index]
     tolerance = 64.0 * xp.finfo(query.dtype).eps * xp.maximum(radius_squared, 1.0)
     return (
@@ -375,51 +387,91 @@ def _sibson_single_from_tables(
             max_cavity_triangles=max_cavity_triangles,
         )
 
+    # Sibson weights from the Bowyer-Watson cavity BOUNDARY (PyAutoArray#610).
+    #
+    # The weight of natural neighbour v is the area of (new Voronoi cell of the query q) intersected with
+    # (old Voronoi cell of v). That convex region is bounded by segments which each separate two sites, so its
+    # area is a sum of terms 0.5 * cross(P - q, P' - q), every one local to a single cavity-triangle edge:
+    #
+    #   * cavity-interior edge (a, b) shared by cavity triangles T and T': the old Voronoi edge c(T) -> c(T')
+    #     (stored circumcentres only), credited +b / -a;
+    #   * cavity-boundary edge (a, b) of T: the a|b Voronoi edge's piece c(T) -> c_new(q, a, b) inside the new
+    #     cell, credited +b / -a, plus the q|b and q|a bisector pieces from c_new(q, a, b) to the bisector
+    #     midpoints m_b = (q + b) / 2 and m_a = (q + a) / 2. Splitting each q|v bisector segment at m_v (which
+    #     lies on it) is exact and keeps every term local to one edge.
+    #
+    # (a, b) is the edge opposite vertex j taken counter-clockwise; a clockwise triangle negates all its terms.
+    # The only circles through q, c_new(q, a, b), are formed on cavity-BOUNDARY edges. q lies strictly inside
+    # the cavity, so it can be collinear with a boundary edge only when that edge is a convex-hull edge and q
+    # lies on it. Internal edges through or near q (the square-centre diagonal) are never singular. The old
+    # Watson decomposition formed a circle through q for every edge of every cavity triangle, including the
+    # cavity-interior ones whose huge cancelling terms broke continuity and the partition of unity near edges.
     cavity_valid = cavity >= 0
     safe_cavity = cavity.clip(min=0)
-    triangle_vertices = simplices_padded[safe_cavity].clip(min=0)
-    vertices = points[triangle_vertices]
+    triangle_vertices = simplices_padded[safe_cavity].clip(min=0)  # (C, 3)
+    vertices = points[triangle_vertices]  # (C, 3, 2)
 
-    # Circle j passes through the query and the edge opposite triangle vertex j.
-    edge_a = vertices[:, [1, 2, 0], :]
-    edge_b = vertices[:, [2, 0, 1], :]
-    query_for_edges = xp.broadcast_to(query, edge_a.shape)
-    inserted_centres, _, inserted_valid = circumcircles_from(
-        edge_a, edge_b, query_for_edges, xp=xp
-    )
+    orientation = _cross(vertices[:, 1] - vertices[:, 0], vertices[:, 2] - vertices[:, 0])
+    orientation_sign = xp.where(orientation < 0.0, -1.0, 1.0).astype(points.dtype)
 
-    original_centres = circumcentres[safe_cavity][:, None, :]
-    relative = inserted_centres - original_centres
-    contributions = xp.stack(
-        [
-            _cross(relative[:, 1], relative[:, 2]),
-            _cross(relative[:, 2], relative[:, 0]),
-            _cross(relative[:, 0], relative[:, 1]),
-        ],
-        axis=1,
+    # Edge j joins a = vertex (j+1) % 3 -> b = vertex (j+2) % 3 and is shared with simplex_neighbors[:, j].
+    a_index = triangle_vertices[:, [1, 2, 0]]
+    b_index = triangle_vertices[:, [2, 0, 1]]
+    a_points = vertices[:, [1, 2, 0], :]
+    b_points = vertices[:, [2, 0, 1], :]
+    other = simplex_neighbors[safe_cavity]  # (C, 3)
+
+    # A neighbour of a cavity triangle is in the cavity exactly when the cavity walk's own circumcircle test
+    # accepts it (the walk examines every neighbour), so re-evaluate that predicate rather than searching the
+    # cavity list. Only an overflowed cavity can differ, and its row is failed (NaN) either way.
+    other_in_cavity = _contains_query(
+        other, query, circumcentres, circumradii_squared, circumcircle_valid, xp, elementwise=True
     )
-    contribution_valid = cavity_valid[:, None] & xp.stack(
-        [
-            inserted_valid[:, 1] & inserted_valid[:, 2],
-            inserted_valid[:, 2] & inserted_valid[:, 0],
-            inserted_valid[:, 0] & inserted_valid[:, 1],
-        ],
-        axis=1,
+    interior = cavity_valid[:, None] & other_in_cavity
+    count_interior = interior & (safe_cavity[:, None] < other)  # each interior edge once
+    boundary = cavity_valid[:, None] & ~other_in_cavity
+
+    relative_centres = circumcentres[safe_cavity] - query  # (C, 2)
+    relative_other_centres = circumcentres[other.clip(min=0)] - query  # (C, 3, 2)
+    interior_term = 0.5 * _cross(relative_centres[:, None, :], relative_other_centres)
+
+    query_for_edges = xp.broadcast_to(query, a_points.shape)
+    new_centres, _, new_valid = circumcircles_from(
+        a_points, b_points, query_for_edges, xp=xp
     )
-    contributions = xp.where(contribution_valid, contributions, 0.0)
+    relative_new = new_centres - query
+    boundary_term = 0.5 * _cross(relative_centres[:, None, :], relative_new)
+    closure_b = 0.5 * _cross(relative_new, 0.5 * (b_points - query))
+    closure_a = 0.5 * _cross(0.5 * (a_points - query), relative_new)
+
+    usable_boundary = boundary & new_valid
+    value_b = xp.where(count_interior, interior_term, 0.0) + xp.where(
+        usable_boundary, boundary_term + closure_b, 0.0
+    )
+    value_a = xp.where(count_interior, -interior_term, 0.0) + xp.where(
+        usable_boundary, -boundary_term + closure_a, 0.0
+    )
+    value_b = orientation_sign[:, None] * value_b
+    value_a = orientation_sign[:, None] * value_a
+
+    # A boundary edge without a circle through q: on a hull edge, q lies on that edge (the hull-edge rule
+    # below); anywhere else it cannot happen for a valid cavity and the row is marked degenerate.
+    collinear_boundary = boundary & ~new_valid
+    hull_collinear = collinear_boundary & (other < 0)
+    interior_collinear = collinear_boundary & (other >= 0)
+
+    # Pre-sum the edge credits per triangle vertex: vertex i is b of edge (i + 1) % 3 and a of edge (i + 2) % 3.
+    vertex_values = value_b[:, [1, 2, 0]] + value_a[:, [2, 0, 1]]  # (C, 3)
 
     flat_vertices = triangle_vertices.reshape(-1)
-    flat_contributions = contributions.reshape(-1)
-    flat_valid = xp.broadcast_to(cavity_valid[:, None], contributions.shape).reshape(-1)
+    flat_contributions = vertex_values.reshape(-1)
+    flat_valid = xp.broadcast_to(cavity_valid[:, None], triangle_vertices.shape).reshape(-1)
     sentinel = points.shape[0]
     sortable_vertices = xp.where(flat_valid, flat_vertices, sentinel)
     sortable_contributions = xp.where(flat_valid, flat_contributions, 0.0)
 
-    # Compact the at-most 3*C Watson contributions without allocating an
-    # N-vertex vector per query.  Equal vertex ids become adjacent after the
-    # small fixed-size sort and are scatter-added into consecutive groups.
-    # This is substantially cheaper than a global N-way top-k for production
-    # meshes (N ~= 1200, while 3*C <= 96).
+    # Compact the at-most 3*C vertex credits without allocating an N-vertex vector per query: equal vertex ids
+    # become adjacent after the small fixed-size sort and are scatter-added into consecutive groups.
     order = xp.argsort(sortable_vertices)
     sorted_vertices = sortable_vertices[order]
     sorted_contributions = sortable_contributions[order]
@@ -468,36 +520,30 @@ def _sibson_single_from_tables(
     vertex_tolerance = (64.0 * xp.finfo(points.dtype).eps * coordinate_scale) ** 2
     on_vertex = inside & (xp.min(seed_distances_squared) <= vertex_tolerance)
 
-    seed_denominator = _cross(
-        seed_points[1] - seed_points[0], seed_points[2] - seed_points[0]
-    )
-    safe_seed_denominator = xp.where(seed_denominator != 0.0, seed_denominator, 1.0)
-    seed_barycentric = (
-        xp.stack(
-            [
-                _cross(seed_points[1] - query, seed_points[2] - query),
-                _cross(seed_points[2] - query, seed_points[0] - query),
-                _cross(seed_points[0] - query, seed_points[1] - query),
-            ]
-        )
-        / safe_seed_denominator
-    )
-    edge_tolerance = 128.0 * xp.finfo(points.dtype).eps
-    on_edge = (
-        inside & (~on_vertex) & (xp.min(xp.abs(seed_barycentric)) <= edge_tolerance)
-    )
+    on_hull_edge = inside & (~on_vertex) & xp.any(hull_collinear)
 
     fallback_index = xp.where(on_vertex, local_vertex, outside_fallback_index)
     use_fallback = (~inside) | on_vertex
+
+    # Each neighbour's area is >= 0 in exact arithmetic. Snap round-off-sized values (true zeros, e.g. a
+    # cocircular neighbour) to exactly 0 BEFORE normalising, so every backend selects the same support; a
+    # clearly negative area is an inconsistency and marks the row degenerate.
+    total = xp.sum(compact_weights)
+    magnitude = xp.abs(total)
+    significant_negative = xp.any(compact_weights < -SIBSON_NEGATIVE_AREA_TOLERANCE * magnitude)
+    compact_weights = xp.where(
+        compact_weights <= SIBSON_ZERO_AREA_TOLERANCE * magnitude, 0.0, compact_weights
+    )
 
     weight_sum = xp.sum(compact_weights)
     degenerate = (
         inside
         & (~on_vertex)
-        & (~on_edge)
+        & (~on_hull_edge)
         & (
-            xp.any(cavity_valid[:, None] & ~inserted_valid)
-            | (~xp.isfinite(weight_sum))
+            xp.any(interior_collinear)
+            | significant_negative
+            | (~xp.isfinite(total))
             | (xp.abs(weight_sum) <= xp.finfo(points.dtype).tiny)
         )
     )
@@ -519,6 +565,15 @@ def _sibson_single_from_tables(
     mappings = xp.where(selected_valid, mappings, -1).astype(xp.int32)
     weights = xp.where(selected_valid, weights, 0.0)
 
+    # Consumers read only the first `size` entries, so move the selected ones to the front (stably, keeping
+    # the vertex order): a zero-area neighbour between two selected ones must not leave a -1 hole.
+    if xp is np:
+        front = np.argsort(~selected_valid, kind="stable")
+    else:
+        front = xp.argsort(~selected_valid, stable=True)
+    mappings = mappings[front]
+    weights = weights[front]
+
     fallback_mappings = -xp.ones((max_neighbors,), dtype=xp.int32)
     fallback_weights = xp.zeros((max_neighbors,), dtype=points.dtype)
     if xp is np:
@@ -531,24 +586,34 @@ def _sibson_single_from_tables(
     weights = xp.where(use_fallback, fallback_weights, weights)
     size = xp.where(use_fallback, 1, xp.sum(selected_valid)).astype(xp.int32)
 
-    # Inserting a query exactly on an existing edge makes one of the Watson
-    # circumcircles collinear. Sibson coordinates there are the ordinary
-    # linear coordinates of the two edge endpoints, which the containing
-    # triangle's barycentric row represents exactly (the third weight is 0).
+    # Hull-edge rule. On a convex-hull edge the new Voronoi cell is unbounded and Sibson coordinates reduce to
+    # linear interpolation between the edge's endpoints, which is also the limit approached from inside (the
+    # deviation is O(distance)). It applies ONLY on hull edges: on an internal edge the boundary formulation
+    # above is regular and keeps the off-edge natural neighbours (the square centre gets 1/4 each).
+    hull_edge = xp.argmax(hull_collinear.reshape(-1))
+    hull_a = a_index.reshape(-1)[hull_edge]
+    hull_b = b_index.reshape(-1)[hull_edge]
+    hull_a_point = points[hull_a]
+    edge_vector = points[hull_b] - hull_a_point
+    edge_length_squared = xp.sum(edge_vector * edge_vector)
+    safe_edge_length_squared = xp.where(edge_length_squared > 0.0, edge_length_squared, 1.0)
+    along = xp.clip(
+        xp.sum((query - hull_a_point) * edge_vector) / safe_edge_length_squared, 0.0, 1.0
+    )
     edge_mappings = -xp.ones((max_neighbors,), dtype=xp.int32)
     edge_weights = xp.zeros((max_neighbors,), dtype=points.dtype)
     if xp is np:
-        edge_mappings[:3] = seed_vertices
-        edge_weights[:3] = seed_barycentric
+        edge_mappings[:2] = (hull_a, hull_b)
+        edge_weights[:2] = (1.0 - along, along)
     else:
-        edge_mappings = edge_mappings.at[:3].set(seed_vertices)
-        edge_weights = edge_weights.at[:3].set(seed_barycentric)
-    mappings = xp.where(on_edge, edge_mappings, mappings)
-    weights = xp.where(on_edge, edge_weights, weights)
-    size = xp.where(on_edge, 3, size).astype(xp.int32)
+        edge_mappings = edge_mappings.at[:2].set(xp.stack([hull_a, hull_b]).astype(xp.int32))
+        edge_weights = edge_weights.at[:2].set(xp.stack([1.0 - along, along]))
+    mappings = xp.where(on_hull_edge, edge_mappings, mappings)
+    weights = xp.where(on_hull_edge, edge_weights, weights)
+    size = xp.where(on_hull_edge, 2, size).astype(xp.int32)
 
     neighbor_overflow = (
-        inside & (~on_vertex) & (~on_edge) & (unique_count > max_neighbors)
+        inside & (~on_vertex) & (~on_hull_edge) & (unique_count > max_neighbors)
     )
     overflow = overflow | neighbor_overflow
     failed = overflow | degenerate
@@ -603,24 +668,22 @@ def sibson_numba_kernel(parallel: bool = True):
 
     The kernel is a line-by-line port of :func:`_sibson_single_from_tables`
     (NumPy branch) with ``prange`` over queries: the same cavity walk and
-    containment tolerance, the same Watson circumcircle arithmetic in the same
-    operation order, the same on-vertex / on-edge / outside-mesh fallbacks,
+    containment tolerance, the same cavity-boundary area terms (PyAutoArray#610)
+    in the same edge order, the same on-vertex / hull-edge / outside-mesh fallbacks,
     degeneracy and overflow diagnostics, and the same padding of unused slots.
     Each query owns its scratch arrays and writes only its own output row, so
     the parallel loop needs neither a reduction nor a lock.
 
     Two details are reproduced deliberately rather than approximated:
 
-    * the per-vertex grouping inserts the at-most ``3 * C`` contributions into
-      a small sorted list (ascending vertex id, contributions summed in cavity
+    * the per-vertex grouping inserts the at-most ``3 * C`` per-triangle-vertex
+      credits into a small sorted list (ascending vertex id, summed in cavity
       order), which is the reference's ``argsort`` + ``np.add.at`` grouping up
-      to the order equal vertex ids are summed in -- NumPy's argsort is not
-      stable, so weights agree to rounding (parity tests: <= 1e-12, observed
-      ~1e-14 near the hull where cavity contributions cancel), not
-      bit-for-bit;
-    * the normalising sum replicates NumPy's pairwise summation over the
-      length ``3 * C`` compact vector, so ``weight_sum`` (and the degeneracy
-      test on it) sees the same blocking as ``np.sum``.
+      to the order equal vertex ids are summed in, so weights agree to rounding
+      (parity tests: <= 1e-12), not bit-for-bit;
+    * the total and normalising sums run over the live entries only, in one
+      pass; round-off-sized areas are snapped to zero with the reference's
+      relative tolerances, so both bodies select the same support.
 
     The jitted functions live at module level in ``_sibson_numba``, which is
     imported only here, so ``import numba`` stays off the library import path
@@ -788,7 +851,7 @@ def sibson_mappings_weights_from_tables(
         Mapper-compatible arrays with at most ``max_neighbors`` unique source
         vertices per query.
     cavity_sizes, cavity_overflow, degenerate
-        Prototype diagnostics.  Overflow or a Watson edge degeneracy produces
+        Prototype diagnostics.  Overflow or a degenerate (inconsistent) cavity produces
         NaN weights rather than silently returning an approximate stencil.
     """
     if circumcircles is None:
@@ -892,6 +955,47 @@ def jax_sibson(
         xp=jnp,
     )
     return (points, simplices_padded) + outputs
+
+
+def sibson_mappings_weights_from(
+    points_np,
+    query_points_np,
+    max_cavity_triangles=SIBSON_MAX_CAVITY_TRIANGLES,
+    max_neighbors=SIBSON_MAX_NEIGHBORS,
+):
+    """NumPy Sibson ``(mappings, sizes, weights)`` of arbitrary query points on the Delaunay mesh of ``points_np``.
+
+    Used to integrate the Sibson basis functions for ``MeshGeometryDelaunayNN.areas_for_magnification``.
+    """
+    from scipy.spatial import Delaunay
+
+    triangle = Delaunay(points_np)
+    points = triangle.points.astype(points_np.dtype)
+    simplex_count = triangle.simplices.shape[0]
+    simplices_padded = -np.ones((2 * points.shape[0], 3), dtype=np.int32)
+    neighbors_padded = -np.ones_like(simplices_padded)
+    simplices_padded[:simplex_count] = triangle.simplices.astype(np.int32)
+    neighbors_padded[:simplex_count] = triangle.neighbors.astype(np.int32)
+
+    simplex_indexes = triangle.find_simplex(query_points_np).astype(np.int32)
+    delaunay_mappings = pix_indexes_for_sub_slim_index_delaunay_from(
+        data_grid=query_points_np,
+        simplex_index_for_sub_slim_index=simplex_indexes,
+        pix_indexes_for_simplex_index=triangle.simplices,
+        delaunay_points=points,
+    )
+    mappings, sizes, weights, _, _, _ = sibson_mappings_weights_from_tables(
+        query_points=query_points_np,
+        points=points,
+        simplices_padded=simplices_padded,
+        simplex_neighbors=neighbors_padded,
+        simplex_indexes=simplex_indexes,
+        outside_fallback_indexes=delaunay_mappings[:, 0],
+        max_cavity_triangles=max_cavity_triangles,
+        max_neighbors=max_neighbors,
+        xp=np,
+    )
+    return mappings, sizes, weights
 
 
 def scipy_delaunay_nn(
@@ -1175,6 +1279,24 @@ class InterpolatorDelaunayNN(InterpolatorDelaunay):
             )
 
         return DelaunayNNInterface(*outputs, xp=self._xp)
+
+    @cached_property
+    def mesh_geometry(self):
+        """
+        Delaunay vertex geometry whose `areas_for_magnification` integrates this interpolator's own Sibson
+        basis functions rather than using the barycentric dual areas (see `MeshGeometryDelaunayNN`).
+        """
+        from autoarray.inversion.mesh.mesh_geometry.delaunay import (
+            MeshGeometryDelaunayNN,
+        )
+
+        return MeshGeometryDelaunayNN(
+            mesh=self.mesh,
+            mesh_grid=self.mesh_grid,
+            data_grid=self.data_grid,
+            dual_areas=self.dual_areas,
+            xp=self._xp,
+        )
 
     @cached_property
     def _mappings_sizes_weights(self):
