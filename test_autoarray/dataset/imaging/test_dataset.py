@@ -300,7 +300,10 @@ def test__apply_mask__trim_to_mask__native_cut_to_mask_plus_psf_half_width_plus_
     assert trimmed.over_sample_size_lp.shape_native == (7, 7)
     assert trimmed.over_sample_size_pixelization.shape_native == (7, 7)
     assert trimmed.mask.shape_native == (7, 7)
-    assert trimmed.psf._state.fft_shape[0] <= untrimmed.psf._state.fft_shape[0]
+    # The FFT frame every convolution pays for shrinks with the trim: 11x11 mask -> 12x12
+    # frame, 7x7 trimmed -> 8x8 (mask region + kernel - 1, rounded by next_fast_len).
+    assert untrimmed.psf._state.fft_shape == (12, 12)
+    assert trimmed.psf._state.fft_shape == (8, 8)
 
     # Only masked pixels were removed.
     assert (trimmed.data.slim == untrimmed.data.slim).all()
