@@ -114,7 +114,15 @@ def test__cocircular_grid__on_vertex_on_edge_and_collinear_queries():
     assert reference[1][0] == 1 and reference[0][0, 0] == 7
 
 
-def test__thin_triangle__degenerate_watson_circle_matches_reference():
+def test__thin_triangle__near_internal_edge__regular_and_matches_reference():
+    """
+    Queries on, or 1e-15 / 1e-12 off, the thin triangle's base edge (0,0)-(1,0) -- an INTERNAL edge, with
+    (0.5, -100) below it. The former Watson decomposition formed a collinear circle through that edge and
+    returned NaN (degenerate) rows at 1e-15 and an edge-barycentric row on it that dropped the off-edge
+    natural neighbours. The boundary formulation (PyAutoArray#610) is regular there: every row is a finite
+    partition of unity, continuous across the edge, and agrees with an independent Voronoi-clipping oracle
+    to ~1e-12 (measured when this test was rewritten).
+    """
     points = np.array(
         [
             [0.0, 0.0],
@@ -140,8 +148,27 @@ def test__thin_triangle__degenerate_watson_circle_matches_reference():
     reference, numba_outputs = _reference_and_numba(points, query)
 
     _assert_parity(reference, numba_outputs)
-    assert reference[5].tolist() == [True, False, False, False, True, False]
-    assert np.isnan(numba_outputs[2][0]).all()
+    mappings, sizes, weights, _, overflow, degenerate = reference
+    assert not degenerate.any() and not overflow.any()
+    assert np.isfinite(weights).all()
+
+    def row(i):
+        return {int(mappings[i, k]): weights[i, k] for k in range(sizes[i])}
+
+    for i in range(len(query)):
+        assert sum(row(i).values()) == pytest.approx(1.0, abs=1.0e-12)
+        reconstructed = sum(w * points[k] for k, w in row(i).items())
+        np.testing.assert_allclose(reconstructed, query[i], atol=1.0e-11, rtol=0)
+
+    # On the edge (row 1) and 1e-15 / 1e-12 above it (rows 0, 5): one continuous row that keeps the
+    # off-edge natural neighbours (the thin apex 2 and the far vertex 3).
+    on_edge = row(1)
+    assert set(on_edge) == {0, 1, 2, 3}
+    for i in (0, 5):
+        assert set(row(i)) == set(on_edge)
+        for k in on_edge:
+            assert row(i)[k] == pytest.approx(on_edge[k], abs=1.0e-10)
+    assert on_edge[2] == pytest.approx(0.10498950105, abs=1.0e-9)
 
 
 @pytest.mark.parametrize(

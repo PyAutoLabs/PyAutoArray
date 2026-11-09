@@ -17,6 +17,9 @@ from autoarray import numba_util
 # compiled code (and the on-disk cache) as literals.
 EPS = 2.220446049250313e-16
 TINY = 2.2250738585072014e-308
+# Same values as ``sibson.SIBSON_ZERO_AREA_TOLERANCE`` / ``SIBSON_NEGATIVE_AREA_TOLERANCE`` (PyAutoArray#610).
+ZERO_AREA_TOLERANCE = 1.0e-12
+NEGATIVE_AREA_TOLERANCE = 1.0e-10
 
 
 @numba.njit(cache=True, nogil=True)
@@ -28,84 +31,20 @@ def _np_maximum(a, b):
 
 
 @numba.njit(cache=True, nogil=True)
-def _block_sum(values, start, n):
-    # NumPy ``pairwise_sum`` leaf (n <= 128): plain loop below 8, otherwise
-    # eight interleaved accumulators combined as a fixed tree.
-    if n < 8:
-        result = -0.0
-        for i in range(n):
-            result += values[start + i]
-        return result
-    r0 = values[start + 0]
-    r1 = values[start + 1]
-    r2 = values[start + 2]
-    r3 = values[start + 3]
-    r4 = values[start + 4]
-    r5 = values[start + 5]
-    r6 = values[start + 6]
-    r7 = values[start + 7]
-    i = 8
-    stop = n - (n % 8)
-    while i < stop:
-        r0 += values[start + i + 0]
-        r1 += values[start + i + 1]
-        r2 += values[start + i + 2]
-        r3 += values[start + i + 3]
-        r4 += values[start + i + 4]
-        r5 += values[start + i + 5]
-        r6 += values[start + i + 6]
-        r7 += values[start + i + 7]
-        i += 8
-    result = ((r0 + r1) + (r2 + r3)) + ((r4 + r5) + (r6 + r7))
-    while i < n:
-        result += values[start + i]
-        i += 1
-    return result
-
-
-@numba.njit(cache=True, nogil=True)
-def _pairwise_sum(values):
-    # Explicit-stack form of NumPy's recursive ``pairwise_sum``: blocks
-    # above 128 split at ``n2 = n // 2 - (n // 2) % 8`` and the two halves
-    # are added left + right.
-    node_start = np.empty(64, dtype=np.int64)
-    node_n = np.empty(64, dtype=np.int64)
-    node_state = np.empty(64, dtype=np.int64)
-    partials = np.empty(64, dtype=np.float64)
-    top = 0
-    partial_top = 0
-    node_start[0] = 0
-    node_n[0] = values.shape[0]
-    node_state[0] = 0
-    top = 1
-    while top > 0:
-        top -= 1
-        start = node_start[top]
-        n = node_n[top]
-        state = node_state[top]
-        if n <= 128:
-            partials[partial_top] = _block_sum(values, start, n)
-            partial_top += 1
-        elif state == 0:
-            n2 = n // 2
-            n2 -= n2 % 8
-            node_start[top] = start
-            node_n[top] = n
-            node_state[top] = 1
-            node_start[top + 1] = start + n2
-            node_n[top + 1] = n - n2
-            node_state[top + 1] = 0
-            node_start[top + 2] = start
-            node_n[top + 2] = n2
-            node_state[top + 2] = 0
-            top += 3
-        else:
-            right = partials[partial_top - 1]
-            left = partials[partial_top - 2]
-            partial_top -= 2
-            partials[partial_top] = left + right
-            partial_top += 1
-    return partials[0]
+def _credit(unique_ids, compact_weights, unique_count, vertex, value):
+    """Add ``value`` to ``vertex``'s entry of the vertex-sorted compact list; return the new count."""
+    position = 0
+    while position < unique_count and unique_ids[position] < vertex:
+        position += 1
+    if position < unique_count and unique_ids[position] == vertex:
+        compact_weights[position] += value
+        return unique_count
+    for k in range(unique_count, position, -1):
+        unique_ids[k] = unique_ids[k - 1]
+        compact_weights[k] = compact_weights[k - 1]
+    unique_ids[position] = vertex
+    compact_weights[position] = 0.0 + value
+    return unique_count + 1
 
 
 def _sibson_from_tables(
@@ -180,18 +119,20 @@ def _sibson_from_tables(
                     cavity[count] = candidate
                     count += 1
 
-        # Watson contributions, grouped by vertex id into a sorted list.
+        # Natural-neighbour areas from the cavity BOUNDARY, credited per cavity-triangle edge and grouped by
+        # vertex id into a sorted list (``_sibson_single_from_tables`` documents the decomposition,
+        # PyAutoArray#610). Slot-major, edges j = 0, 1, 2: the same order as the reference.
         unique_ids = np.full(compact_length, -1, dtype=np.int64)
         compact_weights = np.zeros(compact_length, dtype=np.float64)
         unique_count = 0
-        inserted_invalid = False
+        interior_collinear = False
+        hull_found = False
+        hull_a = 0
+        hull_b = 0
         vx = np.empty(3, dtype=np.float64)
         vy = np.empty(3, dtype=np.float64)
         vid = np.empty(3, dtype=np.int64)
-        rx = np.empty(3, dtype=np.float64)
-        ry = np.empty(3, dtype=np.float64)
-        ivalid = np.empty(3, dtype=np.bool_)
-        contribution = np.empty(3, dtype=np.float64)
+        vertex_value = np.empty(3, dtype=np.float64)
         for slot in range(count):
             triangle_index = cavity[slot]
             for j in range(3):
@@ -201,57 +142,78 @@ def _sibson_from_tables(
                 vid[j] = vertex
                 vx[j] = points[vertex, 0]
                 vy[j] = points[vertex, 1]
-            ox = circumcentres[triangle_index, 0]
-            oy = circumcentres[triangle_index, 1]
-            # Circle j passes through the query and the edge opposite j.
+            orientation = (vx[1] - vx[0]) * (vy[2] - vy[0]) - (vy[1] - vy[0]) * (
+                vx[2] - vx[0]
+            )
+            sign = -1.0 if orientation < 0.0 else 1.0
+            rtx = circumcentres[triangle_index, 0] - qx
+            rty = circumcentres[triangle_index, 1] - qy
+            vertex_value[0] = 0.0
+            vertex_value[1] = 0.0
+            vertex_value[2] = 0.0
             for j in range(3):
-                ax = vx[(j + 1) % 3]
-                ay = vy[(j + 1) % 3]
-                bax = vx[(j + 2) % 3] - ax
-                bay = vy[(j + 2) % 3] - ay
-                cax = qx - ax
-                cay = qy - ay
-                denominator = 2.0 * (bax * cay - bay * cax)
-                ba2 = bax * bax + bay * bay
-                ca2 = cax * cax + cay * cay
-                scale = _np_maximum(_np_maximum(ba2, ca2), 1.0)
-                valid = abs(denominator) > 32.0 * EPS * scale
-                safe_denominator = denominator if valid else 1.0
-                offset_x = (ba2 * cay - ca2 * bay) / safe_denominator
-                offset_y = (bax * ca2 - cax * ba2) / safe_denominator
-                if valid:
-                    centre_x = ax + offset_x
-                    centre_y = ay + offset_y
+                ja = (j + 1) % 3
+                jb = (j + 2) % 3
+                a_vertex = vid[ja]
+                b_vertex = vid[jb]
+                other = simplex_neighbors[triangle_index, j]
+                # The cavity walk's own circumcircle test (see the reference body).
+                other_in_cavity = False
+                if other >= 0 and circumcircle_valid[other]:
+                    odx = circumcentres[other, 0] - qx
+                    ody = circumcentres[other, 1] - qy
+                    other_radius_squared = circumradii_squared[other]
+                    other_in_cavity = odx * odx + ody * ody <= other_radius_squared + (
+                        64.0 * EPS * _np_maximum(other_radius_squared, 1.0)
+                    )
+                value_b = 0.0
+                value_a = 0.0
+                if other_in_cavity:
+                    if triangle_index < other:
+                        rox = circumcentres[other, 0] - qx
+                        roy = circumcentres[other, 1] - qy
+                        term = 0.5 * (rtx * roy - rty * rox)
+                        value_b = term
+                        value_a = -term
                 else:
-                    centre_x = 0.0
-                    centre_y = 0.0
-                    inserted_invalid = True
-                ivalid[j] = valid
-                rx[j] = centre_x - ox
-                ry[j] = centre_y - oy
+                    # New circumcentre of (a, b, query), as ``circumcircles_from(a, b, query)``.
+                    ax = vx[ja]
+                    ay = vy[ja]
+                    bax = vx[jb] - ax
+                    bay = vy[jb] - ay
+                    cax = qx - ax
+                    cay = qy - ay
+                    denominator = 2.0 * (bax * cay - bay * cax)
+                    ba2 = bax * bax + bay * bay
+                    ca2 = cax * cax + cay * cay
+                    scale = _np_maximum(_np_maximum(ba2, ca2), 1.0)
+                    if abs(denominator) > 32.0 * EPS * scale:
+                        rnx = ax + (ba2 * cay - ca2 * bay) / denominator - qx
+                        rny = ay + (bax * ca2 - cax * ba2) / denominator - qy
+                        boundary_term = 0.5 * (rtx * rny - rty * rnx)
+                        mbx = 0.5 * (vx[jb] - qx)
+                        mby = 0.5 * (vy[jb] - qy)
+                        max_ = 0.5 * (vx[ja] - qx)
+                        may = 0.5 * (vy[ja] - qy)
+                        closure_b = 0.5 * (rnx * mby - rny * mbx)
+                        closure_a = 0.5 * (max_ * rny - may * rnx)
+                        value_b = boundary_term + closure_b
+                        value_a = -boundary_term + closure_a
+                    elif other < 0:
+                        if not hull_found:
+                            hull_found = True
+                            hull_a = a_vertex
+                            hull_b = b_vertex
+                    else:
+                        interior_collinear = True
+                vertex_value[jb] += value_b
+                vertex_value[ja] += value_a
             for j in range(3):
-                j1 = (j + 1) % 3
-                j2 = (j + 2) % 3
-                if ivalid[j1] and ivalid[j2]:
-                    contribution[j] = rx[j1] * ry[j2] - ry[j1] * rx[j2]
-                else:
-                    contribution[j] = 0.0
-            for j in range(3):
-                vertex = vid[j]
-                position = 0
-                while position < unique_count and unique_ids[position] < vertex:
-                    position += 1
-                if position < unique_count and unique_ids[position] == vertex:
-                    compact_weights[position] += contribution[j]
-                else:
-                    for k in range(unique_count, position, -1):
-                        unique_ids[k] = unique_ids[k - 1]
-                        compact_weights[k] = compact_weights[k - 1]
-                    unique_ids[position] = vertex
-                    compact_weights[position] = 0.0 + contribution[j]
-                    unique_count += 1
+                unique_count = _credit(
+                    unique_ids, compact_weights, unique_count, vid[j], sign * vertex_value[j]
+                )
 
-        # On-vertex / on-edge tests against the seed triangle.
+        # On-vertex test against the seed triangle.
         s0 = simplices_padded[seed, 0]
         s1 = simplices_padded[seed, 1]
         s2 = simplices_padded[seed, 2]
@@ -296,25 +258,31 @@ def _sibson_from_tables(
         vertex_tolerance = 64.0 * EPS * coordinate_scale
         vertex_tolerance = vertex_tolerance * vertex_tolerance
         on_vertex = min_distance <= vertex_tolerance
+        on_hull_edge = (not on_vertex) and hull_found
 
-        seed_denominator = (p1x - p0x) * (p2y - p0y) - (p1y - p0y) * (p2x - p0x)
-        if seed_denominator == 0.0:
-            seed_denominator = 1.0
-        bary0 = (d1x * d2y - d1y * d2x) / seed_denominator
-        bary1 = (d2x * d0y - d2y * d0x) / seed_denominator
-        bary2 = (d0x * d1y - d0y * d1x) / seed_denominator
-        edge_tolerance = 128.0 * EPS
-        min_bary = _np_maximum(-abs(bary0), -abs(bary1))
-        min_bary = -_np_maximum(min_bary, -abs(bary2))
-        on_edge = (not on_vertex) and (min_bary <= edge_tolerance)
-
-        weight_sum = _pairwise_sum(compact_weights)
+        # Snap round-off-sized areas to 0 before normalising; a clearly negative one is degenerate.
+        # One pass over the live entries only (the rest of the compact list is padding); parity with the
+        # reference's pairwise sums is to round-off, which the tolerances absorb.
+        total = 0.0
+        for k in range(unique_count):
+            total += compact_weights[k]
+        magnitude = abs(total)
+        significant_negative = False
+        weight_sum = 0.0
+        for k in range(unique_count):
+            if compact_weights[k] < -NEGATIVE_AREA_TOLERANCE * magnitude:
+                significant_negative = True
+            if compact_weights[k] <= ZERO_AREA_TOLERANCE * magnitude:
+                compact_weights[k] = 0.0
+            else:
+                weight_sum += compact_weights[k]
         degenerate = (
             (not on_vertex)
-            and (not on_edge)
+            and (not on_hull_edge)
             and (
-                inserted_invalid
-                or (not np.isfinite(weight_sum))
+                interior_collinear
+                or significant_negative
+                or (not np.isfinite(total))
                 or abs(weight_sum) <= TINY
             )
         )
@@ -324,31 +292,41 @@ def _sibson_from_tables(
             mappings[q, 0] = local_vertex
             weights[q, 0] = 1.0
             size = 1
-        elif on_edge:
-            # Barycentric row of the containing triangle (third weight 0).
+        elif on_hull_edge:
+            # Linear interpolation between the hull edge's endpoints (the Sibson limit on the hull).
+            ex = points[hull_b, 0] - points[hull_a, 0]
+            ey = points[hull_b, 1] - points[hull_a, 1]
+            edge_length_squared = ex * ex + ey * ey
+            if edge_length_squared <= 0.0:
+                edge_length_squared = 1.0
+            along = (
+                (qx - points[hull_a, 0]) * ex + (qy - points[hull_a, 1]) * ey
+            ) / edge_length_squared
+            if along < 0.0:
+                along = 0.0
+            if along > 1.0:
+                along = 1.0
             if max_neighbors > 0:
-                mappings[q, 0] = s0
-                weights[q, 0] = bary0
+                mappings[q, 0] = hull_a
+                weights[q, 0] = 1.0 - along
             if max_neighbors > 1:
-                mappings[q, 1] = s1
-                weights[q, 1] = bary1
-            if max_neighbors > 2:
-                mappings[q, 2] = s2
-                weights[q, 2] = bary2
-            size = 3
+                mappings[q, 1] = hull_b
+                weights[q, 1] = along
+            size = 2
         else:
+            # Selected entries are written to the front, in vertex order, with no -1 holes.
             size = 0
             for k in range(max_neighbors):
                 if k >= compact_length or k >= unique_count:
                     break
                 weight = compact_weights[k] / safe_sum
                 if weight > 0.0:
-                    mappings[q, k] = unique_ids[k]
-                    weights[q, k] = weight
+                    mappings[q, size] = unique_ids[k]
+                    weights[q, size] = weight
                     size += 1
 
         neighbor_overflow = (
-            (not on_vertex) and (not on_edge) and unique_count > max_neighbors
+            (not on_vertex) and (not on_hull_edge) and unique_count > max_neighbors
         )
         failed = cavity_overflow or neighbor_overflow or degenerate
         if failed:

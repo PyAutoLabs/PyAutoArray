@@ -326,19 +326,8 @@ class MeshGeometryKNearestNeighbor(MeshGeometryDelaunay):
 
         Computed host-side on first access, like the Delaunay dual-area fallback.
         """
-        import scipy.spatial
-
         nodes = np.asarray(self.mesh_grid_xy)
-        lo = nodes.min(axis=0)
-        hi = nodes.max(axis=0)
-
-        n = KNN_AREA_QUADRATURE_PIXELS
-        u = (np.arange(n) + 0.5) / n
-        grid_0, grid_1 = np.meshgrid(
-            lo[0] + u * (hi[0] - lo[0]), lo[1] + u * (hi[1] - lo[1]), indexing="ij"
-        )
-        points = np.stack([grid_0.ravel(), grid_1.ravel()], axis=1)
-        points = points[scipy.spatial.Delaunay(nodes).find_simplex(points) >= 0]
+        points = basis_quadrature_points_from(nodes)
 
         interpolator = self.interpolator_cls(
             mesh=self.mesh,
@@ -348,10 +337,69 @@ class MeshGeometryKNearestNeighbor(MeshGeometryDelaunay):
         )
         mappings, _, weights = interpolator._mappings_sizes_weights
 
-        areas = np.bincount(
-            np.asarray(mappings).ravel(),
-            weights=np.asarray(weights).ravel(),
-            minlength=nodes.shape[0],
+        return basis_integral_areas_from(nodes, mappings, weights)
+
+
+def basis_quadrature_points_from(nodes: np.ndarray) -> np.ndarray:
+    """
+    The midpoint-quadrature points for integrating an interpolant's basis functions over the convex hull of
+    ``nodes``: the centres of a uniform ``KNN_AREA_QUADRATURE_PIXELS``^2 grid over their bounding box, keeping
+    those inside the hull.
+    """
+    import scipy.spatial
+
+    lo = nodes.min(axis=0)
+    hi = nodes.max(axis=0)
+
+    n = KNN_AREA_QUADRATURE_PIXELS
+    u = (np.arange(n) + 0.5) / n
+    grid_0, grid_1 = np.meshgrid(
+        lo[0] + u * (hi[0] - lo[0]), lo[1] + u * (hi[1] - lo[1]), indexing="ij"
+    )
+    points = np.stack([grid_0.ravel(), grid_1.ravel()], axis=1)
+    return points[scipy.spatial.Delaunay(nodes).find_simplex(points) >= 0]
+
+
+def basis_integral_areas_from(nodes, mappings, weights) -> np.ndarray:
+    """
+    Every vertex's basis-function integral from the interpolation ``mappings`` / ``weights`` of the
+    ``basis_quadrature_points_from`` points: the weights summed per vertex (``-1`` padding ignored), rescaled
+    so the total is the convex-hull area, which removes the cells straddling the hull edge from the sum.
+    """
+    import scipy.spatial
+
+    mappings = np.asarray(mappings).ravel()
+    weights = np.asarray(weights).ravel()
+    valid = mappings >= 0
+
+    areas = np.bincount(
+        mappings[valid], weights=weights[valid], minlength=nodes.shape[0]
+    )
+
+    return areas * scipy.spatial.ConvexHull(nodes).volume / np.sum(areas)
+
+
+class MeshGeometryDelaunayNN(MeshGeometryDelaunay):
+    @cached_property
+    def areas_for_magnification(self) -> np.ndarray:
+        """
+        The integral of every vertex's Sibson (natural-neighbour) basis function over the convex hull of the
+        mesh, so `sum(reconstruction * areas_for_magnification)` is the integral of the reconstructed source.
+
+        The Delaunay barycentric dual areas are these integrals only for the linear barycentric interpolant.
+        The Sibson interpolant is not linear on the Delaunay triangles; its dual-area approximation biased the
+        identity-lens magnification on a regular mesh by -2.65% once the Sibson weights at internal edges
+        were corrected (PyAutoArray#610), against +0.04% for these integrals. The quadrature is the one the
+        kNN meshes use (`MeshGeometryKNearestNeighbor`, PyAutoArray#665), evaluated with the Sibson weights.
+
+        Computed host-side on first access, like the Delaunay dual-area fallback.
+        """
+        from autoarray.inversion.mesh.interpolator.sibson import (
+            sibson_mappings_weights_from,
         )
 
-        return areas * scipy.spatial.ConvexHull(nodes).volume / np.sum(areas)
+        nodes = np.asarray(self.mesh_grid_xy)
+        points = basis_quadrature_points_from(nodes)
+        mappings, _, weights = sibson_mappings_weights_from(nodes, points)
+
+        return basis_integral_areas_from(nodes, mappings, weights)

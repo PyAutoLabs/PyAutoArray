@@ -164,14 +164,8 @@ def test_linear_precision_and_pairing_fault(family):
     ]
     + [
         ("delaunay", None),
-        pytest.param(
-            "sibson",
-            None,
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="PyAutoArray#610: Sibson interior-edge fallback is discontinuous",
-            ),
-        ),
+        # Was a strict xfail witness for PyAutoArray#610 (interior-edge fallback discontinuous).
+        ("sibson", None),
     ],
 )
 def test_exact_nextafter_boundary_continuity_and_locator_fault(
@@ -470,10 +464,7 @@ def test_knn_full_block_neighbors_kernel_and_pairing_fault():
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="PyAutoArray#610: exact interior edge uses triangle weights instead of Sibson weights",
-)
+# Was a strict xfail witness for PyAutoArray#610 (exact interior edge used triangle weights); now a regression.
 def test_sibson_square_center_matches_independent_symmetry_oracle():
     nodes = np.array([[-1.0, -1.0], [-1.0, 1.0], [1.0, -1.0], [1.0, 1.0]])
     values = nodes[:, 0] * nodes[:, 1]
@@ -492,10 +483,7 @@ def test_sibson_square_center_matches_independent_symmetry_oracle():
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="PyAutoArray#610: near-edge cancellation clips negative weights after normalization",
-)
+# Was a strict xfail witness for PyAutoArray#610 (near-edge cancellation clipped after normalization); now a regression.
 def test_sibson_near_edge_preserves_partition_after_positive_filter():
     # A normalize-then-clip mutation reproduces the defect mechanism while
     # leaving the intended constant-field oracle unchanged.
