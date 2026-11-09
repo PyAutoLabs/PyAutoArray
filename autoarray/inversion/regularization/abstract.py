@@ -73,6 +73,23 @@ class AbstractRegularization:
     combinations at construction.
     """
 
+    has_constant_null_mode = False
+    """
+    Whether this scheme's regularization matrix ``H`` has the constant vector as an exact null mode by
+    construction, i.e. it is the precision matrix of an *intrinsic* Gaussian prior that penalizes only differences
+    between pixels and leaves the overall level of the reconstruction unconstrained.
+
+    This holds for the smoothness schemes whose every row of ``B`` sums to zero (``Constant``, ``ConstantSplit``,
+    ``Adapt``, ``AdaptPower``, ``AdaptSplit``, ``AdaptSplitPower``); their ``H`` is singular except for the small
+    diagonal jitter added for numerical stability. It does not hold for schemes with a zeroth-order term or a
+    kernel covariance, whose ``H`` is positive-definite in its own right.
+
+    When ``True`` the Bayesian evidence normalises the prior with the **pseudo-determinant** of ``H`` (the product of
+    its non-zero eigenvalues) rather than its determinant, which would be set by the arbitrary jitter and carry its
+    rounding noise (PyAutoArray#682): see ``AbstractInversion.log_det_regularization_matrix_term``. A unit test pins
+    this flag to the measured spectrum of every scheme, so it must only be set where the null mode is exact.
+    """
+
     def __init__(self):
         """
         Abstract base class for a regularization-scheme, which is applied to a pixelization to enforce a \

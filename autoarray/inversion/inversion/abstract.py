@@ -3,7 +3,7 @@ import hashlib
 import warnings
 
 import numpy as np
-from typing import Dict, List, Optional, Type, Union
+from typing import Dict, List, Optional, Tuple, Type, Union
 
 from autonerves import cached_property, is_test_mode
 
@@ -1253,9 +1253,67 @@ class AbstractInversion:
             if all(term is not None for term in term_list):
                 return sum(term_list)
 
-        return self._log_det_symmetric_from(
-            self.regularization_matrix_reduced, sparse=self._xp is np
+        grounded_indexes, log_block_sizes = self._intrinsic_regularization_blocks
+
+        if len(grounded_indexes) == 0:
+            return self._log_det_symmetric_from(
+                self.regularization_matrix_reduced, sparse=self._xp is np
+            )
+
+        # Pseudo-determinant of each intrinsic block (PyAutoArray#682). For a symmetric block `H_b` whose null
+        # vector is the constant `1 / sqrt(P_b)`, `pdet(H_b) = P_b * det(H_b with one row and column deleted)`:
+        # deleting ("grounding") one pixel removes the constant mode exactly, so the term no longer contains the
+        # `log` of the ~1e-8 diagonal jitter that otherwise holds that mode up, nor the rounding noise of order
+        # `eps * ||H|| / 1e-8` that came with it. The grounded matrix keeps `H`'s sparsity and its indices are
+        # static, so the sparse NumPy route and `jax.jit` are both unchanged.
+        matrix = self.regularization_matrix_reduced
+        keep = np.setdiff1d(np.arange(matrix.shape[0]), grounded_indexes)
+
+        if keep.shape[0] == 0:
+            return log_block_sizes
+
+        return log_block_sizes + self._log_det_symmetric_from(
+            matrix[keep][:, keep], sparse=self._xp is np
         )
+
+    @property
+    def _intrinsic_regularization_blocks(self) -> Tuple[np.ndarray, float]:
+        """
+        The blocks of `regularization_matrix_reduced` whose regularization has an exact constant null mode
+        (`AbstractRegularization.has_constant_null_mode`), as the index of the first parameter of every such block
+        in `regularization_matrix_reduced` coordinates, and the sum of `log(P_b)` over their sizes `P_b`.
+
+        `regularization_matrix_reduced` is the block diagonal of every linear object's regularization matrix when
+        every linear object is regularized, and otherwise the restriction of that to the mapper parameters
+        (`mapper_indices`). In both cases each regularized block is contiguous, so its first index is the running
+        sum of the sizes of the blocks before it.
+        """
+        if self.all_linear_obj_have_regularization:
+            linear_obj_list = self.linear_obj_list
+        else:
+            linear_obj_list = self.cls_list_from(cls=Mapper)
+
+        if not any(
+            getattr(linear_obj.regularization, "has_constant_null_mode", False)
+            for linear_obj in linear_obj_list
+        ):
+            return np.asarray([], dtype=int), 0.0
+
+        grounded_indexes = []
+        log_block_sizes = 0.0
+        offset = 0
+
+        for linear_obj in linear_obj_list:
+            params = int(linear_obj.params)
+            regularization = linear_obj.regularization
+
+            if regularization is not None and regularization.has_constant_null_mode:
+                grounded_indexes.append(offset)
+                log_block_sizes += float(np.log(params))
+
+            offset += params
+
+        return np.asarray(grounded_indexes, dtype=int), log_block_sizes
 
     @property
     def reconstruction_covariance_matrix(self) -> np.ndarray:

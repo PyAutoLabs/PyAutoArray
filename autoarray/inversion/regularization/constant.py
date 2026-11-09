@@ -70,6 +70,9 @@ def constant_regularization_matrix_from(
 
 
 class Constant(AbstractRegularization):
+    # The rows of B sum to zero, so H's constant vector is an exact null mode (PyAutoArray#682).
+    has_constant_null_mode = True
+
     def __init__(self, coefficient: float = 1.0):
         """
         Regularization which uses the neighbors of the mesh (e.g. shared Delaunay vertexes) and

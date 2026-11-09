@@ -226,6 +226,9 @@ def weighted_regularization_matrix_single_scatter_from(
 
 
 class Adapt(AbstractRegularization):
+    # The rows of B sum to zero, so H's constant vector is an exact null mode (PyAutoArray#682).
+    has_constant_null_mode = True
+
     def __init__(
         self,
         inner_coefficient: float = 1.0,

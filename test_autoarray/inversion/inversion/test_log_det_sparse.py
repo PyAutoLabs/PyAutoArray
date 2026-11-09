@@ -131,6 +131,15 @@ def _dense_log_det(matrix):
     return 2.0 * np.sum(np.log(np.diag(np.linalg.cholesky(matrix))))
 
 
+def _dense_log_pdet(matrix):
+    """
+    The log pseudo-determinant of an intrinsic ``H`` (constant null mode, PyAutoArray#682) by the grounding
+    identity ``pdet(H) = P * det(H with its first row and column deleted)``, with the deleted-row determinant
+    taken by the same dense Cholesky as ``_dense_log_det``.
+    """
+    return np.log(matrix.shape[0]) + _dense_log_det(matrix[1:, 1:])
+
+
 @pytest.mark.parametrize(
     "pixels, band",
     [(256, 1), (300, 2), (400, 3), (512, 5)],
@@ -235,8 +244,9 @@ def test__log_det_regularization_matrix_term__small_split_matrix__never_reaches_
         regularization_matrix=matrix,
     )
 
+    # `ConstantSplit` is intrinsic, so the term is the pseudo-determinant (PyAutoArray#682).
     assert inversion.log_det_regularization_matrix_term == pytest.approx(
-        _dense_log_det(matrix), rel=1.0e-12
+        _dense_log_pdet(matrix), rel=1.0e-12
     )
 
 
@@ -306,11 +316,15 @@ def test__log_det_regularization_matrix_term__real_split_inversion__matches_dens
 
     assert inversion.regularization_matrix_reduced.shape == matrix.shape
 
+    # `AdaptSplit` is intrinsic, so the term is the pseudo-determinant (PyAutoArray#682). At these
+    # coefficients the full-matrix determinant would carry the 1e-8 jitter's `log` and its round-off.
+    grounded = matrix[1:, 1:]
+
     assert inversion.log_det_regularization_matrix_term == pytest.approx(
-        _dense_log_det(matrix), rel=1.0e-7
+        _dense_log_pdet(matrix), rel=1.0e-12
     )
     assert inversion.log_det_regularization_matrix_term == pytest.approx(
-        np.linalg.slogdet(matrix)[1], rel=1.0e-7
+        np.log(matrix.shape[0]) + np.linalg.slogdet(grounded)[1], rel=1.0e-12
     )
 
 
@@ -481,8 +495,10 @@ def test__log_det_regularization_matrix_term__vertex_coincident_adapt_split__num
     The log-determinant routes themselves were never the cause: given the same ``H`` both agree
     with a 50-digit reference. That is pinned here only at moderate coefficients, where ``H`` is
     well-posed (``cond ~ 2e9``). At high coefficients (``max(coefficient)^4 >~ 1e6``) the absolute
-    1e-8 diagonal jitter puts ``H``'s constant-mode eigenvalue at round-off level, so the log
-    determinant is round-off-determined on either backend and no parity is asserted.
+    1e-8 diagonal jitter puts ``H``'s constant-mode eigenvalue at round-off level, so the full-matrix log
+    determinant is round-off-determined on either backend. Since PyAutoArray#682 the term is the
+    pseudo-determinant, which does not contain that eigenvalue, so parity at high coefficients is pinned too
+    (``..._high_coefficients__numpy_matches_jax`` below).
     """
     jax = pytest.importorskip("jax")
     jax.config.update("jax_enable_x64", True)
@@ -522,7 +538,54 @@ def test__log_det_regularization_matrix_term__vertex_coincident_adapt_split__num
 
     assert abs(log_det_np - log_det_jax) < 1.0e-6
 
-    reference = _high_precision_log_det(matrix_np)
+    # `AdaptSplit` is intrinsic: the reference is the pseudo-determinant (PyAutoArray#682).
+    reference = np.log(matrix_np.shape[0]) + _high_precision_log_det(
+        matrix_np[1:, 1:]
+    )
 
     assert abs(log_det_np - reference) < 1.0e-6
     assert abs(log_det_jax - reference) < 1.0e-6
+
+
+def test__log_det_regularization_matrix_term__vertex_coincident_adapt_split_high_coefficients__numpy_matches_jax():
+    """
+    PyAutoArray#682: at high coefficients (``AdaptSplit`` outer 10, the setting of autolens_workspace_test
+    ``jax_grad``) the full-matrix log determinant was round-off-determined, because ``H``'s constant-mode
+    eigenvalue is the 1e-8 jitter. The pseudo-determinant drops that mode, so the two backends and a
+    50-digit reference agree here as well.
+    """
+    jax = pytest.importorskip("jax")
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
+
+    regularization = aa.reg.AdaptSplit(
+        inner_coefficient=0.1, outer_coefficient=10.0, signal_scale=0.3
+    )
+
+    mapper_np = _vertex_coincident_adapt_split_mapper(regularization, xp=np)
+    mapper_jax = _vertex_coincident_adapt_split_mapper(regularization, xp=jnp)
+
+    matrix_np = np.asarray(
+        regularization.regularization_matrix_from(linear_obj=mapper_np)
+    )
+    matrix_jax = regularization.regularization_matrix_from(
+        linear_obj=mapper_jax, xp=jnp
+    )
+
+    inversion_np = aa.m.MockInversion(
+        linear_obj_list=[mapper_np], regularization_matrix=matrix_np
+    )
+    inversion_jax = aa.m.MockInversion(
+        linear_obj_list=[mapper_jax], regularization_matrix=matrix_jax
+    )
+    inversion_jax.use_jax = True
+
+    log_det_np = float(inversion_np.log_det_regularization_matrix_term)
+    log_det_jax = float(inversion_jax.log_det_regularization_matrix_term)
+
+    reference = np.log(matrix_np.shape[0]) + _high_precision_log_det(
+        matrix_np[1:, 1:]
+    )
+
+    assert abs(log_det_np - log_det_jax) < 1.0e-6
+    assert abs(log_det_np - reference) < 1.0e-6

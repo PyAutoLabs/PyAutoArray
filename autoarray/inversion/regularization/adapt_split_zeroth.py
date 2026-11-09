@@ -12,6 +12,9 @@ from autoarray.inversion.regularization.abstract import validate_coefficient
 
 
 class AdaptSplitZeroth(Adapt):
+    # Inherits from `Adapt` but adds a zeroth-order term, so H is positive-definite in its own right.
+    has_constant_null_mode = False
+
     is_split_regularization = True
 
     def __init__(
