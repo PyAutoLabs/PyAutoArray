@@ -53,6 +53,13 @@ def get_interpolation_weights(
     # How many blocks
     n_blocks = (N + B - 1) // B
 
+    # Pad to whole blocks so every block's slice starts at `bi * B`. Slicing the
+    # unpadded array, `dynamic_slice` clamps the last partial block's start to
+    # N - B, loading points [N - B, N) while labelling them start + arange(B):
+    # the tail points were never searched and earlier points came back under
+    # their indices (PyAutoArray#609). Padded rows are masked out below.
+    points_padded = jnp.pad(points, ((0, n_blocks * B - N), (0, 0)))
+
     def body_fun(bi, carry):
         best_vals, best_idx = carry
         start = bi * B
@@ -60,8 +67,9 @@ def get_interpolation_weights(
         # How many valid points in this block (<= B)
         block_n = jnp.minimum(B, N - start)
 
-        # Safe because B <= N by construction
-        p_block = jax.lax.dynamic_slice(points, (start, 0), (B, points.shape[1]))
+        p_block = jax.lax.dynamic_slice(
+            points_padded, (start, 0), (B, points.shape[1])
+        )
 
         # Mask out padded rows (only matters for last block)
         mask = jnp.arange(B) < block_n  # (B,)
