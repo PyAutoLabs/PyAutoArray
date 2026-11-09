@@ -313,6 +313,212 @@ requires_jax = pytest.mark.skipif(
 )
 
 
+def _profile_subtracted_data_from(masked_imaging):
+    """
+    The data of `masked_imaging` with a PSF-blurred smooth "regular light profile" subtracted, as a fit with
+    an ordinary lens light profile and a pixelized source hands to its inversion.
+    """
+    grid = masked_imaging.grids.lp.array
+    profile = aa.Array2D(
+        values=5.0 * np.exp(-(grid[:, 0] ** 2 + grid[:, 1] ** 2) / 0.5),
+        mask=masked_imaging.mask,
+    )
+    blurred = masked_imaging.psf.convolved_image_from(
+        image=profile, blurring_image=None
+    )
+    return masked_imaging.data - blurred
+
+
+def _sparse_vs_dense_terms_from(inversion, data, noise_map, mapper):
+    """
+    The data vector D, chi-squared and log evidence of `inversion`, the quantities the sparse and dense
+    inversions must agree on.
+    """
+    from autoarray.fit import fit_util
+
+    model = np.asarray(inversion.mapped_reconstructed_operated_data_dict[mapper].array)
+    chi_squared = float(np.sum(((np.asarray(data) - model) / noise_map) ** 2))
+    noise_normalization = float(np.sum(np.log(2.0 * np.pi * noise_map**2)))
+    log_evidence = fit_util.log_evidence_from(
+        chi_squared=chi_squared,
+        regularization_term=float(inversion.regularization_term),
+        log_curvature_regularization_term=float(
+            inversion.log_det_curvature_reg_matrix_term
+        ),
+        log_regularization_term=float(inversion.log_det_regularization_matrix_term),
+        noise_normalization=noise_normalization,
+    )
+    return np.asarray(inversion.data_vector), chi_squared, log_evidence
+
+
+def test__psf_weighted_data_via_slim__matches_native_weight_map_path(
+    masked_imaging_7x7,
+):
+    """
+    The gather-only `psf_weighted_data_via_slim_from` equals `psf_weighted_data_from` applied to the native
+    weight map `data / noise**2` with zeros at masked pixels.
+    """
+    from autoarray.inversion.inversion.imaging import inversion_imaging_util
+
+    mask = masked_imaging_7x7.mask
+    native_for_slim = mask.derive_indexes.native_for_slim
+    kernel = np.asarray(masked_imaging_7x7.psf.kernel.native.array)
+
+    data = np.asarray(_profile_subtracted_data_from(masked_imaging_7x7).array)
+    noise_map = np.asarray(masked_imaging_7x7.noise_map.array)
+
+    weight_map_native = np.zeros(mask.shape_native)
+    weight_map_native[native_for_slim[:, 0], native_for_slim[:, 1]] = (
+        data / noise_map**2
+    )
+
+    expected = inversion_imaging_util.psf_weighted_data_from(
+        weight_map_native=weight_map_native,
+        kernel_native=kernel,
+        native_index_for_slim_index=native_for_slim,
+    )
+
+    neighbour_indexes = (
+        inversion_imaging_util.psf_weighted_data_neighbour_indexes_from(
+            native_index_for_slim_index=native_for_slim,
+            shape_native=mask.shape_native,
+            kernel_shape_native=kernel.shape,
+        )
+    )
+
+    assert inversion_imaging_util.psf_weighted_data_via_slim_from(
+        data=data,
+        noise_map=noise_map,
+        kernel_native=kernel,
+        neighbour_indexes=neighbour_indexes,
+    ) == pytest.approx(expected, rel=1.0e-14, abs=1.0e-14)
+
+
+@requires_jax
+@pytest.mark.parametrize("subtract_profile", [True, False])
+def test__sparse__profile_subtracted_data__matches_mapping_inversion(
+    masked_imaging_7x7, delaunay_mapper_9_3x3, subtract_profile
+):
+    """
+    PyAutoArray#680: the sparse operator is built once from the ORIGINAL image, but a fit with a regular
+    light profile hands the inversion the profile-subtracted data. The sparse data vector must be formed
+    from that subtracted data, so the sparse and dense inversions agree on D, chi-squared and log evidence.
+    The `subtract_profile=False` leg is the all-linear control, which agreed before the fix too.
+    """
+    mapper = delaunay_mapper_9_3x3
+    settings = aa.Settings(use_positive_only_solver=False)
+
+    data = (
+        _profile_subtracted_data_from(masked_imaging_7x7)
+        if subtract_profile
+        else masked_imaging_7x7.data
+    )
+    noise_map = np.asarray(masked_imaging_7x7.noise_map.array)
+
+    sparse_operator = masked_imaging_7x7.apply_sparse_operator().sparse_operator
+
+    inversion_sparse = aa.Inversion(
+        dataset=aa.DatasetInterface(
+            data=data,
+            noise_map=masked_imaging_7x7.noise_map,
+            grids=masked_imaging_7x7.grids,
+            psf=masked_imaging_7x7.psf,
+            sparse_operator=sparse_operator,
+        ),
+        linear_obj_list=[mapper],
+        settings=settings,
+    )
+    inversion_mapping = aa.Inversion(
+        dataset=aa.DatasetInterface(
+            data=data,
+            noise_map=masked_imaging_7x7.noise_map,
+            grids=masked_imaging_7x7.grids,
+            psf=masked_imaging_7x7.psf,
+        ),
+        linear_obj_list=[mapper],
+        settings=settings,
+    )
+
+    assert isinstance(inversion_sparse, InversionImagingSparse)
+    assert isinstance(inversion_mapping, aa.InversionImagingMapping)
+
+    d_sparse, chi_squared_sparse, log_evidence_sparse = _sparse_vs_dense_terms_from(
+        inversion_sparse, data.array, noise_map, mapper
+    )
+    d_mapping, chi_squared_mapping, log_evidence_mapping = _sparse_vs_dense_terms_from(
+        inversion_mapping, data.array, noise_map, mapper
+    )
+
+    assert np.max(np.abs(d_sparse - d_mapping)) <= 1.0e-10 * np.max(np.abs(d_mapping))
+    assert chi_squared_sparse == pytest.approx(chi_squared_mapping, rel=1.0e-10)
+    assert log_evidence_sparse == pytest.approx(log_evidence_mapping, rel=1.0e-10)
+
+
+@requires_jax
+def test__sparse__profile_subtracted_data__matches_mapping_inversion__jax_jit(
+    masked_imaging_7x7, delaunay_mapper_9_3x3
+):
+    """
+    The JAX path of PyAutoArray#680, eager and under `jax.jit` with the subtracted data traced, as a
+    production fit computes it.
+    """
+    import jax
+
+    jax.config.update("jax_enable_x64", True)
+
+    import jax.numpy as jnp
+
+    mapper = delaunay_mapper_9_3x3
+    mapper_jax = type(mapper)(
+        interpolator=mapper.interpolator,
+        regularization=mapper.regularization,
+        image_plane_mesh_grid=mapper.image_plane_mesh_grid,
+        xp=jnp,
+    )
+    settings = aa.Settings(use_positive_only_solver=False)
+
+    data = _profile_subtracted_data_from(masked_imaging_7x7)
+    mask = masked_imaging_7x7.mask
+    sparse_operator = masked_imaging_7x7.apply_sparse_operator().sparse_operator
+
+    def data_vector_from(data_values):
+        inversion = aa.Inversion(
+            dataset=aa.DatasetInterface(
+                data=aa.Array2D(values=data_values, mask=mask),
+                noise_map=masked_imaging_7x7.noise_map,
+                grids=masked_imaging_7x7.grids,
+                psf=masked_imaging_7x7.psf,
+                sparse_operator=sparse_operator,
+            ),
+            linear_obj_list=[mapper_jax],
+            settings=settings,
+            xp=jnp,
+        )
+        return inversion.data_vector
+
+    inversion_mapping = aa.Inversion(
+        dataset=aa.DatasetInterface(
+            data=data,
+            noise_map=masked_imaging_7x7.noise_map,
+            grids=masked_imaging_7x7.grids,
+            psf=masked_imaging_7x7.psf,
+        ),
+        linear_obj_list=[mapper],
+        settings=settings,
+    )
+    d_mapping = np.asarray(inversion_mapping.data_vector)
+
+    data_values = jnp.asarray(data.array)
+
+    for d_sparse in (
+        np.asarray(data_vector_from(data_values)),
+        np.asarray(jax.jit(data_vector_from)(data_values)),
+    ):
+        assert np.max(np.abs(d_sparse - d_mapping)) <= 1.0e-10 * np.max(
+            np.abs(d_mapping)
+        )
+
+
 def _mapper_with_invalid_slots_from(mapper):
     """
     Returns a copy of `mapper` whose stencil table carries every kind of entry

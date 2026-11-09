@@ -4,6 +4,87 @@ import numpy as np
 from typing import Optional, List, Tuple
 
 
+def psf_weighted_data_neighbour_indexes_from(
+    native_index_for_slim_index: np.ndarray,
+    shape_native,
+    kernel_shape_native,
+) -> np.ndarray:
+    """
+    Returns, for every unmasked image pixel, the slim indexes of the pixels a PSF kernel centred on it
+    covers, as an integer array of shape [image_pixels, Ky, Kx].
+
+    Kernel cells that fall on a masked pixel or outside the native array are given the sentinel index
+    `image_pixels`, which `psf_weighted_data_via_slim_from` maps to a zero weight. The table depends only
+    on the mask and kernel shape, so it is built once with NumPy and is a constant under `jax.jit`.
+
+    Parameters
+    ----------
+    native_index_for_slim_index
+        An array of shape [image_pixels, 2] mapping every slim index to its native (y,x) pixel.
+    shape_native
+        The 2D native shape of the mask.
+    kernel_shape_native
+        The 2D shape (Ky, Kx) of the PSF kernel.
+    """
+    native_index_for_slim_index = np.asarray(native_index_for_slim_index)
+
+    n_slim = native_index_for_slim_index.shape[0]
+    Ky, Kx = (int(k) for k in kernel_shape_native)
+    ph, pw = Ky // 2, Kx // 2
+
+    slim_for_native = np.full(
+        (int(shape_native[0]) + 2 * ph, int(shape_native[1]) + 2 * pw),
+        n_slim,
+        dtype=np.int64,
+    )
+    slim_for_native[
+        native_index_for_slim_index[:, 0] + ph, native_index_for_slim_index[:, 1] + pw
+    ] = np.arange(n_slim)
+
+    ys = native_index_for_slim_index[:, 0] + ph
+    xs = native_index_for_slim_index[:, 1] + pw
+
+    Y = ys[:, None, None] + (np.arange(Ky) - ph)[None, :, None]
+    X = xs[:, None, None] + (np.arange(Kx) - pw)[None, None, :]
+
+    return slim_for_native[Y, X]
+
+
+def psf_weighted_data_via_slim_from(
+    data: np.ndarray,
+    noise_map: np.ndarray,
+    kernel_native: np.ndarray,
+    neighbour_indexes: np.ndarray,
+    xp=np,
+) -> np.ndarray:
+    """
+    Returns `psf_weighted_data` (see `psf_weighted_data_from`) directly from the slim `data` and `noise_map`
+    of a masked dataset, which may have light profiles subtracted.
+
+    The weights `data / noise_map**2` are gathered through the precomputed `neighbour_indexes` table
+    (`psf_weighted_data_neighbour_indexes_from`), whose sentinel entries read an appended zero, and
+    correlated with the kernel. This equals `psf_weighted_data_from` of the native weight map with zeros at
+    masked pixels, but is gather-only: no native array is scattered, so it stays cheap when the data is
+    traced under `jax.jit` or batched under `jax.vmap`.
+
+    Parameters
+    ----------
+    data
+        The slim (masked, 1D) data values.
+    noise_map
+        The slim (masked, 1D) noise-map values.
+    kernel_native
+        The two dimensional PSF kernel that `psf_weighted_data` encodes the convolution of.
+    neighbour_indexes
+        The [image_pixels, Ky, Kx] slim-index table from `psf_weighted_data_neighbour_indexes_from`.
+    """
+    weights = xp.asarray(data) / xp.asarray(noise_map) ** 2
+    weights = xp.concatenate([weights, xp.zeros(1, dtype=weights.dtype)])
+
+    patches = weights[neighbour_indexes]  # (N, Ky, Kx)
+    return xp.sum(patches * xp.asarray(kernel_native)[None, :, :], axis=(1, 2))
+
+
 def psf_weighted_data_from(
     weight_map_native: np.ndarray,
     kernel_native: np.ndarray,
