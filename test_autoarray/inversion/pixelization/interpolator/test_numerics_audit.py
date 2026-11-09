@@ -352,11 +352,9 @@ def test_uniform_control_bit_identical_under_adaptive_pairing_fault(monkeypatch)
         assert before[1].tobytes() == after[1][:, [2, 3, 0, 1]].tobytes()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="PyAutoArray#609: partial final KNN block omits/mislabels tail nodes",
-)
 def test_knn_partial_final_block_matches_independent_neighbor_oracle():
+    # Regression for PyAutoArray#609 (was a strict xfail witness): at N=130 with the default
+    # point_block=128 the exact tail vertices 128 and 129 must find themselves at zero distance.
     if importlib.util.find_spec("jax") is None:
         pytest.skip("production KNN implementation requires optional jax")
     from autoarray.inversion.mesh.interpolator.knn import get_interpolation_weights
@@ -379,6 +377,78 @@ def test_knn_partial_final_block_matches_independent_neighbor_oracle():
         atol=1e-9,
         rtol=0,
     )
+
+
+KNN_BLOCK_SIZES = [127, 128, 129, 130, 200, 256, 257, 300, 330]
+
+
+@pytest.mark.parametrize("k_neighbors", [3, 10])
+@pytest.mark.parametrize("n_points", KNN_BLOCK_SIZES)
+def test_knn_block_boundaries_match_brute_force_eager_and_jit(n_points, k_neighbors):
+    """
+    PyAutoArray#609: every block-boundary case (fewer points than a block, exact multiples, and partial
+    final blocks) returns the brute-force k nearest neighbours with their true distances, eagerly and
+    under jit. k=3 is the selection `KNNBarycentric` makes, k=10 the `KNearestNeighbor` default.
+    """
+    if importlib.util.find_spec("jax") is None:
+        pytest.skip("production KNN implementation requires optional jax")
+    import jax
+    from autoarray.inversion.mesh.interpolator.knn import get_interpolation_weights
+
+    rng = np.random.default_rng(609 + n_points)
+    nodes = rng.uniform(-1.0, 1.0, (n_points, 2))
+    query = np.concatenate([nodes[-5:], rng.uniform(-1.0, 1.0, (40, 2))])
+    distance = np.sqrt(((query[:, None] - nodes[None]) ** 2).sum(2))
+    oracle_index = np.argsort(distance, axis=1)[:, :k_neighbors]
+    oracle = np.take_along_axis(distance, oracle_index, axis=1)
+
+    eager = get_interpolation_weights(nodes, query, k_neighbors, 1.5)
+    jitted = jax.jit(
+        lambda p, q: get_interpolation_weights(p, q, k_neighbors, 1.5)
+    )(nodes, query)
+
+    for mappings, _, knn_distance in (eager, jitted):
+        mappings = np.asarray(mappings)
+        assert mappings.max() < n_points
+        np.testing.assert_array_equal(
+            np.sort(mappings, axis=1), np.sort(oracle_index, axis=1)
+        )
+        np.testing.assert_allclose(
+            np.take_along_axis(distance, mappings, axis=1), oracle, atol=1e-12
+        )
+        # the expanded |q|^2 + |p|^2 - 2 q.p form leaves ~1e-16 in a squared
+        # self-distance, i.e. ~1.5e-8 after the square root
+        np.testing.assert_allclose(np.asarray(knn_distance), oracle, atol=1e-7)
+        # the queried tail vertices find themselves at zero distance
+        np.testing.assert_array_equal(
+            mappings[:5, 0], np.arange(n_points - 5, n_points)
+        )
+
+
+@pytest.mark.parametrize("family, k_neighbors", [("knn", 10), ("knn_barycentric", 3)])
+@pytest.mark.parametrize("n_points", [130, 257, 330])
+def test_knn_interpolators_partial_final_block_select_brute_force_neighbors(
+    family, k_neighbors, n_points
+):
+    """
+    PyAutoArray#609 through both production interpolators: at mesh sizes that leave a partial final
+    point block, each query's stencil is its brute-force nearest-vertex set, so no tail vertex is hidden
+    and no earlier vertex comes back under a tail index.
+    """
+    rng = np.random.default_rng(6090 + n_points)
+    nodes = rng.uniform(-1.0, 1.0, (n_points, 2))
+    query = np.concatenate([nodes[-3:] + 1.0e-4, rng.uniform(-1.0, 1.0, (60, 2))])
+
+    mappings, _ = tables(family, nodes, query, n_points)
+    distance = np.sqrt(((query[:, None] - nodes[None]) ** 2).sum(2))
+    oracle = np.sort(np.argsort(distance, axis=1)[:, :k_neighbors], axis=1)
+
+    np.testing.assert_array_equal(
+        np.sort(mappings[:, :k_neighbors], axis=1), oracle
+    )
+    # a query just off each tail vertex selects that vertex
+    for row, vertex in enumerate(range(n_points - 3, n_points)):
+        assert vertex in mappings[row, :k_neighbors]
 
 
 def test_knn_full_block_neighbors_kernel_and_pairing_fault():
