@@ -1,67 +1,53 @@
-# PyAutoArray
+# PyAutoArray: Arrays, Grids and Masks for Astronomy
 
-**PyAutoArray** (package `autoarray`) is the low-level data-structure and
-numerical-utility layer of the [PyAuto](https://github.com/PyAutoLabs)
-ecosystem. It provides masks, arrays, (y,x) coordinate grids,
-imaging/interferometer datasets, inversions/pixelizations for source
-reconstruction, and convolution/over-sampling operators.
+**PyAutoArray** provides arrays, masks, coordinate grids and numerical tools for astronomical imaging and interferometer data. It powers the data handling and image reconstruction in **PyAutoGalaxy** and **PyAutoLens**.
 
-`PyAutoGalaxy` and `PyAutoLens` build directly on autoarray: every grid a
-profile consumes, every masked image a fit operates on, and the linear-algebra
-inversions behind pixelized source reconstruction are autoarray objects. The
-package supports both a NumPy and an opt-in JAX (`xp=jnp`) backend.
+If you want to model galaxies or gravitational lenses, start with [PyAutoGalaxy](https://github.com/PyAutoLabs/PyAutoGalaxy) or [PyAutoLens](https://github.com/PyAutoLabs/PyAutoLens). Use PyAutoArray directly when you need these building blocks in your own Python code.
 
-## Install
+## Getting Started
+
+Install the package:
 
 ```bash
 pip install autoarray
 ```
 
-## Examples
-
-A masked 2D array tied to a pixel scale:
+Create a two-dimensional array with a pixel scale:
 
 ```python
 import autoarray as aa
 
-arr = aa.Array2D.no_mask(values=[[1.0, 2.0], [3.0, 4.0]], pixel_scales=0.1)
-arr.shape_native        # (2, 2)
-arr.native[0, 0]        # 1.0
-```
-
-A circular mask and the (y,x) coordinate grid of its unmasked pixels:
-
-```python
-mask = aa.Mask2D.circular(shape_native=(50, 50), pixel_scales=0.1, radius=2.0)
-mask.pixels_in_mask     # 1264
-
-grid = aa.Grid2D.from_mask(mask=mask)       # shape (1264, 2)
-uniform = aa.Grid2D.uniform(shape_native=(10, 10), pixel_scales=0.1)
-```
-
-A normalized Gaussian PSF convolver:
-
-```python
-convolver = aa.Convolver.from_gaussian(
-    shape_native=(11, 11), pixel_scales=0.1, sigma=1.0, normalize=True
+image = aa.Array2D.no_mask(
+    values=[[1.0, 2.0], [3.0, 4.0]],
+    pixel_scales=0.1,
 )
-convolver.kernel.shape_native       # (11, 11)
-convolver.kernel.array.sum()        # 1.0
 ```
 
-## Community & Contributing
+Create a circular mask and a grid of coordinates for its unmasked pixels:
 
-**PyAutoFit** is built in the open by its users: everyone is welcome to ask questions,
-share what they have made with it, and contribute.
+```python
+mask = aa.Mask2D.circular(
+    shape_native=(50, 50),
+    pixel_scales=0.1,
+    radius=2.0,
+)
 
-Questions, ideas and bug reports: the [PyAutoLabs Discussions](https://github.com/orgs/PyAutoLabs/discussions).
-Chat with us on [Slack](https://join.slack.com/t/pyautolens/shared_invite/zt-2cufp4eyf-fXfgMxRGuvg~bMrI3uOAxg).
+grid = aa.Grid2D.from_mask(mask=mask)
+```
 
-Community-built tools and tutorials, and how to contribute: the [**PyAutoFit** community page](https://pyautofit.readthedocs.io/en/latest/general/community.html).
+## Explore Further
 
-## Links
+- **[Galaxy modeling examples](https://github.com/PyAutoLabs/autogalaxy_workspace#find-your-examples)** — see arrays, grids and masks used in galaxy analysis.
+- **[Lensing examples](https://github.com/PyAutoLabs/autolens_workspace#find-your-examples)** — explore their use in gravitational lens modeling.
+- **[Source code](https://github.com/PyAutoLabs/PyAutoArray/tree/main/autoarray)** — explore the data structures and numerical tools.
+- **[Tests](https://github.com/PyAutoLabs/PyAutoArray/tree/main/test_autoarray)** — find focused examples of individual components.
 
-- Source & tests: [`autoarray/`](autoarray), [`test_autoarray/`](test_autoarray)
-- Decorators & JAX deep dive: [`docs/agents/jax_and_decorators.md`](docs/agents/jax_and_decorators.md)
-- Agent/contributor instructions: [`AGENTS.md`](AGENTS.md)
-- Ecosystem: [PyAutoLabs on GitHub](https://github.com/PyAutoLabs)
+## Community and Contributing
+
+Ask questions, suggest improvements and share your work in [PyAutoLabs Discussions](https://github.com/orgs/PyAutoLabs/discussions), or chat with us on [Slack](https://join.slack.com/t/pyautolens/shared_invite/zt-2cufp4eyf-fXfgMxRGuvg~bMrI3uOAxg).
+
+To contribute, see the [contribution guide](https://github.com/PyAutoLabs/PyAutoArray/blob/main/CONTRIBUTING.md).
+
+## License
+
+See the [license](https://github.com/PyAutoLabs/PyAutoArray/blob/main/LICENSE).
