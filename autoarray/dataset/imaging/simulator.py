@@ -243,12 +243,15 @@ class SimulatorImaging:
 
         image = image + background_sky_map
 
-        image_with_poisson_noise = preprocess.data_eps_with_poisson_noise_added(
-            data_eps=image,
-            exposure_time_map=exposure_time_map,
-            seed=self.noise_seed,
-            xp=xp,
-        )
+        # Only draw Poisson noise when it is used. The check is on the simulator's
+        # flags (Python-level), so it is safe under JAX tracing.
+        if self.add_poisson_noise_to_data or self.include_poisson_noise_in_noise_map:
+            image_with_poisson_noise = preprocess.data_eps_with_poisson_noise_added(
+                data_eps=image,
+                exposure_time_map=exposure_time_map,
+                seed=self.noise_seed,
+                xp=xp,
+            )
 
         if self.add_poisson_noise_to_data:
             image = image_with_poisson_noise

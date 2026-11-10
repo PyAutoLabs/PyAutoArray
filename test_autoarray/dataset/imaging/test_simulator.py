@@ -175,6 +175,76 @@ def test__via_image_from__psf_on__psf_and_noise_both_on(image_central_delta_3x3)
     )
 
 
+def test__via_image_from__poisson_off__round_off_negative_pixel_does_not_raise():
+    # PSF convolution can leave round-off negatives (~-1e-19). With Poisson noise
+    # off, the simulator must not draw Poisson noise at all, so these never reach
+    # ``np.random.poisson`` (which raises ``ValueError: lam < 0``).
+    image = aa.Array2D.no_mask(
+        values=np.array([[0.1, -1.0e-19, 0.1], [0.1, 0.19, 0.1], [0.1, 0.1, 0.1]]),
+        pixel_scales=0.1,
+    )
+
+    simulator = aa.SimulatorImaging(
+        exposure_time=2000.0,
+        add_poisson_noise_to_data=False,
+        include_poisson_noise_in_noise_map=False,
+        noise_seed=1,
+    )
+
+    dataset = simulator.via_image_from(image=image)
+
+    assert dataset.data.native == pytest.approx(image.native.array, abs=1e-12)
+
+
+def test__via_image_from__poisson_off__data_is_convolved_image_plus_sky():
+    image = aa.Array2D.no_mask(
+        values=np.array([[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.0]]),
+        pixel_scales=1.0,
+    )
+
+    kernel = aa.Array2D.no_mask(
+        values=np.array([[0.0, 1.0, 0.0], [1.0, 2.0, 1.0], [0.0, 1.0, 0.0]]),
+        pixel_scales=1.0,
+    )
+    psf = aa.Convolver(kernel=kernel)
+
+    simulator = aa.SimulatorImaging(
+        exposure_time=1.0,
+        psf=psf,
+        normalize_psf=False,
+        background_sky_level=3.0,
+        subtract_background_sky=False,
+        add_poisson_noise_to_data=False,
+        include_poisson_noise_in_noise_map=False,
+        noise_seed=1,
+    )
+
+    dataset = simulator.via_image_from(image=image)
+
+    assert dataset.data.native == pytest.approx(
+        np.array([[3.0, 4.0, 3.0], [4.0, 5.0, 4.0], [3.0, 4.0, 3.0]]), 1e-8
+    )
+
+
+def test__via_image_from__poisson_on__round_off_negative_pixel_draws_noise():
+    image = aa.Array2D.no_mask(
+        values=np.array([[1.0, -1.0e-19, 1.0], [1.0, 2.0, 1.0], [1.0, 1.0, 1.0]]),
+        pixel_scales=0.1,
+    )
+
+    simulator = aa.SimulatorImaging(
+        exposure_time=20.0,
+        add_poisson_noise_to_data=True,
+        include_poisson_noise_in_noise_map=True,
+        noise_seed=1,
+    )
+
+    dataset = simulator.via_image_from(image=image)
+
+    assert np.isfinite(dataset.data.native.array).all()
+    assert not np.allclose(dataset.data.native.array, image.native.array)
+
+
 def test__via_image_from__image_is_convolved__skips_psf_convolution():
     # An already-convolved image (e.g. from an oversampled Convolver) must pass
     # through untouched by the simulator's own convolution step.

@@ -464,6 +464,11 @@ def poisson_noise_via_data_eps_from(data_eps, exposure_time_map, seed=-1, xp=np)
 
     Values are computed from a Poisson distribution using the image's input values in units of counts.
 
+    Tiny negative values (e.g. floating-point round-off from PSF convolution) are clipped to
+    zero before the draw. On the NumPy path, an image that is genuinely negative (minimum below
+    ``-1e-10`` times its maximum) raises a ``DatasetException`` instead. The JAX path only
+    clips, because it cannot raise on traced values.
+
     Parameters
     ----------
     data_eps
@@ -487,6 +492,14 @@ def poisson_noise_via_data_eps_from(data_eps, exposure_time_map, seed=-1, xp=np)
     image_counts = data_eps.array * exposure_time_map.array
 
     if xp is np:
+        if image_counts.min() < -1e-10 * abs(image_counts.max()):
+            raise exc.DatasetException(
+                "Cannot draw Poisson noise from an image with negative values "
+                f"(minimum {image_counts.min()} counts, maximum {image_counts.max()} "
+                "counts). Poisson noise needs a non-negative image; check the input "
+                "image and background sky level."
+            )
+        image_counts = np.maximum(image_counts, 0)
         setup_random_seed(seed)
         noisy_eps_array = (
             np.random.poisson(image_counts, data_eps.shape) / exposure_time_map.array
@@ -496,6 +509,7 @@ def poisson_noise_via_data_eps_from(data_eps, exposure_time_map, seed=-1, xp=np)
 
         effective_seed = seed if seed != -1 else int(time.time() * 1e6) & 0xFFFFFFFF
         key = jax.random.PRNGKey(effective_seed)
+        image_counts = xp.maximum(image_counts, 0)
         noisy_eps_array = (
             jax.random.poisson(key, image_counts) / exposure_time_map.array
         )

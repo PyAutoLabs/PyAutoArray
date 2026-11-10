@@ -635,6 +635,29 @@ def test__poisson_noise_from_data():
     assert (poisson_noise.native == np.array([[-743, 0], [0, -3783]])).all()
 
 
+def test__poisson_noise_from_data__round_off_negative_is_clipped():
+    data = aa.Array2D.no_mask(values=[[10.0, -1.0e-19], [10.0, 10.0]], pixel_scales=1.0)
+    exposure_time_map = aa.Array2D.ones(shape_native=(2, 2), pixel_scales=1.0)
+
+    poisson_noise = aa.preprocess.poisson_noise_via_data_eps_from(
+        data_eps=data, exposure_time_map=exposure_time_map, seed=1
+    )
+
+    # The clipped pixel has zero expected counts, so its noise only removes the round-off.
+    assert poisson_noise.native[0, 1] == pytest.approx(1.0e-19, abs=1e-25)
+    assert (poisson_noise.native.array != 0.0).any()
+
+
+def test__poisson_noise_from_data__genuinely_negative_image_raises():
+    data = aa.Array2D.no_mask(values=[[1.0, -0.5], [0.5, 0.5]], pixel_scales=1.0)
+    exposure_time_map = aa.Array2D.ones(shape_native=(2, 2), pixel_scales=1.0)
+
+    with pytest.raises(aa.exc.DatasetException):
+        aa.preprocess.poisson_noise_via_data_eps_from(
+            data_eps=data, exposure_time_map=exposure_time_map, seed=1
+        )
+
+
 def test__data_with_poisson_noised_added():
     data = aa.Array2D.zeros(shape_native=(2, 2), pixel_scales=1.0)
     exposure_time_map = aa.Array2D.ones(shape_native=(2, 2), pixel_scales=1.0)
