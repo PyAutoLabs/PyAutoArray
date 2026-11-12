@@ -1,5 +1,7 @@
 analysis:
   n_cores: 1
+dataset:
+  trim_to_mask: false              # If True, Imaging.apply_mask trims the native arrays to the mask plus a PSF half-width and a one-pixel buffer. Off for unit tests so fixture shapes are kept.
 psf:
   use_fft_default: false              # If True, PSFs are convolved using FFTs by default, which is faster and uses less memory in all cases except for very small PSFs, False uses direct convolution. Real space used for unit tests.
 grid:

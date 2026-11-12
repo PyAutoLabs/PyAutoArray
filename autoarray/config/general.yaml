@@ -1,3 +1,5 @@
+dataset:
+  trim_to_mask: true               # If True, Imaging.apply_mask cuts the native arrays down to the smallest centred frame holding the unmasked pixels plus a PSF half-width and a one-pixel buffer (Imaging.trimmed_to_mask_from), so the FFT convolution frame is set by the mask and PSF rather than by the size of the image the mask was cut from. The fit is unchanged (only masked pixels are removed, the central pixel stays put); the native shape of every array and model image shrinks. Set False to keep the native shape of the input image.
 psf:
   use_fft_default: true              # If True, PSFs are convolved using FFTs by default, which is faster and uses less memory in all cases except for very small PSFs, False uses direct convolution.
 inversion:

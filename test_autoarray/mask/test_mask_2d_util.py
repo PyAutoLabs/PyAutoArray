@@ -1104,3 +1104,102 @@ def test__buffed_mask_2d_from():
             ]
         )
     ).all()
+
+
+def test__trimmed_shape_for_kernel__centred_square_region__shape_is_region_plus_half_kernel_plus_buffer():
+    mask = np.full((9, 9), True)
+    mask[3:6, 3:6] = False
+
+    # 3x3 region + half-kernel on each side + the default one-pixel buffer on each side.
+    assert util.mask_2d.trimmed_shape_for_kernel(mask, kernel_shape_native=(3, 3)) == (
+        7,
+        7,
+    )
+    assert util.mask_2d.trimmed_shape_for_kernel(mask, kernel_shape_native=(1, 1)) == (
+        5,
+        5,
+    )
+    assert util.mask_2d.trimmed_shape_for_kernel(mask, kernel_shape_native=(5, 3)) == (
+        9,
+        7,
+    )
+
+    # buffer=0 is the exact minimum: region + half-kernel.
+    assert util.mask_2d.trimmed_shape_for_kernel(
+        mask, kernel_shape_native=(3, 3), buffer=0
+    ) == (5, 5)
+    assert util.mask_2d.trimmed_shape_for_kernel(
+        mask, kernel_shape_native=(1, 1), buffer=0
+    ) == (3, 3)
+    assert util.mask_2d.trimmed_shape_for_kernel(
+        mask, kernel_shape_native=(3, 3), buffer=2
+    ) == (9, 9)
+
+
+def test__trimmed_shape_for_kernel__parity_preserved_and_centre_kept():
+    # Even frame: the central pixel is the lower of the central pair (3 of 0..7), and the
+    # unmasked 2x2 block sits on pixels 3 and 4, so it is symmetric about the pixel boundary.
+    mask = np.full((8, 8), True)
+    mask[3:5, 3:5] = False
+
+    shape = util.mask_2d.trimmed_shape_for_kernel(mask, kernel_shape_native=(3, 3))
+
+    # 2 unmasked + 1 half-kernel + 1 buffer on each side.
+    assert shape == (6, 6)
+
+    # Cutting to that shape about the centre keeps every unmasked pixel a half-width plus the
+    # buffer from the edge.
+    trimmed = util.array_2d.resized_array_2d_from(
+        array_2d=mask.astype(float), resized_shape=shape, pad_value=1.0
+    ).astype(bool)
+    assert trimmed.sum() == mask.sum() - (64 - 36)
+    assert util.mask_2d.min_false_distance_to_edge(trimmed) == (2, 2)
+
+    assert util.mask_2d.trimmed_shape_for_kernel(
+        mask, kernel_shape_native=(3, 3), buffer=0
+    ) == (4, 4)
+
+    # Odd frame, region offset from the centre: the frame grows symmetrically so the
+    # central pixel stays put, rather than re-centring on the region.
+    mask = np.full((9, 9), True)
+    mask[1:3, 5:8] = False
+
+    shape = util.mask_2d.trimmed_shape_for_kernel(mask, kernel_shape_native=(3, 3))
+
+    assert shape == (11, 11)
+    assert shape[0] % 2 == 1 and shape[1] % 2 == 1
+    assert util.mask_2d.trimmed_shape_for_kernel(
+        mask, kernel_shape_native=(3, 3), buffer=0
+    ) == (9, 9)
+
+
+def test__trimmed_shape_for_kernel__region_at_edge__frame_pads_rather_than_cuts():
+    mask = np.full((5, 5), True)
+    mask[0, 2] = False
+
+    shape = util.mask_2d.trimmed_shape_for_kernel(mask, kernel_shape_native=(5, 5))
+
+    # The pixel at row 0 needs two rows above it plus the buffer: 2 before the centre + 2 pad
+    # + 1 buffer, so 11 rows; the columns need the half-width plus buffer, 7.
+    assert shape == (11, 7)
+    assert util.mask_2d.trimmed_shape_for_kernel(
+        mask, kernel_shape_native=(5, 5), buffer=0
+    ) == (9, 5)
+
+
+def test__trimmed_shape_for_kernel__invalid_inputs_raise():
+    mask = np.full((5, 5), True)
+    mask[2, 2] = False
+
+    with pytest.raises(ValueError):
+        util.mask_2d.trimmed_shape_for_kernel(mask, kernel_shape_native=(0, 3))
+
+    with pytest.raises(ValueError):
+        util.mask_2d.trimmed_shape_for_kernel(
+            mask, kernel_shape_native=(3, 3), buffer=-1
+        )
+
+    with pytest.raises(ValueError):
+        util.mask_2d.trimmed_shape_for_kernel(
+            np.full((5, 5), True), kernel_shape_native=(3, 3)
+        )

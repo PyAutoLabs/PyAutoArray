@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 import autoarray as aa
+from autonerves import conf
 
 from autoarray import exc
 from autoarray.inversion.inversion.imaging_numba.sparse import (
@@ -219,7 +220,9 @@ def test__from_fits__small_datasets_env_unset__shape_unchanged(tmp_path, monkeyp
     assert dataset.pixel_scales == (0.08, 0.08)
 
 
-def test__output_to_fits__round_trips_data_psf_noise_map_correctly(imaging_7x7, tmp_path):
+def test__output_to_fits__round_trips_data_psf_noise_map_correctly(
+    imaging_7x7, tmp_path
+):
 
     from autoarray.dataset.plot.imaging_plots import fits_imaging
 
@@ -266,6 +269,148 @@ def test__apply_mask__data_noise_map_psf_correctly_masked(
     )
 
     assert type(masked_imaging_7x7.psf) == aa.Convolver
+
+
+def _imaging_11x11_from(imaging_7x7):
+    """The 7x7 fixture padded to 11x11 (two masked pixels on every side), so the 3x3 mask plus the
+    3x3 PSF's half-width and the one-pixel buffer (7x7) is a genuine trim."""
+    return aa.Imaging(
+        data=imaging_7x7.data.resized_from(new_shape=(11, 11), mask_pad_value=True),
+        noise_map=imaging_7x7.noise_map.resized_from(
+            new_shape=(11, 11), mask_pad_value=True
+        ),
+        psf=imaging_7x7.psf,
+        over_sample_size_lp=1,
+    )
+
+
+def test__apply_mask__trim_to_mask__native_cut_to_mask_plus_psf_half_width_plus_buffer__slim_unchanged(
+    imaging_7x7, mask_2d_7x7
+):
+    imaging_11x11 = _imaging_11x11_from(imaging_7x7)
+    mask_2d_11x11 = mask_2d_7x7.resized_from(new_shape=(11, 11), pad_value=True)
+
+    untrimmed = imaging_11x11.apply_mask(mask=mask_2d_11x11, trim_to_mask=False)
+    trimmed = imaging_11x11.apply_mask(mask=mask_2d_11x11, trim_to_mask=True)
+
+    # The 3x3 unmasked block plus the 3x3 PSF's half-width of 1 and the buffer of 1 on each side.
+    assert untrimmed.data.shape_native == (11, 11)
+    assert trimmed.data.shape_native == (7, 7)
+    assert trimmed.noise_map.shape_native == (7, 7)
+    assert trimmed.over_sample_size_lp.shape_native == (7, 7)
+    assert trimmed.over_sample_size_pixelization.shape_native == (7, 7)
+    assert trimmed.mask.shape_native == (7, 7)
+    # The FFT frame every convolution pays for shrinks with the trim: 11x11 mask -> 12x12
+    # frame, 7x7 trimmed -> 8x8 (mask region + kernel - 1, rounded by next_fast_len).
+    assert untrimmed.psf._state.fft_shape == (12, 12)
+    assert trimmed.psf._state.fft_shape == (8, 8)
+
+    # Only masked pixels were removed.
+    assert (trimmed.data.slim == untrimmed.data.slim).all()
+    assert (trimmed.noise_map.slim == untrimmed.noise_map.slim).all()
+    assert (
+        trimmed.over_sample_size_lp.slim == untrimmed.over_sample_size_lp.slim
+    ).all()
+    assert (trimmed.mask == mask_2d_7x7).all()
+    assert (trimmed.data.native[2:5, 2:5] == untrimmed.data.native[4:7, 4:7]).all()
+
+    # The central pixel stays on the same pixel: scaled coordinates are unchanged.
+    assert (trimmed.grids.lp.slim == untrimmed.grids.lp.slim).all()
+    assert trimmed.mask.origin == untrimmed.mask.origin
+
+    # The convolution gives the same blurred image.
+    image = aa.Array2D(values=np.arange(9, dtype=float), mask=untrimmed.mask)
+    blurring_untrimmed = aa.Array2D(
+        values=np.arange(untrimmed.grids.blurring.shape[0], dtype=float),
+        mask=untrimmed.grids.blurring.mask,
+    )
+    blurring_trimmed = aa.Array2D(
+        values=blurring_untrimmed.slim.array, mask=trimmed.grids.blurring.mask
+    )
+    convolved_untrimmed = untrimmed.psf.convolved_image_from(
+        image=image, blurring_image=blurring_untrimmed
+    )
+    convolved_trimmed = trimmed.psf.convolved_image_from(
+        image=aa.Array2D(values=np.arange(9, dtype=float), mask=trimmed.mask),
+        blurring_image=blurring_trimmed,
+    )
+    assert np.asarray(convolved_trimmed) == pytest.approx(
+        np.asarray(convolved_untrimmed), 1e-10
+    )
+
+    # The buffer is a margin of masked pixels around the blurring region, not part of it.
+    exact = untrimmed.trimmed_to_mask_from(buffer=0)
+    assert exact.data.shape_native == (5, 5)
+    assert (
+        trimmed.grids.blurring.mask.resized_from(new_shape=(5, 5), pad_value=True)
+        == exact.grids.blurring.mask
+    ).all()
+
+
+def test__apply_mask__trim_to_mask__default_from_config(
+    imaging_7x7, mask_2d_7x7, monkeypatch
+):
+    imaging_11x11 = _imaging_11x11_from(imaging_7x7)
+    mask_2d_11x11 = mask_2d_7x7.resized_from(new_shape=(11, 11), pad_value=True)
+
+    # The test config sets [dataset] trim_to_mask: false (the packaged default is true).
+    masked = imaging_11x11.apply_mask(mask=mask_2d_11x11)
+
+    assert masked.data.shape_native == (11, 11)
+
+    monkeypatch.setitem(conf.instance["general"]["dataset"], "trim_to_mask", True)
+
+    masked = imaging_11x11.apply_mask(mask=mask_2d_11x11)
+
+    assert masked.data.shape_native == (7, 7)
+
+
+def test__apply_mask__trim_to_mask__fixture_already_at_buffered_minimum__unchanged(
+    imaging_7x7, mask_2d_7x7
+):
+    # 3x3 mask + half-width 1 + buffer 1 on each side is exactly the 7x7 fixture.
+    trimmed = imaging_7x7.apply_mask(mask=mask_2d_7x7, trim_to_mask=True)
+
+    assert trimmed.data.shape_native == (7, 7)
+
+
+def test__trimmed_to_mask_from__already_minimal__returns_self__covariance_kept():
+    image = aa.Array2D.ones(shape_native=(2, 2), pixel_scales=(1.0, 1.0))
+    noise_map = aa.Array2D.ones(shape_native=(2, 2), pixel_scales=(1.0, 1.0))
+    noise_covariance_matrix = np.array(
+        [
+            [1.0, 0.1, 0.0, 0.0],
+            [0.1, 2.0, 0.0, 0.0],
+            [0.0, 0.0, 3.0, 0.2],
+            [0.0, 0.0, 0.2, 4.0],
+        ]
+    )
+    psf = aa.Convolver(
+        kernel=aa.Array2D.no_mask(values=[[1.0]], pixel_scales=(1.0, 1.0))
+    )
+    imaging = aa.Imaging(
+        data=image,
+        noise_map=noise_map,
+        psf=psf,
+        noise_covariance_matrix=noise_covariance_matrix,
+        over_sample_size_lp=1,
+    )
+
+    mask = aa.Mask2D(mask=[[True, False], [False, True]], pixel_scales=(1.0, 1.0))
+
+    masked = imaging.apply_mask(mask=mask, trim_to_mask=False)
+
+    # Without the buffer the 2x2 frame is already the minimum for a 1x1 kernel.
+    assert masked.trimmed_to_mask_from(buffer=0) is masked
+
+    # With the default buffer the unmasked pixels sit on the edge, so the frame is padded,
+    # as the convolver would pad it; the slim data and the covariance are unchanged.
+    trimmed = imaging.apply_mask(mask=mask, trim_to_mask=True)
+
+    assert trimmed.data.shape_native == (4, 4)
+    assert (trimmed.data.slim == masked.data.slim).all()
+    assert (trimmed.noise_covariance_matrix == masked.noise_covariance_matrix).all()
+    assert trimmed.trimmed_to_mask_from() is trimmed
 
 
 def test__apply_noise_scaling__masked_pixel_data_zeroed_and_noise_set_to_noise_value(
