@@ -128,6 +128,9 @@ def plot_array(
         Explicit color scale limits.
     use_log10
         When ``True`` a ``LogNorm`` is applied.
+    contours
+        Number of contour levels to draw. ``None`` draws log-spaced contours on a ``use_log10`` plot and none
+        otherwise; ``0`` draws none, even on a ``use_log10`` plot.
     stretch
         Optional positive asinh linear-width fraction of the displayed range,
         e.g. 0.01 to reveal faint structure beside a bright peak. Only changes
@@ -357,8 +360,8 @@ def plot_array(
         x_fill = np.arange(len(y1))
         ax.fill_between(x_fill, y1, y2, alpha=0.3)
 
-    # Contours: auto-enabled for log10 plots; explicit int enables linear contours.
-    if use_log10 or (contours is not None and contours > 0):
+    # Contours: auto-enabled for log10 plots unless ``contours=0``; an explicit positive int sets the level count.
+    if (use_log10 and contours != 0) or (contours is not None and contours > 0):
         _apply_contours(
             ax,
             array,

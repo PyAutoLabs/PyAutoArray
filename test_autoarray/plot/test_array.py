@@ -140,3 +140,22 @@ def test__plot_inversion_reconstruction__uniform_mesh_grid_lands_on_pixel(
         assert _pixel_value_under(ax, float(draw_x), float(draw_y)) == 1.0
     finally:
         plt.close(fig)
+
+
+def _contour_sets(ax):
+    return [collection for collection in ax.collections if hasattr(collection, "levels")]
+
+
+def test__plot_array__use_log10_contours_are_automatic_unless_zero():
+    y, x = np.mgrid[-2.0:2.0:40j, -2.0:2.0:40j]
+    array = aa.Array2D.no_mask(values=np.exp(-(y**2 + x**2)) + 0.01, pixel_scales=0.1)
+
+    fig, ax = plt.subplots()
+    aplt.plot_array(array=array, use_log10=True, ax=ax)
+    assert len(_contour_sets(ax)) == 1
+
+    fig, ax = plt.subplots()
+    aplt.plot_array(array=array, use_log10=True, contours=0, ax=ax)
+    assert _contour_sets(ax) == []
+
+    plt.close("all")
