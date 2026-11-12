@@ -51,3 +51,5 @@ To contribute, see the [contribution guide](https://github.com/PyAutoLabs/PyAuto
 ## License
 
 See the [license](https://github.com/PyAutoLabs/PyAutoArray/blob/main/LICENSE).
+
+<sub><i><a href="https://fredagain.lnk.to/places-to-be">me next to you / and you next to me</a></i></sub>
