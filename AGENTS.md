@@ -1,7 +1,6 @@
 # PyAutoArray — Agent Instructions
 
-Canonical, agent-agnostic instructions for this repo. `CLAUDE.md` imports this
-file; any tool that does not process `@`-imports should read this directly.
+This file contains the canonical, agent-agnostic instructions. Read it directly.
 
 ## What this repo is
 
