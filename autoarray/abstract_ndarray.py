@@ -65,6 +65,26 @@ def unwrap_array(func):
 _pytree_registered_classes: set = set()
 
 
+def _register_pytree_node_once(cls, flatten, unflatten) -> None:
+    """Register ``cls`` with ``jax.tree_util``, tolerating a prior registration.
+
+    JAX allows one registration per class and has no way to undo one. Several
+    routes register the same classes: ``autofit.jax.register_model`` registers
+    every model class (``Galaxy`` included) when a JAX ``Fitness`` is built,
+    and ``autolens.jax.register_tracer_classes`` reaches
+    :func:`register_instance_pytree` for the same ``Galaxy``. When JAX reports
+    the class is already registered, the existing registration is kept (the
+    first route wins) and this call is a no-op. Any other error still raises.
+    """
+    from autonerves.jax_wrapper import register_pytree_node
+
+    try:
+        register_pytree_node(cls, flatten, unflatten)
+    except ValueError as exc:
+        if "Duplicate custom PyTreeDef" not in str(exc):
+            raise
+
+
 def _register_as_pytree(cls):
     """Register ``cls`` with ``jax.tree_util`` via the lazy autonerves wrapper.
 
@@ -75,9 +95,8 @@ def _register_as_pytree(cls):
     """
     if cls in _pytree_registered_classes:
         return
-    from autonerves.jax_wrapper import register_pytree_node
 
-    register_pytree_node(cls, cls.instance_flatten, cls.instance_unflatten)
+    _register_pytree_node_once(cls, cls.instance_flatten, cls.instance_unflatten)
     _pytree_registered_classes.add(cls)
 
 
@@ -97,11 +116,13 @@ def register_instance_pytree(cls, no_flatten=()):
       cosmology, adapt images).
 
     Reconstructs via ``cls.__new__`` + ``setattr`` (side-effect-free — no
-    ``__init__`` re-entry). Idempotent.
+    ``__init__`` re-entry). Idempotent, including across registration routes:
+    if ``cls`` was already registered elsewhere (e.g. ``Galaxy`` by
+    ``autofit.jax.register_model`` when a JAX ``Fitness`` was built), that
+    registration is kept and this call does nothing.
     """
     if cls in _pytree_registered_classes:
         return
-    from autonerves.jax_wrapper import register_pytree_node
     from autonerves.tools.decorators import cached_property_names
 
     # Extend the caller-supplied no_flatten set with every
@@ -133,7 +154,7 @@ def register_instance_pytree(cls, no_flatten=()):
             setattr(new, key, value)
         return new
 
-    register_pytree_node(cls, flatten, unflatten)
+    _register_pytree_node_once(cls, flatten, unflatten)
     _pytree_registered_classes.add(cls)
 
 
