@@ -43,7 +43,7 @@ class MaternAdaptPowerKernel(MaternAdaptKernel):
         **Migration from ``MaternAdaptKernel``.** The coefficient scale is squared: ``c_new = c_old ** 2``. To
         reproduce the legacy class exactly, pass ``power=2.0``.
 
-        **JAX & gradient support**: as for ``MaternAdaptKernel`` (tfp ``bessel_kve`` gradients; explicit-inverse
+        **JAX & gradient support**: as for ``MaternAdaptKernel`` (vendored ``bessel_kve`` gradients; explicit-inverse
         conditioning caveat).
 
         Parameters

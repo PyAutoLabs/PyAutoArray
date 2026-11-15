@@ -7,10 +7,11 @@ These mirror, at library level, what
 `autolens_workspace_test/scripts/imaging/jax_grad/regularization.py` certifies at
 workspace level. Skipped when JAX is absent (it is an optional dependency).
 
-The Matern kernel is deliberately not covered here: its JAX path needs the modified
-Bessel `K_nu` from `tfp-nightly`, which is an optional-of-an-optional. The Gaussian and
-Exponential kernels exercise the same shared code (`apply_jitter`,
-`quadratic_form_via_cholesky`) without it.
+The Gaussian and Exponential kernels exercise the shared code (`apply_jitter`,
+`quadratic_form_via_cholesky`). The Matern kernel's JAX path adds the vendored modified
+Bessel `K_nu` (`autoarray/inversion/regularization/bessel.py`); the last tests here
+spot-check it against `scipy.special.kv`. The full `(nu, z)` parity grid and
+gradient certification live in workspace_test.
 """
 
 import numpy as np
@@ -161,3 +162,73 @@ def test__relative_jitter__does_not_break_gradients(jitter_relative):
 
     assert np.isfinite(autodiff)
     assert autodiff == pytest.approx(finite_difference, rel=1.0e-6)
+
+
+def test__matern_kv_xp__jax_matches_scipy_across_regimes():
+    """
+    Spot-check the vendored JAX `K_nu` against SciPy on points either side of each
+    regime boundary (Temme series z <= 2 / continued fraction z > 2; half-integer
+    orders where the recurrence count changes; Olver asymptotics for nu >= 50).
+    """
+    import scipy.special as sc
+
+    from autoarray.inversion.regularization.matern_kernel import kv_xp
+
+    nu = np.array([0.5, 0.75, 1.4999, 1.5001, 2.5, 3.3, 5.5, 49.9, 50.0, 60.0])
+    z = np.array([1e-3, 0.5, 1.999, 2.001, 7.0, 40.0])
+    nu, z = np.meshgrid(nu, z, indexing="ij")
+
+    kv_jax = np.asarray(jax.jit(lambda v, x: kv_xp(v, x, xp=jnp))(nu, z))
+
+    np.testing.assert_allclose(kv_jax, sc.kv(nu, z), rtol=1e-10)
+
+
+def test__matern_kv_xp__z_gradient_matches_analytic_derivative():
+    """
+    The vendored `K_nu` registers `dK/dz = -(K_{nu-1} + K_{nu+1}) / 2` through its
+    custom JVP; check reverse-mode autodiff against SciPy's closed form.
+    """
+    import scipy.special as sc
+
+    from autoarray.inversion.regularization.matern_kernel import kv_xp
+
+    nu = np.array([0.5, 1.7, 2.5, 5.5])
+    z = np.array([0.3, 1.999, 2.001, 9.0])
+    nu, z = np.meshgrid(nu, z, indexing="ij")
+
+    grad = jax.vmap(jax.grad(lambda v, x: kv_xp(v, x, xp=jnp), argnums=1))(
+        jnp.asarray(nu.ravel()), jnp.asarray(z.ravel())
+    )
+    analytic = -(sc.kv(nu - 1.0, z) + sc.kv(nu + 1.0, z)) / 2.0
+
+    np.testing.assert_allclose(np.asarray(grad).reshape(nu.shape), analytic, rtol=1e-10)
+
+
+def test__matern_cov_matrix__scale_gradient_is_finite_difference_certified():
+    """
+    Gradients flow through the vendored Bessel `K_nu` (via its argument
+    `z = sqrt(2 nu) r / scale`) and the Cholesky solve, matching a central finite
+    difference; the JAX covariance also agrees with the NumPy path.
+    """
+    from autoarray.inversion.regularization.matern_kernel import (
+        matern_cov_matrix_from,
+    )
+
+    def term(scale):
+        covariance = matern_cov_matrix_from(
+            scale=scale, nu=1.7, pixel_points=jnp.asarray(POINTS), xp=jnp
+        )
+        return quadratic_form_via_cholesky(covariance, jnp.asarray(VECTOR), xp=jnp)
+
+    autodiff = float(jax.grad(term)(1.3))
+
+    step = 1.0e-6
+    finite_difference = float((term(1.3 + step) - term(1.3 - step)) / (2.0 * step))
+
+    assert autodiff == pytest.approx(finite_difference, rel=1.0e-6)
+
+    covariance_np = matern_cov_matrix_from(scale=1.3, nu=1.7, pixel_points=POINTS)
+    covariance_jax = matern_cov_matrix_from(
+        scale=1.3, nu=1.7, pixel_points=jnp.asarray(POINTS), xp=jnp
+    )
+    np.testing.assert_allclose(np.asarray(covariance_jax), covariance_np, rtol=1e-10)
