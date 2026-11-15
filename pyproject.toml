@@ -78,8 +78,10 @@ local_scheme = "no-local-version"
 [project.optional-dependencies]
 # JAX moved into autonerves' base dependencies (PyAutoLens#702). Kept as a
 # declared no-op so `pip install autoarray[jax]` keeps resolving
-# (PyAutoLens#687). The interferometer JAX extras (nufftax, tfp-nightly)
-# deliberately stay in `optional` — they are NOT part of the default install.
+# (PyAutoLens#687). The interferometer JAX extra (nufftax) deliberately
+# stays in `optional` — it is NOT part of the default install. (The JAX Matern kernel's
+# modified-Bessel K_v is vendored in autoarray/inversion/regularization/bessel.py,
+# so tensorflow-probability is no longer needed.)
 jax = []
 optional = [
     "autoarray[jax]",
@@ -87,13 +89,6 @@ optional = [
     # 0.6.1 floor: nufftax <0.6 cannot differentiate a batched nufft2d2
     # (_nufft2d2_bwd assumed 2-D f), which transform_mapping_matrix relies on.
     "nufftax>=0.6.1,<0.7.0",
-    # tfp provides the modified-Bessel `bessel_kve` used by the JAX Matern-kernel
-    # regularization path (autoarray/inversion/regularization/matern_kernel.py).
-    # The last *stable* release (tensorflow-probability==0.25.0) targets a JAX where
-    # `jax.interpreters.xla.pytype_aval_mappings` still existed; it crashes at import
-    # under the resolved `jax>=0.7` stack (autonerves[jax]). The nightly restores
-    # compatibility. Durable fix (vendor bessel_kve, drop tfp) tracked separately.
-    "tfp-nightly==0.26.0.dev20260713"
 ]
 test = ["pytest"]
 dev = [

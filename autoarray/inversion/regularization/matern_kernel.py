@@ -19,14 +19,13 @@ def kv_xp(v, z, xp=np):
         -> scipy.special.kv
 
     JAX backend:
-        -> tensorflow_probability.substrates.jax.math.bessel_kve * exp(-|z|)
+        -> autoarray.inversion.regularization.bessel.kv
 
     `jax.scipy.special` has no modified-Bessel-K (`kv`/`kve`) of arbitrary real
-    order, so the JAX path relies on tfp's `bessel_kve`. Note the tfp dependency
-    is the *nightly* build (`tfp-nightly`): the last stable release
-    (`tensorflow-probability==0.25.0`) crashes at import under the resolved
-    `jax>=0.7` stack (it references `jax.interpreters.xla.pytype_aval_mappings`,
-    removed from modern JAX).
+    order, and the Matérn `nu` is a continuous prior, so the JAX path uses a
+    vendored, pure-`jax.numpy` port of tensorflow-probability's `bessel_kve`
+    (see `bessel.py`). It is differentiable in `z` (`jax.custom_jvp`); as in
+    tfp, no gradient is defined with respect to the order `v`.
     """
 
     # -------------------------
@@ -40,18 +39,9 @@ def kv_xp(v, z, xp=np):
     # -------------------------
     # JAX backend
     # -------------------------
-    else:
-        try:
-            import tensorflow_probability.substrates.jax as tfp
+    from autoarray.inversion.regularization.bessel import kv
 
-            return tfp.math.bessel_kve(v, z) * xp.exp(-xp.abs(z))
-        except ImportError:
-            raise ImportError(
-                "To use the JAX backend with the Matérn kernel, install the "
-                "tensorflow-probability nightly via "
-                "`pip install tfp-nightly==0.26.0.dev20260713` "
-                "(the last stable release, 0.25.0, is incompatible with modern JAX)."
-            )
+    return kv(v, z)
 
 
 def gamma_xp(x, xp=np):
@@ -288,10 +278,10 @@ class MaternKernel(AbstractRegularization):
         A full description of regularization and this matrix can be found in the parent `AbstractRegularization` class.
 
         **JAX & gradient support** (2026-07 gradient sweep): the JAX path
-        evaluates the modified Bessel ``K_nu`` through
-        ``tensorflow_probability.substrates.jax.math.bessel_kve`` (requires
-        ``tfp-nightly``; see ``kv_xp``), which ships a registered gradient
-        with respect to its argument (``nu`` is a static float), and the
+        evaluates the modified Bessel ``K_nu`` through autoarray's vendored
+        ``bessel_kve`` (a pure-JAX port of tensorflow-probability's; see
+        ``kv_xp``), which registers a gradient with respect to its argument
+        (``nu`` is a static float), and the
         covariance inverse differentiates through the Cholesky — gradients
         flow end-to-end and are FD-certified on the rectangular mesh at
         ``nu=2.5``. Caveat: the regularization matrix is an explicit dense
