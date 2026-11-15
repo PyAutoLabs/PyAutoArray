@@ -168,19 +168,40 @@ def test__matern_kv_xp__jax_matches_scipy_across_regimes():
     """
     Spot-check the vendored JAX `K_nu` against SciPy on points either side of each
     regime boundary (Temme series z <= 2 / continued fraction z > 2; half-integer
-    orders where the recurrence count changes).
+    orders where the recurrence count changes; Olver asymptotics for nu >= 50).
     """
     import scipy.special as sc
 
     from autoarray.inversion.regularization.matern_kernel import kv_xp
 
-    nu = np.array([0.5, 0.75, 1.4999, 1.5001, 2.5, 3.3, 5.5])
+    nu = np.array([0.5, 0.75, 1.4999, 1.5001, 2.5, 3.3, 5.5, 49.9, 50.0, 60.0])
     z = np.array([1e-3, 0.5, 1.999, 2.001, 7.0, 40.0])
     nu, z = np.meshgrid(nu, z, indexing="ij")
 
     kv_jax = np.asarray(jax.jit(lambda v, x: kv_xp(v, x, xp=jnp))(nu, z))
 
     np.testing.assert_allclose(kv_jax, sc.kv(nu, z), rtol=1e-10)
+
+
+def test__matern_kv_xp__z_gradient_matches_analytic_derivative():
+    """
+    The vendored `K_nu` registers `dK/dz = -(K_{nu-1} + K_{nu+1}) / 2` through its
+    custom JVP; check reverse-mode autodiff against SciPy's closed form.
+    """
+    import scipy.special as sc
+
+    from autoarray.inversion.regularization.matern_kernel import kv_xp
+
+    nu = np.array([0.5, 1.7, 2.5, 5.5])
+    z = np.array([0.3, 1.999, 2.001, 9.0])
+    nu, z = np.meshgrid(nu, z, indexing="ij")
+
+    grad = jax.vmap(jax.grad(lambda v, x: kv_xp(v, x, xp=jnp), argnums=1))(
+        jnp.asarray(nu.ravel()), jnp.asarray(z.ravel())
+    )
+    analytic = -(sc.kv(nu - 1.0, z) + sc.kv(nu + 1.0, z)) / 2.0
+
+    np.testing.assert_allclose(np.asarray(grad).reshape(nu.shape), analytic, rtol=1e-10)
 
 
 def test__matern_cov_matrix__scale_gradient_is_finite_difference_certified():

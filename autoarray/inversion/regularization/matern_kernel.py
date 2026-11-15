@@ -26,6 +26,12 @@ def kv_xp(v, z, xp=np):
     vendored, pure-`jax.numpy` port of tensorflow-probability's `bessel_kve`
     (see `bessel.py`). It is differentiable in `z` (`jax.custom_jvp`); as in
     tfp, no gradient is defined with respect to the order `v`.
+
+    Warning: because the order derivative of `K_v` is treated as zero, a JAX
+    gradient of the Matérn kernel with respect to `nu` is *incorrect* (the
+    other `nu` dependencies -- `Gamma(nu)`, `z**nu`, `z = sqrt(2 nu) r / l` --
+    still contribute, so the result is non-zero but wrong). Treat `nu` as a
+    static float when differentiating; gradients in `r` and `l` are exact.
     """
 
     # -------------------------
@@ -281,7 +287,8 @@ class MaternKernel(AbstractRegularization):
         evaluates the modified Bessel ``K_nu`` through autoarray's vendored
         ``bessel_kve`` (a pure-JAX port of tensorflow-probability's; see
         ``kv_xp``), which registers a gradient with respect to its argument
-        (``nu`` is a static float), and the
+        (``nu`` must be treated as a static float: the gradient with respect
+        to ``nu`` is not correct, see ``kv_xp``), and the
         covariance inverse differentiates through the Cholesky — gradients
         flow end-to-end and are FD-certified on the rectangular mesh at
         ``nu=2.5``. Caveat: the regularization matrix is an explicit dense
