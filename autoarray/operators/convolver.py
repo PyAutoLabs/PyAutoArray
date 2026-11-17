@@ -57,17 +57,26 @@ class ConvolverState:
             equivalent to direct spatial convolution, with no wrap-around artefacts.
 
         ``fft_shape``
-            The FFT-efficient padded shape actually used for computation. Each dimension
-            of ``full_shape`` is independently rounded up to the next fast length for
-            real FFTs using ``scipy.fft.next_fast_len``. This shape defines the size of
-            all arrays sent to and returned from FFT space.
+            The FFT-efficient shape actually used for computation. Each dimension is the
+            larger of ``full_shape`` and the frame the unmasked (and blurring) pixels need
+            (``mask_2d_util.trimmed_shape_for_kernel``: the region plus a kernel half-width
+            and a one-pixel buffer, centred on the mask's central pixel), rounded up to the
+            next fast length for real FFTs using ``scipy.fft.next_fast_len``. The frame is
+            sized from the mask, not the native array, so a small mask on a large stamp
+            runs its FFTs over the region around the mask rather than the whole stamp. It
+            is never larger than the frame the native array would be padded to
+            (``mask_2d_util.required_shape_for_kernel``). This shape defines the size of
+            all arrays sent to and returned from FFT space; outputs are always returned on
+            the input mask, so it never changes the shape of any result.
 
             Note that even FFT sizes are currently incremented to odd sizes as a
             workaround for kernel-centering issues with even-sized kernels. This is an
             implementation detail and should be replaced by correct internal padding
             and centering logic.
 
-        After determining ``fft_shape``, the input mask is padded accordingly and a
+        After determining ``fft_shape``, the input mask is resized to it (padded or
+        cropped about its central pixel, which only removes masked pixels and so leaves
+        the slim ordering of the unmasked and blurring pixels unchanged) and a
         *blurring mask* is derived. The blurring mask identifies pixels that are outside
         the original unmasked region but receive non-zero flux due to convolution with
         the kernel. These pixels must be retained when mapping results back to the
@@ -94,7 +103,10 @@ class ConvolverState:
         fft_shape
             The FFT-friendly padded shape used for all Fourier transforms.
         mask
-            The input mask padded to ``fft_shape``, with masked pixels set to True.
+            The input mask resized (padded or cropped, centred) to ``fft_shape``, with
+            masked pixels set to True.
+        source_mask
+            The input mask, unchanged; used to check whether the state can be reused.
         blurring_mask
             A derived mask identifying pixels that are masked in the original input
             but receive flux due to convolution with the kernel.
@@ -113,7 +125,7 @@ class ConvolverState:
         y_min, y_max = ys.min(), ys.max()
         x_min, x_max = xs.min(), xs.max()
 
-        (pad_y, pad_x) = self.kernel.shape_native
+        pad_y, pad_x = self.kernel.shape_native
 
         mask_shape = (
             (y_max + pad_y // 2) - (y_min - pad_y // 2),
@@ -124,34 +136,50 @@ class ConvolverState:
             s1 + s2 - 1 for s1, s2 in zip(mask_shape, self.kernel.shape_native)
         )
         import scipy.fft
-        from autoarray.mask.mask_2d_util import required_shape_for_kernel
+        from autoarray.mask.mask_2d_util import (
+            required_shape_for_kernel,
+            trimmed_shape_for_kernel,
+        )
 
         if blurring_mask is None:
-            min_blur_shape = required_shape_for_kernel(mask, self.kernel.shape_native)
+            frame_mask = np.array(mask)
         else:
             # The explicit blurring region can extend further than the kernel's own
             # reach (its footprint is defined at image resolution and upscaled), so
             # the FFT frame must be sized to keep every blurring pixel after resizing.
-            combined_mask = np.array(mask) & np.array(blurring_mask)
-            min_blur_shape = required_shape_for_kernel(
-                combined_mask, self.kernel.shape_native
-            )
+            frame_mask = np.array(mask) & np.array(blurring_mask)
 
-        fft_shape = tuple(
-            scipy.fft.next_fast_len(max(s, r), real=True)
-            for s, r in zip(full_shape, min_blur_shape)
+        # The frame the native array would be padded to (never smaller than the native
+        # array), and the frame trimmed to the unmasked (and blurring) region plus a
+        # kernel half-width and a one-pixel buffer. A small mask on a large stamp only
+        # needs the trimmed frame, so the FFT runs over it rather than the whole stamp;
+        # it is capped at the padded frame so it is never larger than before.
+        padded_shape = required_shape_for_kernel(frame_mask, self.kernel.shape_native)
+        trimmed_shape = trimmed_shape_for_kernel(
+            frame_mask, self.kernel.shape_native, buffer=1
         )
+        min_frame_shape = tuple(min(t, p) for t, p in zip(trimmed_shape, padded_shape))
+
+        self.source_mask = mask
+
+        # Cropping is centred, so it only removes masked rows and columns and the
+        # row-major slim ordering of the unmasked and blurring pixels is unchanged. If
+        # the crop ever lost one of those pixels, fall back to the padded frame.
+        for frame_shape in (min_frame_shape, padded_shape):
+            fft_shape = tuple(
+                scipy.fft.next_fast_len(max(s, r), real=True)
+                for s, r in zip(full_shape, frame_shape)
+            )
+            resized = self._resized_masks_from(
+                mask=mask,
+                blurring_mask=blurring_mask,
+                fft_shape=fft_shape,
+            )
+            if resized is not None:
+                break
 
         self.fft_shape = fft_shape
-        self.source_mask = mask
-        self.mask = mask.resized_from(self.fft_shape, pad_value=1)
-
-        if blurring_mask is None:
-            self.blurring_mask = self.mask.derive_mask.blurring_from(
-                kernel_shape_native=self.kernel.shape_native
-            )
-        else:
-            self.blurring_mask = blurring_mask.resized_from(self.fft_shape, pad_value=1)
+        self.mask, self.blurring_mask = resized
 
         # Set by Convolver.state_from when convolve_over_sample_size > 1: the
         # permutations from per-pixel sub-block ordering to the fine mask's
@@ -169,6 +197,39 @@ class ConvolverState:
         # saves. convolved_mapping_matrix_from intentionally does NOT use a
         # complex64 kernel — see that method's body for why.
         self.fft_kernel_c64 = self.fft_kernel.astype(np.complex64)
+
+    def _resized_masks_from(self, mask, blurring_mask, fft_shape):
+        """
+        The mask and blurring mask resized (padded or cropped, centred) to ``fft_shape``,
+        or ``None`` if resizing would lose an unmasked or blurring pixel.
+        """
+        from autoarray.mask.mask_2d_util import min_false_distance_to_edge
+
+        resized_mask = mask.resized_from(fft_shape, pad_value=1)
+
+        if np.sum(~np.array(resized_mask)) != np.sum(~np.array(mask)):
+            return None
+
+        if blurring_mask is not None:
+            resized_blurring_mask = blurring_mask.resized_from(fft_shape, pad_value=1)
+
+            if np.sum(~np.array(resized_blurring_mask)) != np.sum(
+                ~np.array(blurring_mask)
+            ):
+                return None
+
+            return resized_mask, resized_blurring_mask
+
+        # A blurring mask derived on the frame is complete only when every unmasked
+        # pixel sits at least a kernel half-width from the frame edge.
+        distance = min_false_distance_to_edge(np.array(resized_mask))
+
+        if any(d < k // 2 for d, k in zip(distance, self.kernel.shape_native)):
+            return None
+
+        return resized_mask, resized_mask.derive_mask.blurring_from(
+            kernel_shape_native=self.kernel.shape_native
+        )
 
     def is_for_mask(self, mask) -> bool:
         """

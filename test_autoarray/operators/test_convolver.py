@@ -811,3 +811,289 @@ def test__convolved_mapping_matrix_from__mixed_precision__jax_fft_matches_numpy_
 
     assert blurred.dtype == jnp.float64
     assert np.asarray(blurred) == pytest.approx(reference, abs=1.0e-5)
+
+
+# ---------------------------------------------------------------------------------------
+# The ConvolverState FFT frame is sized from the mask, not the native array: a small mask
+# on a large stamp convolves exactly as the same mask on a tight stamp.
+# ---------------------------------------------------------------------------------------
+
+
+def _frame_pattern():
+    # An irregular unmasked region (False), so slim-ordering errors cannot cancel.
+    pattern = ~aa.Mask2D.circular(
+        shape_native=(9, 9), pixel_scales=1.0, radius=3.6
+    ).array
+    pattern[4, 0] = False
+    pattern[0, 3] = True
+    return ~pattern
+
+
+def _mask_on_stamp(pattern, shape, offset=None):
+    stamp = np.full(shape, True)
+    if offset is None:
+        offset = (
+            (shape[0] - pattern.shape[0]) // 2,
+            (shape[1] - pattern.shape[1]) // 2,
+        )
+    stamp[
+        offset[0] : offset[0] + pattern.shape[0],
+        offset[1] : offset[1] + pattern.shape[1],
+    ] = pattern
+    return aa.Mask2D(mask=stamp, pixel_scales=1.0)
+
+
+def _old_frame_state(monkeypatch, kernel, mask):
+    """
+    The state the native-array-sized frame gives (the behaviour before the frame was
+    sized from the mask): a trimmed shape larger than any padded one makes the cap pick
+    the padded shape.
+    """
+    from autoarray.mask import mask_2d_util
+
+    with monkeypatch.context() as m:
+        m.setattr(
+            mask_2d_util,
+            "trimmed_shape_for_kernel",
+            lambda mask_2d, kernel_shape_native, buffer=1: (10**6, 10**6),
+        )
+        return ConvolverState(kernel=kernel, mask=mask)
+
+
+_FRAME_KERNELS = [(5, 5), (7, 5), (3, 7)]
+_FRAME_STAMPS = [(41, 41), (40, 40), (41, 38), (60, 23)]
+
+
+@pytest.mark.parametrize("kernel_shape", _FRAME_KERNELS)
+@pytest.mark.parametrize("stamp_shape", _FRAME_STAMPS)
+def test__convolver_state__fft_frame_sized_from_mask__shrinks_never_grows(
+    monkeypatch, kernel_shape, stamp_shape
+):
+    pattern = _frame_pattern()
+    kernel = aa.Array2D.no_mask(
+        values=np.random.default_rng(0).random(kernel_shape), pixel_scales=1.0
+    )
+
+    mask = _mask_on_stamp(pattern, stamp_shape)
+
+    state = ConvolverState(kernel=kernel, mask=mask)
+    old_state = _old_frame_state(monkeypatch, kernel, mask)
+
+    assert all(n <= o for n, o in zip(state.fft_shape, old_state.fft_shape))
+    # The 9x9 region plus a 7-pixel kernel needs well under a 38-pixel frame.
+    assert all(n < s for n, s in zip(state.fft_shape, stamp_shape))
+
+    # Every unmasked and blurring pixel is kept, in the same slim order.
+    assert state.mask.pixels_in_mask == mask.pixels_in_mask
+    assert state.blurring_mask.pixels_in_mask == old_state.blurring_mask.pixels_in_mask
+    assert state.source_mask is mask
+    assert state.is_for_mask(mask)
+
+    def offsets(m):
+        rows, cols = np.where(~np.array(m))
+        return rows - rows[0], cols - cols[0]
+
+    for new, old in [
+        (state.mask, old_state.mask),
+        (state.blurring_mask, old_state.blurring_mask),
+    ]:
+        assert np.array_equal(offsets(new)[0], offsets(old)[0])
+        assert np.array_equal(offsets(new)[1], offsets(old)[1])
+
+
+def test__convolver_state__mask_near_edge__frame_still_pads_as_before(monkeypatch):
+    mask = aa.Mask2D.circular(shape_native=(11, 11), pixel_scales=1.0, radius=5.0)
+    kernel = aa.Array2D.no_mask(
+        values=np.random.default_rng(0).random((7, 7)), pixel_scales=1.0
+    )
+
+    state = ConvolverState(kernel=kernel, mask=mask)
+    old_state = _old_frame_state(monkeypatch, kernel, mask)
+
+    assert state.fft_shape == old_state.fft_shape
+
+
+def test__convolver_state__crop_that_would_lose_pixels__falls_back_to_padded_frame(
+    monkeypatch,
+):
+    from autoarray.mask import mask_2d_util
+
+    # The region sits in a corner of the stamp, so a centred crop to a tiny frame would
+    # cut it; the state must fall back to the padded frame rather than lose pixels.
+    mask = _mask_on_stamp(_frame_pattern(), (41, 41), offset=(1, 2))
+    kernel = aa.Array2D.no_mask(
+        values=np.random.default_rng(0).random((5, 5)), pixel_scales=1.0
+    )
+
+    old_state = _old_frame_state(monkeypatch, kernel, mask)
+
+    monkeypatch.setattr(
+        mask_2d_util,
+        "trimmed_shape_for_kernel",
+        lambda mask_2d, kernel_shape_native, buffer=1: (1, 1),
+    )
+    state = ConvolverState(kernel=kernel, mask=mask)
+
+    assert state.fft_shape == old_state.fft_shape
+    assert state.mask.pixels_in_mask == mask.pixels_in_mask
+
+
+def _frame_scene(stamp_shape, kernel_shape, n_columns=3):
+    pattern = _frame_pattern()
+    kernel = aa.Array2D.no_mask(
+        values=np.random.default_rng(1).random(kernel_shape), pixel_scales=1.0
+    )
+    mask = _mask_on_stamp(pattern, stamp_shape)
+    blurring_mask = mask.derive_mask.blurring_from(kernel_shape_native=kernel_shape)
+
+    rng = np.random.default_rng(2)
+    image = rng.random(mask.pixels_in_mask)
+    blurring_image = rng.random(blurring_mask.pixels_in_mask)
+    mapping_matrix = rng.random((mask.pixels_in_mask, n_columns))
+    blurring_mapping_matrix = rng.random((blurring_mask.pixels_in_mask, n_columns))
+
+    return (
+        kernel,
+        mask,
+        blurring_mask,
+        image,
+        blurring_image,
+        mapping_matrix,
+        blurring_mapping_matrix,
+    )
+
+
+def _convolve_scene(scene, mode):
+    (
+        kernel,
+        mask,
+        blurring_mask,
+        image,
+        blurring_image,
+        mapping_matrix,
+        blurring_mapping_matrix,
+    ) = scene
+
+    xp = np if mode == "numpy" else pytest.importorskip("jax.numpy")
+    convolver = aa.Convolver(kernel=kernel, use_fft=mode == "jax_fft")
+
+    convolved_image = convolver.convolved_image_from(
+        image=aa.Array2D(values=image, mask=mask),
+        blurring_image=aa.Array2D(values=blurring_image, mask=blurring_mask),
+        xp=xp,
+    )
+    convolved_mapping_matrix = convolver.convolved_mapping_matrix_from(
+        mapping_matrix=mapping_matrix,
+        mask=mask,
+        blurring_mapping_matrix=blurring_mapping_matrix,
+        blurring_mask=blurring_mask,
+        xp=xp,
+    )
+
+    assert convolved_image.mask is mask
+
+    return np.array(convolved_image.array), np.array(convolved_mapping_matrix)
+
+
+@pytest.mark.parametrize("mode", ["numpy", "jax_fft", "jax_real_space"])
+@pytest.mark.parametrize("kernel_shape", [(5, 5), (7, 5)])
+@pytest.mark.parametrize(
+    "large_stamp, tight_stamp",
+    [((41, 41), (15, 15)), ((40, 40), (16, 16)), ((41, 38), (16, 15))],
+)
+def test__convolved_image_and_mapping_matrix__large_stamp_equals_tight_stamp(
+    monkeypatch, mode, kernel_shape, large_stamp, tight_stamp
+):
+    large = _frame_scene(large_stamp, kernel_shape)
+    tight = _frame_scene(tight_stamp, kernel_shape)
+
+    # The two stamps share one unmasked region and blurring region, in one slim order.
+    assert large[1].pixels_in_mask == tight[1].pixels_in_mask
+    assert large[2].pixels_in_mask == tight[2].pixels_in_mask
+
+    image_large, mapping_large = _convolve_scene(large, mode)
+    image_tight, mapping_tight = _convolve_scene(tight, mode)
+
+    assert image_large == pytest.approx(image_tight, abs=1.0e-10)
+    assert mapping_large == pytest.approx(mapping_tight, abs=1.0e-10)
+
+    # And both equal the native-array-sized frame used before.
+    from autoarray.mask import mask_2d_util
+
+    monkeypatch.setattr(
+        mask_2d_util,
+        "trimmed_shape_for_kernel",
+        lambda mask_2d, kernel_shape_native, buffer=1: (10**6, 10**6),
+    )
+    image_old, mapping_old = _convolve_scene(large, mode)
+
+    assert image_large == pytest.approx(image_old, abs=1.0e-10)
+    assert mapping_large == pytest.approx(mapping_old, abs=1.0e-10)
+
+
+@pytest.mark.parametrize("use_jax", [False, True])
+@pytest.mark.parametrize(
+    "large_stamp, tight_stamp", [((41, 41), (13, 13)), ((40, 38), (14, 13))]
+)
+def test__convolve_over_sample_size__large_stamp_equals_tight_stamp(
+    monkeypatch, use_jax, large_stamp, tight_stamp
+):
+    s = 2
+    xp = pytest.importorskip("jax.numpy") if use_jax else np
+    fine_kernel = aa.Array2D.no_mask(
+        values=np.random.default_rng(4).random((9, 7)), pixel_scales=1.0 / s
+    )
+
+    def convolve(stamp_shape):
+        mask = _mask_on_stamp(_frame_pattern(), stamp_shape)
+        convolver = aa.Convolver(kernel=fine_kernel, convolve_over_sample_size=s)
+        blurring_mask = mask.derive_mask.blurring_from(
+            kernel_shape_native=convolver.kernel_shape_image_resolution,
+            allow_padding=True,
+        )
+
+        rng = np.random.default_rng(5)
+        image = rng.random(mask.pixels_in_mask * s**2)
+        blurring_image = rng.random(blurring_mask.pixels_in_mask * s**2)
+        mapping_matrix = rng.random((mask.pixels_in_mask * s**2, 2))
+        blurring_mapping_matrix = rng.random((blurring_mask.pixels_in_mask * s**2, 2))
+
+        convolved_image = convolver.convolved_image_from(
+            image=image, blurring_image=blurring_image, mask=mask, xp=xp
+        )
+        convolved_mapping_matrix = convolver.convolved_mapping_matrix_from(
+            mapping_matrix=mapping_matrix,
+            mask=mask,
+            blurring_mapping_matrix=blurring_mapping_matrix,
+            xp=xp,
+        )
+        state = convolver.state_from(mask=mask)
+
+        return (
+            np.array(convolved_image.array),
+            np.array(convolved_mapping_matrix),
+            state.fft_shape,
+            blurring_mask.pixels_in_mask,
+        )
+
+    image_large, mapping_large, fft_large, n_blur_large = convolve(large_stamp)
+    image_tight, mapping_tight, _, n_blur_tight = convolve(tight_stamp)
+
+    assert n_blur_large == n_blur_tight
+    assert all(n < 2 * l for n, l in zip(fft_large, large_stamp))
+
+    assert image_large == pytest.approx(image_tight, abs=1.0e-10)
+    assert mapping_large == pytest.approx(mapping_tight, abs=1.0e-10)
+
+    from autoarray.mask import mask_2d_util
+
+    monkeypatch.setattr(
+        mask_2d_util,
+        "trimmed_shape_for_kernel",
+        lambda mask_2d, kernel_shape_native, buffer=1: (10**6, 10**6),
+    )
+    image_old, mapping_old, fft_old, _ = convolve(large_stamp)
+
+    assert all(n <= o for n, o in zip(fft_large, fft_old))
+    assert image_large == pytest.approx(image_old, abs=1.0e-10)
+    assert mapping_large == pytest.approx(mapping_old, abs=1.0e-10)

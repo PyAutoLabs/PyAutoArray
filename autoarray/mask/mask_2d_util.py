@@ -515,6 +515,90 @@ def required_shape_for_kernel(
     return new_y, new_x
 
 
+def trimmed_shape_for_kernel(
+    mask_2d: np.ndarray,
+    kernel_shape_native: Tuple[int, int],
+    buffer: int = 1,
+) -> Tuple[int, int]:
+    """
+    Return the smallest shape, centred on the mask's central pixel and of the same parity as the
+    mask in each dimension, that holds every unmasked pixel at least a kernel half-width plus
+    `buffer` pixels from the array edge.
+
+    This is the frame a masked dataset can be cut down to without changing anything a fit sees:
+    every unmasked pixel is kept, the blurring region a kernel of this footprint reaches is kept,
+    and because the parity of each dimension is preserved the central pixel (the origin of the
+    scaled coordinate system) stays on the same pixel, so scaled coordinates, positions and
+    priors are unchanged. Cutting an array to this shape with ``resized_array_2d_from`` therefore
+    only removes masked pixels.
+
+    The `buffer` keeps a margin of masked pixels around the blurring region, so the frame is not
+    cut exactly at the mask plus the half-width; the default of one pixel costs nothing a fit can
+    measure. Pass ``buffer=0`` for the exact minimum.
+
+    The returned shape can be larger than the mask's own in a dimension where unmasked pixels sit
+    closer to the edge than the kernel half-width plus the buffer; the frame is then padded, as
+    ``required_shape_for_kernel`` would.
+
+    For an even dimension the central pixel is the lower of the central pair (the convention of
+    ``resized_array_2d_from``), so one more pixel lies after it than before it.
+
+    Parameters
+    ----------
+    mask_2d
+        2D boolean array where False is unmasked and True is masked.
+    kernel_shape_native
+        (ky, kx) footprint of the convolution kernel.
+    buffer
+        Extra masked pixels kept on every side beyond the kernel half-width.
+
+    Returns
+    -------
+    trimmed_shape
+        The (ny, nx) centred shape.
+
+    Examples
+    --------
+    >>> mask = np.full((9, 9), True)
+    >>> mask[3:6, 3:6] = False
+    >>> trimmed_shape_for_kernel(mask, kernel_shape_native=(3, 3))
+    (7, 7)
+    >>> trimmed_shape_for_kernel(mask, kernel_shape_native=(3, 3), buffer=0)
+    (5, 5)
+    """
+    mask_2d = np.asarray(mask_2d, dtype=bool)
+
+    ky, kx = kernel_shape_native
+    if ky <= 0 or kx <= 0:
+        raise ValueError(
+            f"kernel_shape_native must be positive, got {kernel_shape_native}."
+        )
+    if buffer < 0:
+        raise ValueError(f"buffer must be non-negative, got {buffer}.")
+
+    unmasked = np.where(~mask_2d)
+    if unmasked[0].size == 0:
+        raise ValueError(
+            "trimmed_shape_for_kernel requires at least one unmasked pixel."
+        )
+
+    shape = []
+    for length, indexes, pad in zip(
+        mask_2d.shape, unmasked, (ky // 2 + buffer, kx // 2 + buffer)
+    ):
+        centre = (length - 1) // 2
+        before = max(centre - int(indexes.min()), 0) + pad
+        after = max(int(indexes.max()) - centre, 0) + pad
+        if length % 2:
+            half = max(before, after)
+            shape.append(2 * half + 1)
+        else:
+            half = max(before, after - 1)
+            shape.append(2 * half + 2)
+
+    return tuple(shape)
+
+
 def blurring_mask_2d_from(
     mask_2d: np.ndarray,
     kernel_shape_native: Tuple[int, int],
