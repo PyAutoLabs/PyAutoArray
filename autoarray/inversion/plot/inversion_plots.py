@@ -21,6 +21,7 @@ from autoarray.plot.utils import (
     tight_layout,
 )
 from autoarray.inversion.plot.mapper_plots import plot_mapper
+from autoarray.plot.inversion import mapper_has_interpolated_view
 from autoarray.structures.arrays.uniform_2d import Array2D
 
 
@@ -54,6 +55,11 @@ def subplot_of_mapper(
 ):
     """
     3×4 subplot showing all pixelization diagnostics for one mapper.
+
+    For Delaunay / kNN / natural-neighbour meshes the last panel (11) shows the
+    reconstruction as the likelihood's interpolant ("Source Reconstruction
+    (Interpolated)"), alongside the flat-triangle panels that show the mesh
+    resolution. Rectangular meshes leave it empty.
 
     Parameters
     ----------
@@ -256,6 +262,25 @@ def subplot_of_mapper(
         )
     except (TypeError, Exception):
         pass
+
+    # panel 11: the reconstruction the likelihood uses between mesh vertices.
+    # Panels 4-5 draw irregular meshes as flat triangles (one colour each) to
+    # show where the mesh spends resolution; this panel evaluates the mapper's
+    # own interpolant on a uniform grid. Rectangular meshes have no separate
+    # interpolated view, so the panel is left empty and hidden.
+    if mapper_has_interpolated_view(mapper):
+        plot_mapper(
+            mapper,
+            solution_vector=pixel_values,
+            ax=axes[11],
+            title=_pf("Source Reconstruction (Interpolated)"),
+            colormap=colormap,
+            use_log10=use_log10,
+            vmax=recon_vmax,
+            zoom_to_brightest=True,
+            interpolated=True,
+            lines=lines,
+        )
 
     hide_unused_axes(axes)
     tight_layout()
