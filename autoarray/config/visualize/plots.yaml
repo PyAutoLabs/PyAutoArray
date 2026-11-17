@@ -10,7 +10,7 @@ imaging:                                   # Settings for plots of imaging datas
 fit:                                       # Settings for plots of all fits (e.g. FitImaging, FitInterferometer).
   subplot_fit: true                        # Plot subplot of all fit quantities for any dataset (e.g. the model data, residual-map, etc.)?
   subplot_fit_log10: false                  # Plot subplot of all fit quantities for any dataset using log10 color maps (e.g. the model data, residual-map, etc.)?
-  subplot_fit_source_interpolated: false   # In fit.png, draw the mid-zoom source panel as the interpolated reconstruction the likelihood uses (Delaunay/KNN meshes), instead of flat triangles?
+  subplot_fit_source_interpolated: true    # In fit.png, show the interpolated reconstruction the likelihood uses (Delaunay/KNN meshes) in the bottom-right source panel, with max zoom and no zoom above it? If false, show max, mid and no zoom flat-triangle panels instead.
   data: false                              # Plot individual plots of the data?
   noise_map: false                         # Plot individual plots of the noise-map?
   signal_to_noise_map: false               # Plot individual plots of the signal-to-noise-map?
