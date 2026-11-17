@@ -48,15 +48,36 @@ def _mapper_for(mesh, mesh_grid=None):
     )
 
 
+# The kNN interpolators are built on JAX (`knn.py` imports it), so their cases
+# skip on the no-JAX CI leg, as the repository's other JAX-dependent tests do.
+try:
+    import jax  # noqa: F401
+
+    _HAS_JAX = True
+except ImportError:
+    _HAS_JAX = False
+
+_requires_jax = pytest.mark.skipif(not _HAS_JAX, reason="kNN interpolators need jax")
+
 MESHES = [
     aa.mesh.Delaunay(pixels=34),
-    aa.mesh.KNearestNeighbor(pixels=34, split_neighbor_division=1),
-    aa.mesh.KNNBarycentric(pixels=34, split_neighbor_division=1),
+    pytest.param(
+        aa.mesh.KNearestNeighbor(pixels=34, split_neighbor_division=1),
+        marks=_requires_jax,
+        id="KNearestNeighbor",
+    ),
+    pytest.param(
+        aa.mesh.KNNBarycentric(pixels=34, split_neighbor_division=1),
+        marks=_requires_jax,
+        id="KNNBarycentric",
+    ),
     aa.mesh.DelaunayNN(pixels=34),
 ]
 
 
-@pytest.mark.parametrize("mesh", MESHES, ids=lambda m: type(m).__name__)
+@pytest.mark.parametrize(
+    "mesh", MESHES, ids=lambda m: type(m).__name__ if not isinstance(m, str) else m
+)
 def test__interpolated_view__equals_mapping_matrix_times_reconstruction(mesh):
     mapper = _mapper_for(mesh)
     rng = np.random.default_rng(2)
