@@ -964,8 +964,6 @@ def _frame_scene(stamp_shape, kernel_shape, n_columns=3):
 
 
 def _convolve_scene(scene, mode):
-    import jax.numpy as jnp
-
     (
         kernel,
         mask,
@@ -976,7 +974,7 @@ def _convolve_scene(scene, mode):
         blurring_mapping_matrix,
     ) = scene
 
-    xp = np if mode == "numpy" else jnp
+    xp = np if mode == "numpy" else pytest.importorskip("jax.numpy")
     convolver = aa.Convolver(kernel=kernel, use_fft=mode == "jax_fft")
 
     convolved_image = convolver.convolved_image_from(
@@ -1040,10 +1038,8 @@ def test__convolved_image_and_mapping_matrix__large_stamp_equals_tight_stamp(
 def test__convolve_over_sample_size__large_stamp_equals_tight_stamp(
     monkeypatch, use_jax, large_stamp, tight_stamp
 ):
-    import jax.numpy as jnp
-
     s = 2
-    xp = jnp if use_jax else np
+    xp = pytest.importorskip("jax.numpy") if use_jax else np
     fine_kernel = aa.Array2D.no_mask(
         values=np.random.default_rng(4).random((9, 7)), pixel_scales=1.0 / s
     )
