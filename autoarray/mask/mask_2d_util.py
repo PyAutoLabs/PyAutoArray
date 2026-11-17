@@ -592,7 +592,6 @@ def blurring_mask_2d_from(
 
     ky, kx = kernel_shape_native
     pad_y, pad_x = ky // 2, kx // 2
-    structure = np.ones((ky, kx), dtype=bool)
 
     # Unmasked region (True where unmasked)
     unmasked = ~mask_2d
@@ -605,10 +604,18 @@ def blurring_mask_2d_from(
         constant_values=False,
     )
 
-    # Pixels within kernel footprint of any unmasked pixel
+    # Pixels within kernel footprint of any unmasked pixel. The footprint is a box,
+    # which is separable: a (ky, 1) dilation followed by a (1, kx) dilation gives the
+    # same mask as one (ky, kx) dilation, without scipy's (ky * kx)**2 offsets table
+    # (which takes minutes and tens of GB for PSFs of a few hundred pixels).
     from scipy.ndimage import binary_dilation
 
-    near_unmasked_padded = binary_dilation(unmasked_padded, structure=structure)
+    near_unmasked_padded = binary_dilation(
+        unmasked_padded, structure=np.ones((ky, 1), dtype=bool)
+    )
+    near_unmasked_padded = binary_dilation(
+        near_unmasked_padded, structure=np.ones((1, kx), dtype=bool)
+    )
     near_unmasked = near_unmasked_padded[
         pad_y : pad_y + mask_2d.shape[0],
         pad_x : pad_x + mask_2d.shape[1],
