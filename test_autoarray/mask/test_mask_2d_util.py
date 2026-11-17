@@ -696,6 +696,29 @@ def test__blurring_mask_2d_from__mask_extends_beyond_edge_so_raises_mask_excepti
         util.mask_2d.blurring_mask_2d_from(mask, kernel_shape_native=(5, 5))
 
 
+@pytest.mark.parametrize(
+    "kernel_shape_native",
+    [(3, 3), (5, 3), (4, 4), (6, 2), (3, 7), (8, 5), (2, 9)],
+)
+def test__blurring_mask_2d_from__matches_dense_box_dilation(kernel_shape_native):
+    from scipy.ndimage import binary_dilation
+
+    mask = np.full((21, 23), True)
+    mask[8:12, 7:15] = False
+    mask[13, 10] = False
+
+    ky, kx = kernel_shape_native
+    unmasked = np.pad(~mask, ((ky // 2, ky // 2), (kx // 2, kx // 2)))
+    near = binary_dilation(unmasked, structure=np.ones((ky, kx), dtype=bool))
+    near = near[ky // 2 : ky // 2 + mask.shape[0], kx // 2 : kx // 2 + mask.shape[1]]
+
+    blurring_mask = util.mask_2d.blurring_mask_2d_from(
+        mask, kernel_shape_native=kernel_shape_native
+    )
+
+    assert (blurring_mask == ~(mask & near)).all()
+
+
 def test__mask_1d_indexes_from():
     mask = np.array(
         [
