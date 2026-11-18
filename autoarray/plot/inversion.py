@@ -384,7 +384,8 @@ def _plot_delaunay(
     triangle rather than being constant on it. To see that reconstruction, pass
     ``interpolated=True`` to :func:`plot_inversion_reconstruction` (see
     :func:`interpolated_reconstruction_from`); ``inversion_#.png`` always shows
-    it in its last panel.
+    it as "Source Plane (Interpolated)", the middle panel of its right-hand
+    column.
 
     The triangulation is taken from the mapper's own Delaunay tables
     (``mapper.interpolator.delaunay.simplices``, with the ``-1`` padded rows
@@ -616,7 +617,6 @@ def _plot_interpolated(
     x_range = abs(xmax - xmin)
     y_range = abs(ymax - ymin)
     box_aspect = (x_range / y_range) if y_range > 0 else 1.0
-    ax.set_aspect(box_aspect, adjustable="box")
 
     image = interpolated_reconstruction_from(
         mapper=mapper,
@@ -634,7 +634,10 @@ def _plot_interpolated(
         norm=norm,
         extent=[xmin, xmax, ymin, ymax],
         origin="upper",
-        aspect="auto",
         interpolation="nearest",
     )
+    # ``imshow`` sets the axes aspect itself, so the box aspect is applied after
+    # it: the panel is then square like the ``_plot_delaunay`` panels and its
+    # colorbar spans the full height of the axes.
+    ax.set_aspect(box_aspect, adjustable="box")
     _apply_colorbar(im, ax, cb_unit=cb_unit, is_subplot=is_subplot)

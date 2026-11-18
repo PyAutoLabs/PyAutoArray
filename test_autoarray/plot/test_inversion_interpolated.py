@@ -208,26 +208,86 @@ def test__rectangular_mapper__has_no_interpolated_view_and_flag_is_ignored():
     plt.close(fig)
 
 
-def _subplot_titles(inversion, monkeypatch):
+def _subplot_panels(inversion, monkeypatch):
+    """The 12 panel axes of ``subplot_of_mapper`` in grid order (colorbars excluded)."""
     captured = {}
 
     def _capture(fig, *args, **kwargs):
-        captured["titles"] = [
-            ax.get_title() for ax in fig.axes if ax.get_visible() and ax.get_title()
-        ]
+        captured["axes"] = fig.axes[:12]
         plt.close(fig)
 
     monkeypatch.setattr(inversion_plots, "subplot_save", _capture)
     inversion_plots.subplot_of_mapper(inversion=inversion, mapper_index=0)
-    return captured["titles"]
+    return captured["axes"]
 
 
-def test__subplot_of_mapper__delaunay__panel_11_is_interpolated(monkeypatch):
-    titles = _subplot_titles(fixtures.make_delaunay_inversion_9_3x3(), monkeypatch)
-    assert "Source Reconstruction (Interpolated)" in titles
+def _titles(axes):
+    return [ax.get_title() if ax.get_visible() else None for ax in axes]
 
 
-def test__subplot_of_mapper__rectangular__no_interpolated_panel(monkeypatch):
-    titles = _subplot_titles(fixtures.make_rectangular_inversion_7x7_3x3(), monkeypatch)
-    assert "Source Reconstruction (Interpolated)" not in titles
-    assert "Source Plane (Zoom)" in titles
+def test__subplot_of_mapper__delaunay__source_plane_in_right_column(monkeypatch):
+    axes = _subplot_panels(fixtures.make_delaunay_inversion_9_3x3(), monkeypatch)
+    titles = _titles(axes)
+
+    assert titles == [
+        "Data Subtracted",
+        "Reconstructed Image",
+        "Reconstructed Image (log10)",
+        "Source Plane (Max Zoom)",
+        "Mesh Pixel Grid Overlaid",
+        "Noise-Map (No Zoom)",
+        "Regularization (No Zoom)",
+        "Source Plane (Interpolated)",
+        "Sub Pixels Per Image Pixels",
+        "Mesh Pixels Per Image Pixels",
+        "Image Pixels Per Source Pixel",
+        "Source Plane (No Zoom)",
+    ]
+
+    interpolated = axes[7]
+    assert len(interpolated.get_images()) == 1
+    # ``imshow`` must not leave the panel at aspect 'auto': it keeps the same
+    # box aspect as the flat-triangle Source Plane panels.
+    assert interpolated.get_aspect() != "auto"
+    assert interpolated.get_aspect() == axes[3].get_aspect()
+
+
+def test__subplot_of_mapper__rectangular__keeps_original_layout(monkeypatch):
+    titles = _titles(
+        _subplot_panels(fixtures.make_rectangular_inversion_7x7_3x3(), monkeypatch)
+    )
+
+    assert "Source Plane (Interpolated)" not in titles
+    assert "Source Plane (Max Zoom)" not in titles
+    assert titles[:9] == [
+        "Data Subtracted",
+        "Reconstructed Image",
+        "Reconstructed Image (log10)",
+        "Mesh Pixel Grid Overlaid",
+        "Source Plane (Zoom)",
+        "Source Plane (No Zoom)",
+        "Noise-Map (No Zoom)",
+        "Regularization (No Zoom)",
+        "Sub Pixels Per Image Pixels",
+    ]
+    assert titles[10] == "Image Pixels Per Source Pixel"
+    assert not titles[11]
+
+
+def test__interpolated_panel__axes_aspect_is_not_auto():
+    mapper = fixtures.make_delaunay_mapper_9_3x3()
+    values = np.arange(1.0, 10.0)
+
+    fig, (ax_flat, ax_interp) = plt.subplots(1, 2)
+    plot_inversion_reconstruction(pixel_values=values, mapper=mapper, ax=ax_flat)
+    plot_inversion_reconstruction(
+        pixel_values=values,
+        mapper=mapper,
+        ax=ax_interp,
+        interpolated=True,
+        interpolated_shape_native=(16, 16),
+    )
+
+    assert ax_interp.get_aspect() != "auto"
+    assert ax_interp.get_aspect() == ax_flat.get_aspect()
+    plt.close(fig)
