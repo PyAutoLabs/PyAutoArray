@@ -36,6 +36,8 @@ def plot_mapper(
     title: str = "Pixelization Mesh (Source-Plane)",
     zoom_to_brightest: bool = True,
     zoom_extent_scale: float = 1.0,
+    interpolated: bool = False,
+    interpolated_shape_native=None,
     ax=None,
 ):
     """
@@ -74,6 +76,12 @@ def plot_mapper(
         Figure title.
     zoom_to_brightest
         Zoom the source plane to the brightest region.
+    interpolated
+        For Delaunay / kNN / natural-neighbour meshes, draw the interpolant the
+        likelihood uses (the mapper's own interpolator evaluated on a uniform
+        grid) instead of flat-shaded triangles. Ignored for rectangular meshes.
+    interpolated_shape_native
+        ``(y, x)`` shape of the interpolation grid; ``None`` reads the config.
     ax
         Existing ``Axes`` to draw onto.
     """
@@ -89,6 +97,8 @@ def plot_mapper(
             vmax=vmax,
             zoom_to_brightest=zoom_to_brightest,
             zoom_extent_scale=zoom_extent_scale,
+            interpolated=interpolated,
+            interpolated_shape_native=interpolated_shape_native,
             lines=numpy_lines(lines),
             line_colors=line_colors,
             regions=regions,

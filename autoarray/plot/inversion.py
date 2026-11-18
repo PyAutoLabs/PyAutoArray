@@ -38,6 +38,8 @@ def plot_inversion_reconstruction(
     zoom_to_brightest: bool = True,
     zoom_extent_scale: float = 1.0,
     arcsec_after_decimal: Optional[bool] = None,
+    interpolated: bool = False,
+    interpolated_shape_native: Optional[Tuple[int, int]] = None,
     # --- overlays ---------------------------------------------------------------
     lines: Optional[List[np.ndarray]] = None,
     line_colors: Optional[List] = None,
@@ -84,6 +86,17 @@ def plot_inversion_reconstruction(
         When ``True`` the arcsecond tick labels place the ``″`` symbol over the
         decimal point (``3.″8``) instead of suffixing it (``3.8"``); when ``False``
         the suffix form is forced.  ``None`` (the default) reads the config.
+    interpolated
+        For Delaunay / kNN / natural-neighbour meshes, draw the reconstruction
+        the likelihood actually uses between the mesh vertices (the mapper's
+        own interpolant evaluated on a uniform grid, see
+        :func:`interpolated_reconstruction_from`) instead of flat-shaded
+        triangles. Ignored for rectangular meshes, whose pixels already are the
+        reconstruction.
+    interpolated_shape_native
+        The ``(y, x)`` shape of the uniform grid the interpolated view is
+        evaluated on. ``None`` reads ``visualize/general.yaml``
+        ``inversion: interpolated_pixels`` (default 400 x 400).
     lines
         Line overlays (e.g. critical curves).
     grid
@@ -150,6 +163,20 @@ def plot_inversion_reconstruction(
             norm,
             colormap,
             extent,
+            is_subplot=is_subplot,
+            cb_unit=cb_unit,
+        )
+    elif interpolated and isinstance(
+        mapper.interpolator, (InterpolatorDelaunay, InterpolatorKNearestNeighbor)
+    ):
+        _plot_interpolated(
+            ax,
+            pixel_values,
+            mapper,
+            norm,
+            colormap,
+            extent,
+            shape_native=interpolated_shape_native,
             is_subplot=is_subplot,
             cb_unit=cb_unit,
         )
@@ -342,13 +369,23 @@ def _plot_delaunay(
 ):
     """Render a Delaunay or KNN pixelization reconstruction onto *ax*.
 
-    Uses ``ax.tripcolor`` with its default *flat* shading: each triangle is
-    painted with the mean of its three vertex values. That is not the
-    piecewise-linear reconstruction pointwise, but its area-weighted integral
-    is identical to it by linearity -- the mean of the three vertices times the
-    triangle area is exactly the integral of the linear interpolant over that
-    triangle, which is the same sum the barycentric dual areas
-    (``mesh_geometry.areas_for_magnification``) accumulate per vertex.
+    This is the **default** source-plane view, and it deliberately draws the
+    mesh rather than a smooth image: ``ax.tripcolor`` with its default *flat*
+    shading paints every triangle in one colour (the mean of its three vertex
+    values). Small triangles are where the mesh spends its resolution and large
+    ones where it does not, so the figure shows at a glance how finely each
+    part of the source is being reconstructed -- information a smooth image
+    hides.
+
+    It is **not** the reconstruction the likelihood uses between vertices. The
+    likelihood maps every data point to the source through the mapper's
+    interpolant (barycentric within each triangle for ``Delaunay``, the kNN or
+    natural-neighbour weights for those meshes), which varies smoothly across a
+    triangle rather than being constant on it. To see that reconstruction, pass
+    ``interpolated=True`` to :func:`plot_inversion_reconstruction` (see
+    :func:`interpolated_reconstruction_from`); ``inversion_#.png`` always shows
+    it as "Source Plane (Interpolated)", the middle panel of its right-hand
+    column.
 
     The triangulation is taken from the mapper's own Delaunay tables
     (``mapper.interpolator.delaunay.simplices``, with the ``-1`` padded rows
@@ -420,3 +457,187 @@ def _plot_delaunay(
     from autoarray.plot.utils import _apply_colorbar
 
     _apply_colorbar(tc, ax, cb_unit=cb_unit, is_subplot=is_subplot)
+
+
+def mapper_has_interpolated_view(mapper) -> bool:
+    """
+    Whether *mapper* has an interpolated view distinct from its pixel plot.
+
+    ``True`` for irregular meshes (Delaunay, kNN, natural-neighbour), whose
+    likelihood interpolates between mesh vertices; ``False`` for rectangular
+    meshes (whose pixels already are the reconstruction) and for anything
+    without an interpolator.
+    """
+    from autoarray.inversion.mesh.interpolator.delaunay import InterpolatorDelaunay
+
+    return isinstance(getattr(mapper, "interpolator", None), InterpolatorDelaunay)
+
+
+def _conf_interpolated_shape_native() -> Tuple[int, int]:
+    try:
+        from autonerves import conf
+
+        pixels = int(
+            conf.instance["visualize"]["general"]["inversion"]["interpolated_pixels"]
+        )
+    except Exception:
+        pixels = 400
+    return (pixels, pixels)
+
+
+def interpolated_reconstruction_from(
+    mapper,
+    pixel_values,
+    extent: Tuple[float, float, float, float],
+    shape_native: Optional[Tuple[int, int]] = None,
+) -> np.ndarray:
+    """
+    Evaluate an irregular-mesh reconstruction on a uniform grid using the
+    mapper's own interpolant -- the reconstruction the likelihood uses.
+
+    A fresh interpolator of the mapper's interpolator type is built with the
+    same ``mesh`` and ``mesh_grid`` but with ``data_grid`` set to a uniform grid
+    of pixel centres covering *extent* (no over-sampling). Its mappings and
+    weights are exactly those the mapper would compute for a data point at each
+    grid position, so the returned image equals that interpolator's
+    ``mapping_matrix @ pixel_values``: barycentric interpolation for
+    ``Delaunay``, the kNN weights for ``KNearestNeighbor`` /
+    ``KNNBarycentric``, the Sibson weights for ``DelaunayNN``.
+
+    Grid points outside the convex hull of the mesh vertices are returned as
+    ``NaN`` (drawn transparent), so the interpolators' nearest-vertex fill
+    beyond the mesh is not shown as source light. The cost is one
+    interpolation of ``shape_native[0] * shape_native[1]`` points (a few
+    neighbours each) and a triangulation of the mesh; no dense mapping matrix
+    is formed.
+
+    Parameters
+    ----------
+    mapper
+        A mapper whose ``interpolator`` is an irregular-mesh interpolator.
+    pixel_values
+        The reconstruction, one value per mesh vertex.
+    extent
+        ``(x_min, x_max, y_min, y_max)`` covered by the grid (pixel edges).
+    shape_native
+        ``(y, x)`` shape of the grid; ``None`` reads the visualize config
+        (default 400 x 400).
+
+    Returns
+    -------
+    np.ndarray
+        ``shape_native`` image, row 0 at ``y_max``.
+    """
+    from scipy.spatial import Delaunay
+
+    from autoarray.structures.grids.uniform_2d import Grid2D
+
+    if shape_native is None:
+        shape_native = _conf_interpolated_shape_native()
+
+    shape_native = (int(shape_native[0]), int(shape_native[1]))
+
+    x_min, x_max, y_min, y_max = (float(e) for e in extent)
+    pixel_scales = (
+        (y_max - y_min) / shape_native[0],
+        (x_max - x_min) / shape_native[1],
+    )
+    grid = Grid2D.uniform(
+        shape_native=shape_native,
+        pixel_scales=pixel_scales,
+        origin=(0.5 * (y_max + y_min), 0.5 * (x_max + x_min)),
+        over_sample_size=1,
+        # The grid must cover `extent` exactly; small-dataset mode would shrink
+        # its shape without rescaling its pixels.
+        respect_small_datasets=False,
+    )
+
+    interpolator = mapper.interpolator
+    plot_interpolator = type(interpolator)(
+        mesh=interpolator.mesh,
+        mesh_grid=interpolator.mesh_grid,
+        data_grid=grid,
+        adapt_data=interpolator.adapt_data,
+    )
+
+    mappings, sizes, weights = plot_interpolator._mappings_sizes_weights
+
+    mappings = np.asarray(mappings)
+    sizes = np.asarray(sizes)
+    weights = np.asarray(weights, dtype=float)
+
+    if hasattr(pixel_values, "array"):
+        pixel_values = pixel_values.array
+    values = np.asarray(pixel_values, dtype=float)
+
+    used = np.arange(mappings.shape[1])[None, :] < sizes[:, None]
+    safe_mappings = np.where(used & (mappings >= 0), mappings, 0)
+    image = np.sum(np.where(used, weights * values[safe_mappings], 0.0), axis=1)
+
+    mesh_grid = np.asarray(
+        getattr(interpolator.mesh_grid, "array", interpolator.mesh_grid), dtype=float
+    )
+    grid_points = np.asarray(grid.array, dtype=float)
+    try:
+        outside = Delaunay(mesh_grid).find_simplex(grid_points) < 0
+        image = np.where(outside, np.nan, image)
+    except Exception:
+        # A degenerate (e.g. collinear) mesh has no hull to mask with.
+        pass
+
+    return image.reshape(shape_native)
+
+
+def _plot_interpolated(
+    ax,
+    pixel_values,
+    mapper,
+    norm,
+    colormap,
+    extent,
+    shape_native=None,
+    is_subplot=False,
+    cb_unit=None,
+):
+    """Render an irregular-mesh reconstruction as the interpolant the likelihood uses.
+
+    The image from :func:`interpolated_reconstruction_from` is drawn with
+    ``imshow`` over *extent*, in data coordinates (row 0 at ``y_max``), so
+    overlays drawn in ``(y, x)`` arcsec need no reflection and the panel lines
+    up with the flat-triangle view of the same mapper. The colour norm is the
+    one built from the vertex values, so both views share a colour scale; under
+    a log norm values below its floor are clipped up to it, as
+    :func:`~autoarray.plot.utils.norm_from` does for the vertex values.
+    """
+    from matplotlib.colors import LogNorm
+
+    from autoarray.plot.utils import _apply_colorbar
+
+    xmin, xmax, ymin, ymax = extent
+    x_range = abs(xmax - xmin)
+    y_range = abs(ymax - ymin)
+    box_aspect = (x_range / y_range) if y_range > 0 else 1.0
+
+    image = interpolated_reconstruction_from(
+        mapper=mapper,
+        pixel_values=pixel_values,
+        extent=extent,
+        shape_native=shape_native,
+    )
+
+    if isinstance(norm, LogNorm) and norm.vmin is not None:
+        image = np.where(np.isnan(image), image, np.maximum(image, norm.vmin))
+
+    im = ax.imshow(
+        image,
+        cmap=colormap,
+        norm=norm,
+        extent=[xmin, xmax, ymin, ymax],
+        origin="upper",
+        interpolation="nearest",
+    )
+    # ``imshow`` sets the axes aspect itself, so the box aspect is applied after
+    # it: the panel is then square like the ``_plot_delaunay`` panels and its
+    # colorbar spans the full height of the axes.
+    ax.set_aspect(box_aspect, adjustable="box")
+    _apply_colorbar(im, ax, cb_unit=cb_unit, is_subplot=is_subplot)

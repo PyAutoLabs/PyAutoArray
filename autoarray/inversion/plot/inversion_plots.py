@@ -21,6 +21,7 @@ from autoarray.plot.utils import (
     tight_layout,
 )
 from autoarray.inversion.plot.mapper_plots import plot_mapper
+from autoarray.plot.inversion import mapper_has_interpolated_view
 from autoarray.structures.arrays.uniform_2d import Array2D
 
 
@@ -55,6 +56,30 @@ def subplot_of_mapper(
     """
     3×4 subplot showing all pixelization diagnostics for one mapper.
 
+    For Delaunay / kNN / natural-neighbour meshes (those with an interpolated
+    view, see :func:`~autoarray.plot.inversion.mapper_has_interpolated_view`)
+    the right-hand column holds the source plane, as in the lens ``fit.png``:
+
+    - row 0: Data Subtracted, Reconstructed Image, Reconstructed Image (log10),
+      Source Plane (Max Zoom);
+    - row 1: Mesh Pixel Grid Overlaid, Noise-Map (No Zoom), Regularization
+      (No Zoom), Source Plane (Interpolated);
+    - row 2: Sub Pixels Per Image Pixels, Mesh Pixels Per Image Pixels, Image
+      Pixels Per Source Pixel, Source Plane (No Zoom).
+
+    The max-zoom and no-zoom panels draw the mesh as flat triangles, which shows
+    where it spends resolution; "Source Plane (Interpolated)" shows the reconstruction
+    the likelihood uses between mesh vertices (the mapper's interpolant on a
+    uniform grid), over the same extent as the max-zoom panel.
+
+    Rectangular meshes have no separate interpolated view and keep the layout
+    Data Subtracted, Reconstructed Image, Reconstructed Image (log10), Mesh
+    Pixel Grid Overlaid / Source Plane (Zoom), Source Plane (No Zoom),
+    Noise-Map, Regularization / Sub Pixels, Mesh Pixels, Image Pixels Per
+    Source Pixel, with the last panel left empty.
+
+    Panels whose data the inversion cannot provide are left empty.
+
     Parameters
     ----------
     inversion
@@ -81,6 +106,31 @@ def subplot_of_mapper(
     fig, axes = subplots(3, 4, figsize=conf_subplot_figsize(3, 4))
     axes = axes.flatten()
 
+    # Panel positions: irregular meshes put the source plane in the right-hand
+    # column (Max Zoom / Interpolated / No Zoom); rectangular meshes keep the
+    # original order, with the last panel empty.
+    interpolated_view = mapper_has_interpolated_view(mapper)
+
+    if interpolated_view:
+        panel = {
+            "mesh_grid": 4,
+            "source_zoom": 3,
+            "source_interpolated": 7,
+            "noise_map": 5,
+            "regularization": 6,
+            "source_no_zoom": 11,
+        }
+        source_zoom_title = "Source Plane (Max Zoom)"
+    else:
+        panel = {
+            "mesh_grid": 3,
+            "source_zoom": 4,
+            "source_no_zoom": 5,
+            "noise_map": 6,
+            "regularization": 7,
+        }
+        source_zoom_title = "Source Plane (Zoom)"
+
     # panel 0: data subtracted
     try:
         array = inversion.data_subtracted_dict[mapper]
@@ -101,7 +151,8 @@ def subplot_of_mapper(
     except (AttributeError, KeyError, exc.InversionException):
         pass
 
-    # panels 1-3: reconstructed operated data (plain, log10, + mesh grid overlay)
+    # panels 1-2 + mesh grid panel: reconstructed operated data (plain, log10,
+    # + mesh grid overlay)
     def _recon_array():
         if _is_array_free_interferometer(inversion):
             return inversion.mapped_reconstructed_data_dict[mapper]
@@ -136,7 +187,7 @@ def subplot_of_mapper(
         )
         plot_array(
             _recon_array(),
-            ax=axes[3],
+            ax=axes[panel["mesh_grid"]],
             title=_pf("Mesh Pixel Grid Overlaid"),
             colormap=colormap,
             use_log10=use_log10,
@@ -147,7 +198,7 @@ def subplot_of_mapper(
     except (AttributeError, KeyError, exc.InversionException):
         pass
 
-    # panels 4-5: source reconstruction zoomed / unzoomed
+    # source reconstruction zoomed / unzoomed
     pixel_values = inversion.reconstruction_dict[mapper]
     try:
         recon_vmax = float(np.max(np.asarray(_recon_array())))
@@ -156,8 +207,8 @@ def subplot_of_mapper(
     plot_mapper(
         mapper,
         solution_vector=pixel_values,
-        ax=axes[4],
-        title=_pf("Source Plane (Zoom)"),
+        ax=axes[panel["source_zoom"]],
+        title=_pf(source_zoom_title),
         colormap=colormap,
         use_log10=use_log10,
         vmax=recon_vmax,
@@ -168,7 +219,7 @@ def subplot_of_mapper(
     plot_mapper(
         mapper,
         solution_vector=pixel_values,
-        ax=axes[5],
+        ax=axes[panel["source_no_zoom"]],
         title=_pf("Source Plane (No Zoom)"),
         colormap=colormap,
         use_log10=use_log10,
@@ -178,13 +229,13 @@ def subplot_of_mapper(
         lines=lines,
     )
 
-    # panel 6: noise map
+    # noise map
     try:
         nm = inversion.reconstruction_noise_map_dict[mapper]
         plot_mapper(
             mapper,
             solution_vector=nm,
-            ax=axes[6],
+            ax=axes[panel["noise_map"]],
             title=_pf("Noise-Map (No Zoom)"),
             colormap=colormap,
             use_log10=use_log10,
@@ -196,13 +247,13 @@ def subplot_of_mapper(
         # `InversionException`: the matrix-free interferometer route has no noise map.
         pass
 
-    # panel 7: regularization weights
+    # regularization weights
     try:
         rw = inversion.regularization_weights_mapper_dict[mapper]
         plot_mapper(
             mapper,
             solution_vector=rw,
-            ax=axes[7],
+            ax=axes[panel["regularization"]],
             title=_pf("Regularization (No Zoom)"),
             colormap=colormap,
             use_log10=use_log10,
@@ -256,6 +307,26 @@ def subplot_of_mapper(
         )
     except (TypeError, Exception):
         pass
+
+    # interpolated panel: the reconstruction the likelihood uses between mesh
+    # vertices. The zoom panels draw irregular meshes as flat triangles (one
+    # colour each) to show where the mesh spends resolution; this panel
+    # evaluates the mapper's own interpolant on a uniform grid, over the
+    # max-zoom extent. Rectangular meshes have no separate interpolated view, so
+    # they draw no such panel and their last panel is left empty and hidden.
+    if interpolated_view:
+        plot_mapper(
+            mapper,
+            solution_vector=pixel_values,
+            ax=axes[panel["source_interpolated"]],
+            title=_pf("Source Plane (Interpolated)"),
+            colormap=colormap,
+            use_log10=use_log10,
+            vmax=recon_vmax,
+            zoom_to_brightest=True,
+            interpolated=True,
+            lines=lines,
+        )
 
     hide_unused_axes(axes)
     tight_layout()
