@@ -22,7 +22,18 @@ MAX_CONTAINING_SIZE = 20
 # - "nopad":      the ``(N, 3, 2)`` gather without the pad / NaN ``where`` (no index is -1).
 # - "components": six ``(N,)`` 1-D gathers, one per vertex component; no ``(N, 3, 2)`` array.
 # - "structured": strided slices of the traced vertex table reshaped to its lattice rows; no
-#                 gather at all, the boolean mask is interleaved back to triangle order.
+#                 gather at all. The six vertex components are interleaved back to row-major
+#                 triangle order *before* `_barycentric_contains`, so the arithmetic runs on the
+#                 same flat ``(N,)`` operands as the gather path (PyAutoArray#703, below).
+#
+# Bit-identity rests on XLA emitting the same arithmetic for every route. XLA CPU contracts
+# ``a * b + c * d`` into a fused multiply-add, and which product it fuses depends on the kernel
+# it builds. Up to jax 0.12.0.1 "structured" ran `_barycentric_contains` once per parity class
+# on 2-D blocks and interleaved the boolean masks; jax 0.12.1 fused the beta numerator the other
+# way round there than on the gather path, flipping exact edge ties (PyAutoArray#703). Feeding the
+# arithmetic the interleaved flat components restores identity on both versions and keeps about
+# half of the old route's step-0 CPU speed-up over "gather" (a jitted solver-lattice `Point`
+# containment: gather ~820 us, old structured ~640 us, this ~740 us on jax 0.12.0.1).
 #
 # The switch is read at trace time: a jitted function must be re-traced (fresh closure plus
 # ``jax.clear_caches()``) after changing it.
@@ -268,28 +279,36 @@ class ArrayTriangles(AbstractTriangles):
             half_rows = (n_rows + 1) // 2
             half_cols = (n_cols + 1) // 2
 
-            classes = []
-            for corner in corners:
-                components = []
-                for p0, c0, na, nb in corner:
-                    block = grid[p0 : p0 + na, c0 : c0 + nb]
-                    components += [block[..., 0], block[..., 1]]
-                na, nb = corner[0][2], corner[0][3]
-                mask = _barycentric_contains(*components, point.x, point.y)
-                classes.append(
-                    jnp.pad(mask, ((0, half_rows - na), (0, half_cols - nb)))
+            # classes[2 * pi + pj][a, b] is triangle (2a + pi, 2b + pj): interleave to row-major.
+            def interleave(classes):
+                return (
+                    jnp.stack(
+                        (
+                            jnp.stack((classes[0], classes[1]), axis=-1),
+                            jnp.stack((classes[2], classes[3]), axis=-1),
+                        ),
+                        axis=1,
+                    )
+                    .reshape(2 * half_rows, 2 * half_cols)[:n_rows, :n_cols]
+                    .reshape(-1)
                 )
 
-            # classes[2 * pi + pj][a, b] is triangle (2a + pi, 2b + pj): interleave to row-major.
-            interleaved = jnp.stack(
-                (
-                    jnp.stack((classes[0], classes[1]), axis=-1),
-                    jnp.stack((classes[2], classes[3]), axis=-1),
-                ),
-                axis=1,
-            ).reshape(2 * half_rows, 2 * half_cols)
+            # Interleave each vertex component to row-major triangle order and only then do the
+            # arithmetic: per-class arithmetic on 2-D blocks lets XLA contract FMAs differently
+            # from the gather path (jax 0.12.1, PyAutoArray#703).
+            components = []
+            for k in range(3):
+                for c in range(2):
+                    classes = []
+                    for corner in corners:
+                        p0, c0, na, nb = corner[k]
+                        block = grid[p0 : p0 + na, c0 : c0 + nb, c]
+                        classes.append(
+                            jnp.pad(block, ((0, half_rows - na), (0, half_cols - nb)))
+                        )
+                    components.append(interleave(classes))
 
-            return interleaved[:n_rows, :n_cols].reshape(-1)
+            return _barycentric_contains(*components, point.x, point.y)
 
         return None
 
