@@ -4,6 +4,7 @@ Standalone function for plotting a 2D grid of (y, x) coordinates.
 This replaces the ``MatPlot2D.plot_grid`` / ``MatWrap`` system.
 """
 
+import logging
 from typing import Iterable, List, Optional, Tuple
 
 import numpy as np
@@ -17,6 +18,8 @@ from autoarray.plot.utils import (
     save_figure,
     numpy_lines,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def plot_grid(
@@ -62,6 +65,10 @@ def plot_grid(
     color_array
         1D array of scalar values for colouring each point; triggers a
         colorbar.
+    indexes
+        Groups of grid indexes to highlight, one colour per group.  Indexes
+        outside the grid are dropped (logged), e.g. when indexes chosen for
+        a full-size grid meet one capped by ``PYAUTO_SMALL_DATASETS``.
     title
         Figure title.
     xlabel, ylabel
@@ -170,13 +177,26 @@ def plot_grid(
 
     if indexes is not None:
         colors = ["r", "g", "b", "m", "c", "y"]
+        total_points = grid.shape[0]
+        dropped = 0
         for i, idx_list in enumerate(indexes):
+            idx_array = np.asarray(idx_list, dtype=int).ravel()
+            in_range = (idx_array >= -total_points) & (idx_array < total_points)
+            dropped += int(np.count_nonzero(~in_range))
+            idx_array = idx_array[in_range]
+            if idx_array.size == 0:
+                continue
             ax.scatter(
-                grid[idx_list, 1],
-                grid[idx_list, 0],
+                grid[idx_array, 1],
+                grid[idx_array, 0],
                 s=10,
                 c=colors[i % len(colors)],
                 zorder=5,
+            )
+        if dropped:
+            logger.info(
+                f"plot_grid: dropped {dropped} highlighted index(es) outside the "
+                f"{total_points}-point grid."
             )
 
     if force_symmetric_extent and extent is not None:
