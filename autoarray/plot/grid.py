@@ -19,7 +19,7 @@ from autoarray.plot.utils import (
     numpy_lines,
 )
 
-logger = logging.getLogger(__name__)
+_logger = logging.getLogger(__name__)
 
 
 def plot_grid(
@@ -194,7 +194,7 @@ def plot_grid(
                 zorder=5,
             )
         if dropped:
-            logger.info(
+            _logger.info(
                 f"plot_grid: dropped {dropped} highlighted index(es) outside the "
                 f"{total_points}-point grid."
             )
