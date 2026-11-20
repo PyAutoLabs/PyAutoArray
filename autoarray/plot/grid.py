@@ -180,7 +180,9 @@ def plot_grid(
         total_points = grid.shape[0]
         dropped = 0
         for i, idx_list in enumerate(indexes):
-            idx_array = np.asarray(idx_list, dtype=int).ravel()
+            idx_array = np.asarray(idx_list).ravel()
+            if idx_array.dtype == bool:
+                idx_array = np.flatnonzero(idx_array)
             in_range = (idx_array >= -total_points) & (idx_array < total_points)
             dropped += int(np.count_nonzero(~in_range))
             idx_array = idx_array[in_range]

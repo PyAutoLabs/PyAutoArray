@@ -68,3 +68,17 @@ def test__plot_grid__indexes_all_out_of_range__no_highlight_and_no_error():
 
     assert _highlight_offsets(ax) == []
     plt.close(fig)
+
+
+def test__plot_grid__boolean_mask_group__highlights_masked_points():
+    grid = _grid()
+    fig, ax = plt.subplots()
+    mask = np.zeros(16, dtype=bool)
+    mask[[7, 9]] = True
+
+    aplt.plot_grid(grid=grid, indexes=[mask], ax=ax)
+
+    offsets = _highlight_offsets(ax)
+    assert len(offsets) == 1
+    assert np.allclose(offsets[0], np.asarray(grid.array)[[7, 9]][:, ::-1])
+    plt.close(fig)
