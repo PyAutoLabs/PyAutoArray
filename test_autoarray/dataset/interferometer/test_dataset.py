@@ -1493,3 +1493,166 @@ def test__primary_beam__propagates_through_every_reconstruction_site(
 
     _assert_carries_primary_beam(dataset_cached, primary_beam.array)
     assert operator.primary_beam_slim is None
+
+
+def _large_interferometer_inputs(n_visibilities=10_001):
+    data = aa.Visibilities(visibilities=np.ones(n_visibilities) + 1j)
+    noise_map = aa.VisibilitiesNoiseMap(
+        visibilities=np.ones(n_visibilities) + 1j * np.ones(n_visibilities)
+    )
+    uv_wavelengths = (
+        np.random.default_rng(seed=1).normal(size=(n_visibilities, 2)) * 1000.0
+    )
+    return data, noise_map, uv_wavelengths
+
+
+def test__apply_setup__sparse_wtilde_attaches_operator_and_keeps_transformer(
+    interferometer_7,
+):
+    for setup_id in ("numba_cpu_sparse_fp64_wtilde", "jax_gpu_sparse_fp64_wtilde"):
+        dataset = interferometer_7.apply_setup(setup=setup_id)
+
+        assert isinstance(dataset.sparse_operator, aa.InterferometerSparseOperator)
+        assert type(dataset.transformer) is transformer.TransformerDFT
+        assert dataset.setup.setup_id == setup_id
+
+    # The operator equals the one apply_sparse_operator builds.
+    dataset = interferometer_7.apply_setup(setup="numba_cpu_sparse_fp64_wtilde")
+    reference = interferometer_7.apply_sparse_operator()
+
+    assert dataset.sparse_operator.dirty_image == pytest.approx(
+        reference.sparse_operator.dirty_image, 1.0e-8
+    )
+
+
+def test__apply_setup__nufft_uses_nufft_transformer_and_drops_operator(
+    interferometer_7,
+):
+    dataset = interferometer_7.apply_sparse_operator().apply_setup(
+        setup="jax_cpu_dense_fp64_nufft"
+    )
+
+    assert type(dataset.transformer) is transformer.TransformerNUFFT
+    assert dataset.sparse_operator is None
+    assert dataset.setup.setup_id == "jax_cpu_dense_fp64_nufft"
+
+
+def test__apply_setup__idempotent(interferometer_7):
+    dataset = interferometer_7.apply_setup(setup="numba_cpu_sparse_fp64_wtilde")
+
+    assert dataset.apply_setup(setup="numba_cpu_sparse_fp64_wtilde") is dataset
+
+    setup_auto = aa.Setup.from_setup_id(
+        "numba_cpu_sparse_fp64_wtilde", rule_id="pulse-decision"
+    )
+    dataset_auto = dataset.apply_setup(setup=setup_auto)
+
+    assert dataset_auto.setup == setup_auto
+    assert dataset_auto.sparse_operator is dataset.sparse_operator
+
+    dataset_nufft = interferometer_7.apply_setup(setup="jax_cpu_dense_fp64_nufft")
+
+    assert dataset_nufft.apply_setup(setup="jax_cpu_dense_fp64_nufft") is dataset_nufft
+
+
+def test__apply_setup__carried_by_apply_sparse_operator(interferometer_7):
+    dataset = interferometer_7.apply_setup(setup="jax_cpu_dense_fp64_nufft")
+
+    assert dataset.apply_sparse_operator().setup == dataset.setup
+    assert (
+        dataset.apply_sparse_operator(pool_noise_map=True).setup == dataset.setup
+    )
+
+
+def test__setup__supersedes_dft_visibilities_limit(mask_2d_7x7):
+    data, noise_map, uv_wavelengths = _large_interferometer_inputs()
+
+    # Without a setup the guard is unchanged.
+    with pytest.raises(aa.exc.DatasetException):
+        aa.Interferometer(
+            data=data,
+            noise_map=noise_map,
+            uv_wavelengths=uv_wavelengths,
+            real_space_mask=mask_2d_7x7,
+            transformer_class=transformer.TransformerDFT,
+        )
+
+    # A nufft setup decides the transformer: NUFFT, not the DFT.
+    dataset = aa.Interferometer(
+        data=data,
+        noise_map=noise_map,
+        uv_wavelengths=uv_wavelengths,
+        real_space_mask=mask_2d_7x7,
+        transformer_class=transformer.TransformerDFT,
+        setup="jax_cpu_dense_fp64_nufft",
+    )
+
+    assert type(dataset.transformer) is transformer.TransformerNUFFT
+
+    # Any setup supersedes the guard; a wtilde setup keeps the transformer it is given.
+    dataset = aa.Interferometer(
+        data=data,
+        noise_map=noise_map,
+        uv_wavelengths=uv_wavelengths,
+        real_space_mask=mask_2d_7x7,
+        transformer_class=transformer.TransformerDFT,
+        setup=aa.Setup.from_setup_id("numba_cpu_sparse_fp64_wtilde"),
+    )
+
+    assert type(dataset.transformer) is transformer.TransformerDFT
+    assert dataset.setup.setup_id == "numba_cpu_sparse_fp64_wtilde"
+
+    # apply_setup on a large DFT dataset (built with the guard off) never raises it.
+    dataset = aa.Interferometer(
+        data=data,
+        noise_map=noise_map,
+        uv_wavelengths=uv_wavelengths,
+        real_space_mask=mask_2d_7x7,
+        transformer_class=transformer.TransformerDFT,
+        raise_error_dft_visibilities_limit=False,
+    ).apply_setup(setup="jax_cpu_dense_fp64_nufft")
+
+    assert type(dataset.transformer) is transformer.TransformerNUFFT
+
+
+def test__from_fits__setup_supersedes_dft_visibilities_limit(tmp_path, mask_2d_7x7):
+    from astropy.io import fits
+
+    n_visibilities = 10_001
+    paths = []
+    for name in ("data", "noise_map", "uv_wavelengths"):
+        path = tmp_path / f"{name}.fits"
+        fits.PrimaryHDU(data=np.ones((n_visibilities, 2))).writeto(path)
+        paths.append(path)
+
+    dataset = aa.Interferometer.from_fits(
+        data_path=paths[0],
+        noise_map_path=paths[1],
+        uv_wavelengths_path=paths[2],
+        real_space_mask=mask_2d_7x7,
+        transformer_class=transformer.TransformerDFT,
+        setup="jax_cpu_dense_fp64_nufft",
+    )
+
+    assert type(dataset.transformer) is transformer.TransformerNUFFT
+    assert dataset.setup.setup_id == "jax_cpu_dense_fp64_nufft"
+
+
+def test__apply_setup__array_free_dataset(mask_2d_7x7, interferometer_7):
+    chunks = [
+        (
+            interferometer_7.uv_wavelengths,
+            interferometer_7.data.array,
+            interferometer_7.noise_map.array,
+        )
+    ]
+    dataset = aa.Interferometer.from_stream(chunks, real_space_mask=mask_2d_7x7)
+
+    # The operator it carries already matches a sparse setup.
+    dataset_sparse = dataset.apply_setup(setup="numba_cpu_sparse_fp64_wtilde")
+
+    assert dataset_sparse.sparse_operator is dataset.sparse_operator
+
+    # A dense setup needs the visibilities it does not have.
+    with pytest.raises(aa.exc.DatasetException):
+        dataset.apply_setup(setup="jax_cpu_dense_fp64_nufft")

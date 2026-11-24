@@ -1,3 +1,4 @@
+import copy
 import logging
 import numpy as np
 from pathlib import Path
@@ -12,6 +13,8 @@ from autoarray.structures.arrays.uniform_2d import Array2D
 from autoarray.operators.convolver import ConvolverState
 from autoarray.operators.convolver import Convolver
 from autoarray.mask.mask_2d import Mask2D
+from autoarray.setup.setup import Setup
+from autoarray.setup.setup import setup_from
 from autoarray import type as ty
 
 from autoarray import exc
@@ -106,6 +109,7 @@ class Imaging(AbstractDataset):
         use_normalized_psf: Optional[bool] = True,
         check_noise_map: bool = True,
         sparse_operator: Optional[ImagingSparseOperator] = None,
+        setup: Optional[Union[Setup, str]] = None,
     ):
         """
         An imaging dataset, containing the image data, noise-map, PSF and associated quantities
@@ -174,6 +178,10 @@ class Imaging(AbstractDataset):
             The sparse linear algebra formalism of the linear algebra equations precomputes the convolution of every pair of masked
             noise-map values given the PSF (see `inversion.inversion_util`). Pass the `ImagingSparseOperator` object here to
             enable this linear algebra formalism for pixelized reconstructions.
+        setup
+            The compute setup (an `aa.Setup` or a setup_id string) this dataset is evaluated with, which is
+            stored and carried by `apply_mask`, `apply_noise_scaling` and `apply_over_sampling`. Passing it here
+            only records it; use `apply_setup()` to attach the operator it names.
         """
 
         _validate_convolve_over_sample_size(
@@ -287,6 +295,7 @@ class Imaging(AbstractDataset):
         )
 
         self.sparse_operator = sparse_operator
+        self.setup = setup_from(setup)
 
     @classmethod
     def from_fits(
@@ -428,6 +437,11 @@ class Imaging(AbstractDataset):
         trimmed. An exception is raised if this is attempted. If you wish to apply a different mask,
         reload the dataset from .fits files.
 
+        A new mask invalidates any attached sparse operator. If the dataset has a `setup` (see
+        `apply_setup()`), the setup stays in effect: it is re-applied to the masked dataset, so the
+        operator it names is rebuilt for the new mask. Without a setup the operator is discarded
+        (with a warning).
+
         Parameters
         ----------
         mask
@@ -469,9 +483,10 @@ class Imaging(AbstractDataset):
             values=self.over_sample_size_pixelization.native, mask=mask
         )
 
-        _warn_sparse_operator_discarded(
-            sparse_operator=self.sparse_operator, method_name="apply_mask"
-        )
+        if self.setup is None:
+            _warn_sparse_operator_discarded(
+                sparse_operator=self.sparse_operator, method_name="apply_mask"
+            )
 
         dataset = Imaging(
             data=data,
@@ -483,11 +498,15 @@ class Imaging(AbstractDataset):
             over_sample_size_pixelization=over_sample_size_pixelization,
             convolve_over_sample_size_lp=self.convolve_over_sample_size_lp,
             convolve_over_sample_size_pixelization=self.convolve_over_sample_size_pixelization,
+            setup=self.setup,
         )
 
         logger.info(
             f"IMAGING - Data masked, contains a total of {mask.pixels_in_mask} image-pixels"
         )
+
+        if self.setup is not None:
+            return dataset.apply_setup(setup=self.setup)
 
         return dataset
 
@@ -520,6 +539,10 @@ class Imaging(AbstractDataset):
         calculation, but ensures they do not contribute to the fit.
 
         This function can only be applied before actual masking.
+
+        A changed noise-map invalidates any attached sparse operator. If the dataset has a `setup`
+        (see `apply_setup()`), the setup is re-applied to the returned dataset so the operator it names
+        is rebuilt for the new noise-map. Without a setup the operator is discarded (with a warning).
 
         Parameters
         ----------
@@ -554,9 +577,10 @@ class Imaging(AbstractDataset):
 
         noise_map = Array2D(values=noise_map, mask=self.data.mask)
 
-        _warn_sparse_operator_discarded(
-            sparse_operator=self.sparse_operator, method_name="apply_noise_scaling"
-        )
+        if self.setup is None:
+            _warn_sparse_operator_discarded(
+                sparse_operator=self.sparse_operator, method_name="apply_noise_scaling"
+            )
 
         dataset = Imaging(
             data=data,
@@ -568,11 +592,15 @@ class Imaging(AbstractDataset):
             convolve_over_sample_size_lp=self.convolve_over_sample_size_lp,
             convolve_over_sample_size_pixelization=self.convolve_over_sample_size_pixelization,
             check_noise_map=False,
+            setup=self.setup,
         )
 
         logger.info(
             f"IMAGING - Data noise scaling applied, a total of {mask.pixels_in_mask} pixels were scaled to large noise values."
         )
+
+        if self.setup is not None:
+            return dataset.apply_setup(setup=self.setup)
 
         return dataset
 
@@ -591,9 +619,10 @@ class Imaging(AbstractDataset):
         This function resets the cached properties so that the new over sampling is used in the grid and grid
         pixelization.
 
-        The `noise_covariance_matrix` and any attached `sparse_operator` are carried over, as neither depends on
-        the over sampling (the sparse operator depends only on the noise-map, PSF kernel and mask). This means
-        `apply_sparse_operator()` / `apply_sparse_operator_cpu()` may be called before or after this method.
+        The `noise_covariance_matrix`, any attached `sparse_operator` and the `setup` are carried over, as none
+        depends on the over sampling (the sparse operator depends only on the noise-map, PSF kernel and mask). This
+        means `apply_sparse_operator()` / `apply_sparse_operator_cpu()` / `apply_setup()` may be called before or
+        after this method.
 
         Parameters
         ----------
@@ -618,6 +647,7 @@ class Imaging(AbstractDataset):
             convolve_over_sample_size_pixelization=self.convolve_over_sample_size_pixelization,
             check_noise_map=False,
             sparse_operator=self.sparse_operator,
+            setup=self.setup,
         )
 
         return dataset
@@ -693,6 +723,7 @@ class Imaging(AbstractDataset):
             convolve_over_sample_size_pixelization=self.convolve_over_sample_size_pixelization,
             check_noise_map=False,
             sparse_operator=sparse_operator,
+            setup=self.setup,
         )
 
     def apply_sparse_operator_cpu(
@@ -766,5 +797,113 @@ class Imaging(AbstractDataset):
             convolve_over_sample_size_pixelization=self.convolve_over_sample_size_pixelization,
             check_noise_map=False,
             sparse_operator=sparse_operator,
+            setup=self.setup,
         )
 
+    def _sparse_operator_matches(self, setup: Setup) -> bool:
+        """
+        Whether the attached `sparse_operator` is the one `setup` names: a JAX
+        `ImagingSparseOperator` for a `jax` sparse setup, a numba `SparseLinAlgImagingNumba`
+        for a `numba` sparse setup, and no operator for any other operator token (`dense`,
+        `na`, ...).
+        """
+        if setup.operator != "sparse":
+            return self.sparse_operator is None
+
+        if setup.backend == "jax":
+            return isinstance(self.sparse_operator, ImagingSparseOperator)
+
+        from autoarray.inversion.inversion.imaging_numba.inversion_imaging_numba_util import (
+            SparseLinAlgImagingNumba,
+        )
+
+        return isinstance(self.sparse_operator, SparseLinAlgImagingNumba)
+
+    def apply_setup(
+        self,
+        setup: Union[Setup, str],
+        batch_size: int = 128,
+    ) -> "Imaging":
+        """
+        Apply a compute setup to the dataset, attaching the operator it names.
+
+        - An operator `"sparse"` setup attaches the sparse linear algebra operator of its
+          backend: `apply_sparse_operator()` (an `ImagingSparseOperator`) for `backend="jax"`
+          and `apply_sparse_operator_cpu()` (a `SparseLinAlgImagingNumba`) for
+          `backend="numba"`.
+        - Any other operator (`"dense"`, `"na"`) attaches no operator, dropping an attached
+          one, so pixelized reconstructions use the mapping matrix formalism.
+
+        The setup is stored as `dataset.setup` and carried by `apply_mask`,
+        `apply_noise_scaling` and `apply_over_sampling`; the first two rebuild the operator for
+        the new mask or noise-map. The inversion factory checks the operator against the setup
+        and the array backend, and raises on a mismatch.
+
+        This method is idempotent: if the attached operator already matches the setup, no
+        operator is rebuilt (the dataset is returned as is, or as a shallow copy recording the
+        new setup when its provenance differs).
+
+        The setup decides only how the likelihood is computed (backend, operator), never the
+        model (mesh, over-sampling, regularization).
+
+        Parameters
+        ----------
+        setup
+            The `aa.Setup`, or a setup_id string such as `"numba_cpu_sparse_fp64"`.
+        batch_size
+            The batch size of `apply_sparse_operator()`, used by a `jax` sparse setup.
+
+        Returns
+        -------
+        Imaging
+            The dataset with the setup applied.
+
+        Raises
+        ------
+        exc.DatasetException
+            If a sparse setup is applied to a dataset without a PSF, or names a backend with no
+            imaging sparse operator (`numpy`).
+        """
+        setup = setup_from(setup)
+
+        if self._sparse_operator_matches(setup=setup):
+            if self.setup == setup:
+                return self
+            dataset = copy.copy(self)
+            dataset.setup = setup
+            return dataset
+
+        if setup.operator == "sparse":
+            if setup.backend not in ("jax", "numba"):
+                raise exc.DatasetException(
+                    f"The setup {setup.setup_id!r} asks for the imaging sparse operator on the "
+                    f"{setup.backend!r} backend, which has none: the imaging sparse operator is "
+                    f"built for 'jax' (apply_sparse_operator) or 'numba' "
+                    f"(apply_sparse_operator_cpu). Use a jax or numba setup, or a dense one."
+                )
+            if self.psf is None:
+                raise exc.DatasetException(
+                    f"The setup {setup.setup_id!r} asks for the imaging sparse operator, which "
+                    f"precomputes PSF products, but this dataset has no PSF. Use a dense setup."
+                )
+
+        dataset = Imaging(
+            data=self.data,
+            noise_map=self.noise_map,
+            psf=self.psf,
+            noise_covariance_matrix=self.noise_covariance_matrix,
+            over_sample_size_lp=self.over_sample_size_lp,
+            over_sample_size_pixelization=self.over_sample_size_pixelization,
+            convolve_over_sample_size_lp=self.convolve_over_sample_size_lp,
+            convolve_over_sample_size_pixelization=self.convolve_over_sample_size_pixelization,
+            check_noise_map=False,
+            setup=setup,
+        )
+
+        if setup.operator != "sparse":
+            return dataset
+
+        if setup.backend == "jax":
+            return dataset.apply_sparse_operator(batch_size=batch_size)
+
+        return dataset.apply_sparse_operator_cpu()

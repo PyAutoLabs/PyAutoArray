@@ -600,3 +600,141 @@ def test__convolve_over_sample_size__sparse_operator_cpu_guard():
 
     with pytest.raises(aa.exc.DatasetException):
         dataset.apply_sparse_operator_cpu()
+
+
+def test__apply_setup__sparse_numba_and_jax_attach_their_operator(masked_imaging_7x7):
+    from autoarray.inversion.inversion.imaging_numba.inversion_imaging_numba_util import (
+        SparseLinAlgImagingNumba,
+    )
+
+    dataset = masked_imaging_7x7.apply_setup(setup="numba_cpu_sparse_fp64")
+
+    assert isinstance(dataset.sparse_operator, SparseLinAlgImagingNumba)
+    assert dataset.setup == aa.Setup.from_setup_id("numba_cpu_sparse_fp64")
+
+    dataset = masked_imaging_7x7.apply_setup(
+        setup=aa.Setup.from_setup_id("jax_cpu_sparse_fp64")
+    )
+
+    assert isinstance(dataset.sparse_operator, aa.ImagingSparseOperator)
+    assert dataset.setup.setup_id == "jax_cpu_sparse_fp64"
+
+
+def test__apply_setup__dense_attaches_no_operator_and_drops_one(masked_imaging_7x7):
+    dataset = masked_imaging_7x7.apply_sparse_operator_cpu().apply_setup(
+        setup="jax_gpu_dense_fp64"
+    )
+
+    assert dataset.sparse_operator is None
+    assert dataset.setup.setup_id == "jax_gpu_dense_fp64"
+
+    dataset = masked_imaging_7x7.apply_setup(setup="jax_cpu_na_fp64")
+
+    assert dataset.sparse_operator is None
+
+
+def test__apply_setup__idempotent(masked_imaging_7x7):
+    dataset = masked_imaging_7x7.apply_setup(setup="numba_cpu_sparse_fp64")
+
+    assert dataset.apply_setup(setup="numba_cpu_sparse_fp64") is dataset
+
+    # A setup of the same tuple but other provenance reuses the operator.
+    setup_auto = aa.Setup.from_setup_id(
+        "numba_cpu_sparse_fp64", rule_id="pulse-decision"
+    )
+    dataset_auto = dataset.apply_setup(setup=setup_auto)
+
+    assert dataset_auto is not dataset
+    assert dataset_auto.setup == setup_auto
+    assert dataset_auto.sparse_operator is dataset.sparse_operator
+
+    # An operator already attached by hand is reused.
+    dataset_cpu = masked_imaging_7x7.apply_sparse_operator_cpu()
+
+    assert (
+        dataset_cpu.apply_setup(setup="numba_cpu_sparse_fp64").sparse_operator
+        is dataset_cpu.sparse_operator
+    )
+
+    dataset_dense = masked_imaging_7x7.apply_setup(setup="jax_gpu_dense_fp64")
+
+    assert dataset_dense.apply_setup(setup="jax_gpu_dense_fp64") is dataset_dense
+
+
+def test__apply_setup__survives_apply_mask_noise_scaling_and_over_sampling(
+    imaging_7x7, mask_2d_7x7, caplog
+):
+    from autoarray.inversion.inversion.imaging_numba.inversion_imaging_numba_util import (
+        SparseLinAlgImagingNumba,
+    )
+
+    dataset = imaging_7x7.apply_setup(setup="numba_cpu_sparse_fp64")
+
+    with caplog.at_level(logging.WARNING, logger="autoarray.dataset.imaging.dataset"):
+        masked = dataset.apply_mask(mask=mask_2d_7x7)
+
+    # The operator is rebuilt for the new mask, silently.
+    assert "sparse operator" not in caplog.text
+    assert masked.setup == dataset.setup
+    assert isinstance(masked.sparse_operator, SparseLinAlgImagingNumba)
+    assert masked.sparse_operator is not dataset.sparse_operator
+    assert masked.sparse_operator.psf_precision_operator_sparse == pytest.approx(
+        masked.apply_sparse_operator_cpu().sparse_operator.psf_precision_operator_sparse,
+        1.0e-8,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="autoarray.dataset.imaging.dataset"):
+        scaled = masked.apply_noise_scaling(mask=mask_2d_7x7, noise_value=10.0)
+
+    assert "sparse operator" not in caplog.text
+    assert scaled.setup == dataset.setup
+    assert isinstance(scaled.sparse_operator, SparseLinAlgImagingNumba)
+    assert scaled.sparse_operator is not masked.sparse_operator
+
+    over_sampled = masked.apply_over_sampling(over_sample_size_lp=2)
+
+    assert over_sampled.setup == dataset.setup
+    assert over_sampled.sparse_operator is masked.sparse_operator
+
+    # A dense setup is carried and still attaches nothing.
+    dense = imaging_7x7.apply_setup(setup="jax_gpu_dense_fp64").apply_mask(
+        mask=mask_2d_7x7
+    )
+
+    assert dense.setup.setup_id == "jax_gpu_dense_fp64"
+    assert dense.sparse_operator is None
+
+
+def test__apply_setup__sparse_operator_builders_carry_setup(masked_imaging_7x7):
+    dataset = masked_imaging_7x7.apply_setup(setup="jax_gpu_dense_fp64")
+
+    assert dataset.apply_sparse_operator_cpu().setup == dataset.setup
+    assert dataset.apply_sparse_operator().setup == dataset.setup
+
+
+def test__apply_setup__invalid_inputs_raise(masked_imaging_7x7):
+    with pytest.raises(exc.DatasetException):
+        masked_imaging_7x7.apply_setup(setup="numpy_cpu_sparse_fp64")
+
+    dataset_no_psf = aa.Imaging(
+        data=masked_imaging_7x7.data,
+        noise_map=masked_imaging_7x7.noise_map,
+    )
+
+    with pytest.raises(exc.DatasetException):
+        dataset_no_psf.apply_setup(setup="numba_cpu_sparse_fp64")
+
+    with pytest.raises(ValueError):
+        masked_imaging_7x7.apply_setup(setup="cpu")
+
+
+def test__setup__constructor_input_is_stored(masked_imaging_7x7):
+    dataset = aa.Imaging(
+        data=masked_imaging_7x7.data,
+        noise_map=masked_imaging_7x7.noise_map,
+        psf=masked_imaging_7x7.psf,
+        setup="jax_gpu_dense_fp64",
+    )
+
+    assert dataset.setup == aa.Setup.from_setup_id("jax_gpu_dense_fp64")
+    assert masked_imaging_7x7.setup is None

@@ -348,3 +348,152 @@ def test__rule_table__parity_with_pulse(tmp_path):
 
     assert regenerated == RULES
     assert generate_rules.check(pulse, setup_py.RULES_PATH)
+
+
+class _FakeNumba:
+    def __init__(self, max_threads=8, current=8, fail=False):
+        self.config = type("config", (), {"NUMBA_NUM_THREADS": max_threads})
+        self.current = current
+        self.fail = fail
+        self.calls = []
+
+    def get_num_threads(self):
+        return self.current
+
+    def set_num_threads(self, n):
+        if self.fail:
+            raise RuntimeError("numba refused")
+        self.calls.append(n)
+        self.current = n
+
+
+class _FakeThreadpoolctl:
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.calls = []
+
+    def threadpool_limits(self, limits):
+        if self.fail:
+            raise RuntimeError("threadpoolctl refused")
+        self.calls.append(limits)
+
+
+def _patch_thread_modules(monkeypatch, numba=None, threadpoolctl=None):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "numba", numba)
+    monkeypatch.setitem(sys.modules, "threadpoolctl", threadpoolctl)
+
+
+def test__apply_threads__sets_numba_and_threadpoolctl(monkeypatch):
+    numba = _FakeNumba(max_threads=8, current=8)
+    threadpoolctl = _FakeThreadpoolctl()
+    _patch_thread_modules(monkeypatch, numba=numba, threadpoolctl=threadpoolctl)
+
+    setup = aa.Setup.from_setup_id("numba_cpu_sparse_fp64")
+
+    assert setup.apply_threads(4) == 4
+    assert numba.calls == [4]
+    assert threadpoolctl.calls == [4]
+
+    # Idempotent: numba is not reset when already at the count.
+    assert setup.apply_threads(4) == 4
+    assert numba.calls == [4]
+
+
+def test__apply_threads__clips_to_numba_maximum_and_floors_at_one(monkeypatch):
+    numba = _FakeNumba(max_threads=8, current=8)
+    threadpoolctl = _FakeThreadpoolctl()
+    _patch_thread_modules(monkeypatch, numba=numba, threadpoolctl=threadpoolctl)
+
+    setup = aa.Setup.from_setup_id("numba_cpu_sparse_fp64")
+
+    assert setup.apply_threads(64) == 8
+    assert threadpoolctl.calls == [64]
+
+    assert setup.apply_threads(0) == 1
+    assert numba.calls[-1] == 1
+
+
+def test__apply_threads__default_from_environment(monkeypatch):
+    numba = _FakeNumba(max_threads=16, current=16)
+    _patch_thread_modules(monkeypatch, numba=numba, threadpoolctl=None)
+
+    setup = aa.Setup.from_setup_id("numba_cpu_sparse_fp64")
+
+    monkeypatch.setenv("NUMBA_NUM_THREADS", "3")
+    assert setup.apply_threads() == 3
+
+    monkeypatch.delenv("NUMBA_NUM_THREADS")
+    monkeypatch.setattr("autonerves.environment.detect_cores", lambda: 5)
+    assert setup.apply_threads() == 5
+
+
+def test__apply_threads__threadpoolctl_missing(monkeypatch):
+    numba = _FakeNumba(max_threads=8, current=8)
+    _patch_thread_modules(monkeypatch, numba=numba, threadpoolctl=None)
+
+    setup = aa.Setup.from_setup_id("numba_cpu_sparse_fp64")
+
+    assert setup.apply_threads(2) == 2
+    assert numba.calls == [2]
+
+
+def test__apply_threads__never_raises(monkeypatch, caplog):
+    numba = _FakeNumba(max_threads=8, current=8, fail=True)
+    threadpoolctl = _FakeThreadpoolctl(fail=True)
+    _patch_thread_modules(monkeypatch, numba=numba, threadpoolctl=threadpoolctl)
+
+    setup = aa.Setup.from_setup_id("numba_cpu_sparse_fp64")
+
+    assert setup.apply_threads(2) is None
+    assert "numba" in caplog.text
+    assert "BLAS" in caplog.text
+
+    # Without numba, the threadpoolctl count is returned.
+    _patch_thread_modules(
+        monkeypatch, numba=None, threadpoolctl=_FakeThreadpoolctl()
+    )
+    assert setup.apply_threads(2) == 2
+
+    # An unparseable count is logged, not raised.
+    assert setup.apply_threads("many") is None
+
+
+def test__apply_threads__real_numba():
+    numba = pytest.importorskip("numba")
+
+    setup = aa.Setup.from_setup_id("numba_cpu_sparse_fp64")
+
+    previous = numba.get_num_threads()
+    try:
+        assert setup.apply_threads(1) == 1
+        assert numba.get_num_threads() == 1
+    finally:
+        numba.set_num_threads(previous)
+
+
+def test__setup_from__accepts_setup_setup_id_or_none():
+    setup = aa.Setup.from_setup_id("jax_gpu_dense_fp64")
+
+    assert setup_py.setup_from(setup) is setup
+    assert setup_py.setup_from("jax_gpu_dense_fp64") == setup
+    assert setup_py.setup_from(None) is None
+
+    with pytest.raises(ValueError):
+        setup_py.setup_from(3)
+
+
+def test__apply_threads__worker_leaves_numba_alone(monkeypatch):
+    numba = _FakeNumba(max_threads=8, current=8)
+    threadpoolctl = _FakeThreadpoolctl()
+    _patch_thread_modules(monkeypatch, numba=numba, threadpoolctl=threadpoolctl)
+    monkeypatch.setattr(
+        "autoarray.numba_util.parallel_kernel_allowed", lambda: False
+    )
+
+    setup = aa.Setup.from_setup_id("numba_cpu_sparse_fp64")
+
+    assert setup.apply_threads(2) == 2
+    assert numba.calls == []
+    assert threadpoolctl.calls == [2]

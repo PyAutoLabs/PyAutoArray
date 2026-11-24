@@ -15,6 +15,7 @@ module only chooses.
 """
 
 import functools
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +48,29 @@ GPU_A100_NAME = "A100"
 
 EXPLICIT_RULE_ID = f"explicit:{SETUP_ENV_VAR}"
 
+logger = logging.getLogger(__name__)
+
+
+def _default_thread_count() -> int:
+    """
+    The thread count :meth:`Setup.apply_threads` uses when none is given: the
+    ``NUMBA_NUM_THREADS`` environment variable when it is a positive integer, else the
+    cores this process may use (``Environment.detect().cores``, i.e.
+    :func:`autonerves.environment.detect_cores`).
+    """
+    value = os.environ.get("NUMBA_NUM_THREADS")
+    if value is not None:
+        try:
+            n = int(value)
+            if n > 0:
+                return n
+        except ValueError:
+            pass
+
+    from autonerves.environment import detect_cores
+
+    return detect_cores()
+
 
 def _validate_token(name: str, value: Optional[str], allowed=None, optional=False):
     if value is None and optional:
@@ -64,6 +88,26 @@ def _validate_token(name: str, value: Optional[str], allowed=None, optional=Fals
             f"Setup {name}={value!r} is not valid; it must be a non-empty lowercase "
             "alphanumeric token (e.g. 'dense', 'sparse', 'na', 'wtilde', 'nufft')."
         )
+
+
+def setup_from(setup) -> Optional["Setup"]:
+    """
+    A `Setup` from a `Setup`, a setup_id string (via :meth:`Setup.from_setup_id`) or
+    `None` (returned unchanged), as accepted by the datasets' `setup` inputs and
+    `apply_setup` methods.
+
+    Raises
+    ------
+    ValueError
+        If `setup` is neither a `Setup`, a setup_id string nor `None`.
+    """
+    if setup is None or isinstance(setup, Setup):
+        return setup
+    if isinstance(setup, str):
+        return Setup.from_setup_id(setup)
+    raise ValueError(
+        f"A setup must be an aa.Setup or a setup_id string, got {setup!r}."
+    )
 
 
 @functools.lru_cache(maxsize=None)
@@ -208,6 +252,94 @@ class Setup:
             transformer=rest[0] if rest else None,
             **provenance,
         )
+
+    def apply_threads(self, n: Optional[int] = None) -> Optional[int]:
+        """
+        Pin the run-time thread pools of this process to ``n`` threads, and return the
+        thread count actually applied.
+
+        This sets ``numba.set_num_threads(n)`` (``n`` clipped to
+        ``numba.config.NUMBA_NUM_THREADS``, the most threads numba may use in this
+        process) and, when ``threadpoolctl`` is installed, limits the BLAS / OpenMP
+        pools via ``threadpoolctl.threadpool_limits(n)`` (``OMP_NUM_THREADS`` does not
+        cap numba, and numba does not cap BLAS, so both are set).
+
+        It is safe to call inside multiprocessing workers: it launches no ``prange``
+        kernel, never raises (a failure is logged as a warning and the remaining pools
+        are still pinned) and is idempotent, so calling it once per worker and again in
+        the parent is harmless. In a process that may not launch numba parallel kernels
+        (a multiprocessing worker, see ``autoarray.numba_util.parallel_kernel_allowed``)
+        numba runs its serial kernels, so its thread count is left alone: setting it
+        would initialise a numba threading layer in the worker for nothing. Only the
+        BLAS / OpenMP pools are limited there.
+
+        The setup does not choose the thread count; this is the per-process half of
+        applying a setup (the dataset half is ``dataset.apply_setup(setup)``).
+
+        Parameters
+        ----------
+        n
+            The number of threads. ``None`` takes the ``NUMBA_NUM_THREADS`` environment
+            variable when set, else the cores this process may use
+            (``Environment.detect().cores``). Values below 1 are raised to 1.
+
+        Returns
+        -------
+        The thread count applied: the numba thread count when it was set, else the
+        count given to ``threadpoolctl``; ``None`` if neither could be applied.
+        """
+        try:
+            n = _default_thread_count() if n is None else int(n)
+        except Exception as e:  # never raise inside a worker
+            logger.warning(f"Setup.apply_threads could not resolve a thread count: {e}")
+            return None
+
+        n = max(1, n)
+        applied = None
+
+        try:
+            from autoarray import numba_util
+
+            numba_allowed = numba_util.parallel_kernel_allowed()
+        except Exception:
+            numba_allowed = False
+
+        numba = None
+
+        if numba_allowed:
+            try:
+                import numba
+            except ImportError:
+                numba = None
+
+        if numba is not None:
+            try:
+                n_numba = min(n, int(numba.config.NUMBA_NUM_THREADS))
+                if numba.get_num_threads() != n_numba:
+                    numba.set_num_threads(n_numba)
+                applied = n_numba
+            except Exception as e:
+                logger.warning(
+                    f"Setup.apply_threads could not set numba to {n} threads: {e}"
+                )
+
+        try:
+            import threadpoolctl
+        except ImportError:
+            threadpoolctl = None
+
+        if threadpoolctl is not None:
+            try:
+                threadpoolctl.threadpool_limits(limits=n)
+                if applied is None:
+                    applied = n
+            except Exception as e:
+                logger.warning(
+                    f"Setup.apply_threads could not limit the BLAS / OpenMP thread "
+                    f"pools to {n} threads: {e}"
+                )
+
+        return applied
 
     @classmethod
     def auto(
