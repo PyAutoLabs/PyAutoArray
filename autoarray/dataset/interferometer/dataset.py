@@ -1,8 +1,9 @@
+import copy
 import dataclasses
 import logging
 import warnings
 import numpy as np
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 from autonerves.fitsable import ndarray_via_fits_from
 from autonerves import cached_property
@@ -34,6 +35,8 @@ from autoarray.inversion.inversion.interferometer.inversion_interferometer_util 
 from autoarray.operators.transformer import TransformerDFT
 from autoarray.operators.transformer import TransformerNUFFT
 from autoarray.mask.mask_2d import Mask2D
+from autoarray.setup.setup import Setup
+from autoarray.setup.setup import setup_from
 from autoarray.structures.visibilities import Visibilities
 from autoarray.structures.visibilities import VisibilitiesNoiseMap
 
@@ -58,6 +61,7 @@ class Interferometer(AbstractDataset):
         raise_error_dft_visibilities_limit: bool = True,
         sparse_terms: Optional["inversion_interferometer_util.SparseTerms"] = None,
         primary_beam=None,
+        setup: Optional[Union[Setup, str]] = None,
     ):
         """
         An interferometer dataset, containing the visibilities data, noise-map, real-space msk, Fourier transformer and
@@ -110,7 +114,8 @@ class Interferometer(AbstractDataset):
         raise_error_dft_visibilities_limit
             If `True`, an exception is raised if the dataset has more than 10,000 visibilities and
             `transformer_class=TransformerDFT`. The DFT is too slow for large datasets and `TransformerNUFFT`
-            should be used instead. Set to `False` to suppress this check.
+            should be used instead. Set to `False` to suppress this check. The check is not made when a `setup`
+            is given: the setup decides the transformer.
         sparse_terms
             The `SparseTerms` record the `sparse_operator` was accumulated from, if any (set by
             `from_stream`, `from_sparse_terms` and `apply_sparse_operator_from_chunks`). It
@@ -127,6 +132,12 @@ class Interferometer(AbstractDataset):
             unmasked value of `P` is 0 (source pixels seen only there are unconstrained by the
             data and set by the regularization); no floor is applied. `None` (default) applies no
             primary beam.
+        setup
+            The compute setup (an `aa.Setup` or a setup_id string) this dataset is evaluated with, stored as
+            `dataset.setup` and carried by `apply_sparse_operator` and `apply_sparse_operator_from_chunks`. A
+            setup with `transformer="nufft"` replaces a `transformer_class` which is not a `TransformerNUFFT`
+            class with `TransformerNUFFT`, and any setup supersedes the >10,000-visibility DFT check. The sparse
+            operator a setup names is attached by `apply_setup()`, not here.
 
         Array-free datasets
         -------------------
@@ -138,6 +149,15 @@ class Interferometer(AbstractDataset):
         `exc.DatasetException` naming the missing input.
         """
         self.real_space_mask = real_space_mask
+        self.setup = setup_from(setup)
+
+        if (
+            self.setup is not None
+            and self.setup.transformer == "nufft"
+            and isinstance(transformer_class, type)
+            and not issubclass(transformer_class, TransformerNUFFT)
+        ):
+            transformer_class = TransformerNUFFT
 
         super().__init__(
             data=data,
@@ -194,7 +214,11 @@ class Interferometer(AbstractDataset):
                     sparse_operator, primary_beam_slim=self.primary_beam_slim
                 )
 
-        if raise_error_dft_visibilities_limit and self.uv_wavelengths is not None:
+        if (
+            raise_error_dft_visibilities_limit
+            and self.setup is None
+            and self.uv_wavelengths is not None
+        ):
             if (
                 self.uv_wavelengths.shape[0] > 10000
                 and transformer_class == TransformerDFT
@@ -224,6 +248,7 @@ class Interferometer(AbstractDataset):
         raise_error_dft_visibilities_limit: bool = True,
         primary_beam_path=None,
         primary_beam_hdu=0,
+        setup: Optional[Union[Setup, str]] = None,
     ):
         """
         Load an interferometer dataset from multiple .fits files.
@@ -272,6 +297,9 @@ class Interferometer(AbstractDataset):
             primary beam.
         primary_beam_hdu
             The HDU index in the primary beam .fits file from which it is loaded.
+        setup
+            The compute setup recorded on the dataset (see `Interferometer`); it decides the transformer and
+            supersedes the >10,000-visibility DFT check. Call `apply_setup()` to attach its sparse operator.
 
         Returns
         -------
@@ -304,6 +332,7 @@ class Interferometer(AbstractDataset):
             transformer_class=transformer_class,
             raise_error_dft_visibilities_limit=raise_error_dft_visibilities_limit,
             primary_beam=primary_beam,
+            setup=setup,
         )
 
     @classmethod
@@ -691,6 +720,7 @@ class Interferometer(AbstractDataset):
                 uv_wavelengths=self.uv_wavelengths,
                 transformer_class=lambda uv_wavelengths, real_space_mask: self.transformer,
                 primary_beam=self.primary_beam,
+                setup=self.setup,
             )
 
             pooling_record.log()
@@ -790,6 +820,7 @@ class Interferometer(AbstractDataset):
             transformer_class=lambda uv_wavelengths, real_space_mask: self.transformer,
             sparse_operator=sparse_operator,
             primary_beam=self.primary_beam,
+            setup=self.setup,
         )
 
     def apply_sparse_operator_from_chunks(
@@ -959,7 +990,98 @@ class Interferometer(AbstractDataset):
             sparse_operator=sparse_operator,
             sparse_terms=terms,
             primary_beam=self.primary_beam,
+            setup=self.setup,
         )
+
+    def apply_setup(
+        self,
+        setup: Union[Setup, str],
+        **sparse_operator_kwargs,
+    ) -> "Interferometer":
+        """
+        Apply a compute setup to the dataset, attaching the transformer and operator it names.
+
+        - A `transformer="nufft"` setup uses `TransformerNUFFT` (the dataset is rebuilt with it
+          if its transformer is not already one). Other transformer tokens (`"wtilde"`) keep the
+          dataset's transformer.
+        - An operator `"sparse"` setup attaches the `InterferometerSparseOperator` via
+          `apply_sparse_operator()`. One operator serves both backends: the inversion applies it
+          with its `xp`, so a `numba` setup takes the numba `direct_conv` route under NumPy
+          (where the route's cost model picks it) and a `jax` setup the JAX FFT route. The
+          operator is built with `apply_sparse_operator`'s default `use_jax=False` builder
+          (`finufft`, which imports no JAX), which computes the same operator for both.
+        - Any other operator (`"dense"`, `"na"`) attaches no sparse operator, dropping an
+          attached one.
+
+        A setup supersedes the >10,000-visibility DFT check of the constructor: the setup
+        decides the transformer, so applying one never raises it.
+
+        The setup is stored as `dataset.setup` and carried by `apply_sparse_operator` and
+        `apply_sparse_operator_from_chunks`. The inversion factory checks the operator against
+        the setup and the array backend, and raises on a mismatch.
+
+        This method is idempotent: if the transformer and operator already match the setup,
+        nothing is rebuilt (the dataset is returned as is, or as a shallow copy recording the
+        new setup when its provenance differs).
+
+        Parameters
+        ----------
+        setup
+            The `aa.Setup`, or a setup_id string such as `"numba_cpu_sparse_fp64_wtilde"`.
+        sparse_operator_kwargs
+            Passed to `apply_sparse_operator()` when a sparse operator is built (e.g.
+            `batch_size`, `pool_noise_map=True`).
+
+        Returns
+        -------
+        Interferometer
+            The dataset with the setup applied.
+        """
+        setup = setup_from(setup)
+
+        needs_nufft = setup.transformer == "nufft" and not (
+            self.transformer is None or isinstance(self.transformer, TransformerNUFFT)
+        )
+        wants_sparse = setup.operator == "sparse"
+        has_sparse = self.sparse_operator is not None
+
+        if not needs_nufft and wants_sparse == has_sparse:
+            if self.setup == setup:
+                return self
+            dataset = copy.copy(self)
+            dataset.setup = setup
+            return dataset
+
+        self._require(
+            "apply_setup",
+            "data",
+            "noise_map",
+            "uv_wavelengths",
+        )
+
+        if needs_nufft:
+            transformer_class = TransformerNUFFT
+        else:
+            transformer_class = (
+                lambda uv_wavelengths, real_space_mask: self.transformer
+            )
+
+        dataset = Interferometer(
+            real_space_mask=self.real_space_mask,
+            data=self.data,
+            noise_map=self.noise_map,
+            uv_wavelengths=self.uv_wavelengths,
+            transformer_class=transformer_class,
+            sparse_operator=self.sparse_operator if wants_sparse else None,
+            sparse_terms=self.sparse_terms if wants_sparse else None,
+            primary_beam=self.primary_beam,
+            setup=setup,
+        )
+
+        if wants_sparse and dataset.sparse_operator is None:
+            return dataset.apply_sparse_operator(**sparse_operator_kwargs)
+
+        return dataset
 
     def psf_precision_operator_from(
         self,

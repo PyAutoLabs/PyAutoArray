@@ -8,6 +8,9 @@ import autoarray as aa
 from autoarray.inversion.inversion.imaging_numba.sparse import (
     InversionImagingSparseNumba,
 )
+from autoarray.inversion.inversion.interferometer_numba.sparse import (
+    InversionInterferometerSparseNumba,
+)
 
 
 def test__inversion_imaging__via_linear_obj_func_list(masked_imaging_7x7_no_blur):
@@ -985,3 +988,187 @@ def test__interferometer_route__fft_length_cost_penalises_awkward_lengths():
 
     # A power of two is the cheapest per element of its size class.
     assert per_element(512) < per_element(510)
+
+
+def _jnp():
+    return pytest.importorskip("jax.numpy")
+
+
+def test__setup_consistency__imaging_numba_operator_under_jax_raises(
+    masked_imaging_7x7_no_blur, rectangular_mapper_7x7_3x3
+):
+    jnp = _jnp()
+
+    dataset = masked_imaging_7x7_no_blur.apply_sparse_operator_cpu()
+
+    with pytest.raises(aa.exc.InversionException, match="SparseLinAlgImagingNumba"):
+        aa.Inversion(
+            dataset=dataset, linear_obj_list=[rectangular_mapper_7x7_3x3], xp=jnp
+        )
+
+
+def test__setup_consistency__imaging_jax_operator_under_numba_setup_raises(
+    masked_imaging_7x7_no_blur, rectangular_mapper_7x7_3x3
+):
+    pytest.importorskip("jax")  # the JAX ImagingSparseOperator needs jax
+
+    dataset = masked_imaging_7x7_no_blur.apply_setup(
+        setup="numba_cpu_sparse_fp64"
+    ).apply_sparse_operator()
+
+    with pytest.raises(aa.exc.InversionException, match="numba_cpu_sparse_fp64"):
+        aa.Inversion(dataset=dataset, linear_obj_list=[rectangular_mapper_7x7_3x3])
+
+
+def test__setup_consistency__imaging_numba_operator_under_jax_setup_raises(
+    masked_imaging_7x7_no_blur, rectangular_mapper_7x7_3x3
+):
+    pytest.importorskip("jax")  # the JAX ImagingSparseOperator needs jax
+
+    dataset = masked_imaging_7x7_no_blur.apply_setup(
+        setup="jax_cpu_sparse_fp64"
+    ).apply_sparse_operator_cpu()
+
+    with pytest.raises(aa.exc.InversionException, match="apply_setup"):
+        aa.Inversion(dataset=dataset, linear_obj_list=[rectangular_mapper_7x7_3x3])
+
+
+def test__setup_consistency__imaging_sparse_setup_without_operator_raises(
+    masked_imaging_7x7_no_blur, rectangular_mapper_7x7_3x3
+):
+    dataset = copy.copy(
+        masked_imaging_7x7_no_blur.apply_setup(setup="numba_cpu_sparse_fp64")
+    )
+    dataset.sparse_operator = None
+
+    with pytest.raises(aa.exc.InversionException, match="no sparse operator"):
+        aa.Inversion(dataset=dataset, linear_obj_list=[rectangular_mapper_7x7_3x3])
+
+
+def test__setup_consistency__imaging_dense_setup_with_operator_raises(
+    masked_imaging_7x7_no_blur, rectangular_mapper_7x7_3x3
+):
+    dataset = masked_imaging_7x7_no_blur.apply_setup(
+        setup="jax_gpu_dense_fp64"
+    ).apply_sparse_operator_cpu()
+
+    with pytest.raises(aa.exc.InversionException, match="jax_gpu_dense_fp64"):
+        aa.Inversion(dataset=dataset, linear_obj_list=[rectangular_mapper_7x7_3x3])
+
+
+def test__setup_consistency__imaging_matched_setups_route_as_before(
+    masked_imaging_7x7_no_blur, rectangular_mapper_7x7_3x3
+):
+    inversion = aa.Inversion(
+        dataset=masked_imaging_7x7_no_blur.apply_setup(setup="numba_cpu_sparse_fp64"),
+        linear_obj_list=[rectangular_mapper_7x7_3x3],
+    )
+
+    assert isinstance(inversion, InversionImagingSparseNumba)
+    assert inversion.log_det_curvature_reg_matrix_term == pytest.approx(
+        7.257175708246, 1.0e-4
+    )
+
+    inversion = aa.Inversion(
+        dataset=masked_imaging_7x7_no_blur.apply_setup(setup="jax_gpu_dense_fp64"),
+        linear_obj_list=[rectangular_mapper_7x7_3x3],
+    )
+
+    assert isinstance(inversion, aa.InversionImagingMapping)
+
+    pytest.importorskip("jax")  # the JAX ImagingSparseOperator needs jax
+
+    # A JAX operator applied with NumPy (e.g. visualization after a JAX fit) is legitimate.
+    inversion = aa.Inversion(
+        dataset=masked_imaging_7x7_no_blur.apply_setup(setup="jax_cpu_sparse_fp64"),
+        linear_obj_list=[rectangular_mapper_7x7_3x3],
+    )
+
+    assert isinstance(inversion, aa.InversionImagingSparse)
+
+    # A func-list-only inversion keeps the mapping formalism with a numba operator,
+    # even under JAX, since it never touches the operator.
+    jnp = _jnp()
+
+    grid = aa.Grid2D.from_mask(mask=masked_imaging_7x7_no_blur.mask)
+    linear_obj = aa.m.MockLinearObjFuncList(
+        parameters=1, grid=grid, mapping_matrix=np.full(fill_value=0.5, shape=(9, 1))
+    )
+
+    inversion = aa.Inversion(
+        dataset=masked_imaging_7x7_no_blur.apply_setup(setup="numba_cpu_sparse_fp64"),
+        linear_obj_list=[linear_obj],
+        xp=jnp,
+    )
+
+    assert isinstance(inversion, aa.InversionImagingMapping)
+
+
+def test__setup_consistency__interferometer_numba_setup_under_jax_raises(
+    interferometer_7_no_fft, rectangular_mapper_7x7_3x3
+):
+    jnp = _jnp()
+
+    dataset = interferometer_7_no_fft.apply_setup(setup="numba_cpu_sparse_fp64_wtilde")
+
+    with pytest.raises(aa.exc.InversionException, match="backend 'numba'"):
+        aa.Inversion(
+            dataset=dataset, linear_obj_list=[rectangular_mapper_7x7_3x3], xp=jnp
+        )
+
+
+def test__setup_consistency__interferometer_sparse_setup_without_operator_raises(
+    interferometer_7_no_fft, rectangular_mapper_7x7_3x3
+):
+    dataset = copy.copy(
+        interferometer_7_no_fft.apply_setup(setup="numba_cpu_sparse_fp64_wtilde")
+    )
+    dataset.sparse_operator = None
+
+    with pytest.raises(aa.exc.InversionException, match="no sparse operator"):
+        aa.Inversion(dataset=dataset, linear_obj_list=[rectangular_mapper_7x7_3x3])
+
+
+def test__setup_consistency__interferometer_dense_setup_with_operator_raises(
+    interferometer_7_no_fft, rectangular_mapper_7x7_3x3
+):
+    dataset = interferometer_7_no_fft.apply_setup(
+        setup="jax_cpu_dense_fp64_nufft"
+    ).apply_sparse_operator()
+
+    with pytest.raises(aa.exc.InversionException, match="jax_cpu_dense_fp64_nufft"):
+        aa.Inversion(dataset=dataset, linear_obj_list=[rectangular_mapper_7x7_3x3])
+
+
+def test__setup_consistency__interferometer_matched_setups_route_as_before(
+    interferometer_7_no_fft, rectangular_mapper_7x7_3x3
+):
+    inversion = aa.Inversion(
+        dataset=interferometer_7_no_fft.apply_setup(
+            setup="numba_cpu_sparse_fp64_wtilde"
+        ),
+        linear_obj_list=[rectangular_mapper_7x7_3x3],
+    )
+
+    assert isinstance(
+        inversion, (aa.InversionInterferometerSparse, InversionInterferometerSparseNumba)
+    )
+
+    inversion_mapping = aa.Inversion(
+        dataset=interferometer_7_no_fft,
+        linear_obj_list=[rectangular_mapper_7x7_3x3],
+    )
+
+    assert inversion.log_det_curvature_reg_matrix_term == pytest.approx(
+        inversion_mapping.log_det_curvature_reg_matrix_term, 1.0e-4
+    )
+
+    # A jax setup applied with NumPy is legitimate.
+    inversion = aa.Inversion(
+        dataset=interferometer_7_no_fft.apply_setup(setup="jax_gpu_sparse_fp64_wtilde"),
+        linear_obj_list=[rectangular_mapper_7x7_3x3],
+    )
+
+    assert inversion.log_det_curvature_reg_matrix_term == pytest.approx(
+        inversion_mapping.log_det_curvature_reg_matrix_term, 1.0e-4
+    )

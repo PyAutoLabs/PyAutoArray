@@ -40,6 +40,9 @@ from autoarray.inversion.inversion.imaging_numba.sparse import (
 from autoarray.inversion.inversion.imaging.sparse import (
     InversionImagingSparse,
 )
+from autoarray.inversion.inversion.imaging.inversion_imaging_util import (
+    ImagingSparseOperator,
+)
 from autoarray.settings import Settings
 from autoarray.structures.arrays.uniform_2d import Array2D
 
@@ -96,6 +99,141 @@ def inversion_from(
     )
 
 
+def _setup_mismatch_exception(message: str, setup=None) -> exc.InversionException:
+    """
+    The `InversionException` raised when a dataset's operator, its `setup` and the array
+    backend `xp` of an inversion disagree, ending with how to fix it.
+    """
+    fix = (
+        f"call `dataset = dataset.apply_setup({setup.setup_id!r})` so the attached operator "
+        f"matches the setup, or apply the setup whose backend you are running"
+        if setup is not None
+        else "call `dataset.apply_setup(setup)` with the setup you are running, or attach "
+        "the operator of the backend you are running"
+    )
+
+    return exc.InversionException(
+        f"Operator / setup / backend mismatch: {message}. The inversion refuses to silently "
+        f"take another linear algebra path. To fix this, {fix}."
+    )
+
+
+def _xp_name(xp) -> str:
+    return "numpy" if xp is np else getattr(xp, "__name__", str(xp))
+
+
+def _check_imaging_setup_consistency(dataset, xp, use_sparse_operator: bool):
+    """
+    Raise an `InversionException` when an imaging dataset's sparse operator, its `setup` and
+    the array backend `xp` disagree, rather than silently taking another path.
+
+    The mismatches are:
+
+    - a numba `SparseLinAlgImagingNumba` operator used by an inversion running on JAX (it
+      has no JAX path);
+    - an operator of the wrong backend for `dataset.setup` (a JAX `ImagingSparseOperator`
+      under a `numba` setup, or a numba operator under a `jax` setup);
+    - a `sparse` setup with no sparse operator attached;
+    - a non-sparse (`dense`, `na`) setup with a sparse operator attached.
+
+    A JAX `ImagingSparseOperator` used with `xp=np` is not a mismatch (it runs on NumPy,
+    e.g. for visualization after a JAX fit), nor is a numba operator on a func-list-only
+    inversion, which deliberately uses the mapping formalism and never touches it.
+    """
+    sparse_operator = getattr(dataset, "sparse_operator", None)
+    setup = getattr(dataset, "setup", None)
+
+    is_numba_operator = isinstance(sparse_operator, SparseLinAlgImagingNumba)
+    is_jax_operator = isinstance(sparse_operator, ImagingSparseOperator)
+
+    if is_numba_operator and use_sparse_operator and xp is not np:
+        raise _setup_mismatch_exception(
+            f"the imaging dataset carries the numba sparse operator "
+            f"(SparseLinAlgImagingNumba, from apply_sparse_operator_cpu) but the inversion "
+            f"runs on {_xp_name(xp)!r}, and the numba operator has no JAX path"
+            + (f" (dataset.setup is {setup.setup_id!r})" if setup is not None else ""),
+            setup=setup,
+        )
+
+    if setup is None:
+        return
+
+    if setup.operator == "sparse":
+        if sparse_operator is None:
+            raise _setup_mismatch_exception(
+                f"dataset.setup is {setup.setup_id!r} (operator 'sparse') but the imaging "
+                f"dataset has no sparse operator attached",
+                setup=setup,
+            )
+        if setup.backend == "numba" and is_jax_operator:
+            raise _setup_mismatch_exception(
+                f"dataset.setup is {setup.setup_id!r} (backend 'numba') but the imaging "
+                f"dataset carries the JAX sparse operator (ImagingSparseOperator, from "
+                f"apply_sparse_operator)",
+                setup=setup,
+            )
+        if setup.backend == "jax" and is_numba_operator:
+            raise _setup_mismatch_exception(
+                f"dataset.setup is {setup.setup_id!r} (backend 'jax') but the imaging "
+                f"dataset carries the numba sparse operator (SparseLinAlgImagingNumba, from "
+                f"apply_sparse_operator_cpu)",
+                setup=setup,
+            )
+    elif sparse_operator is not None:
+        raise _setup_mismatch_exception(
+            f"dataset.setup is {setup.setup_id!r} (operator {setup.operator!r}) but the "
+            f"imaging dataset carries a sparse operator "
+            f"({type(sparse_operator).__name__})",
+            setup=setup,
+        )
+
+
+def _check_interferometer_setup_consistency(dataset, xp):
+    """
+    Raise an `InversionException` when an interferometer dataset's sparse operator, its
+    `setup` and the array backend `xp` disagree, rather than silently taking another path.
+
+    The interferometer has one `InterferometerSparseOperator` for both backends (the
+    inversion applies it with its `xp`), so the mismatches are:
+
+    - a `numba` setup with an inversion running on JAX (which would silently take the JAX
+      FFT route instead of the numba one);
+    - a `sparse` setup with no sparse operator attached;
+    - a non-sparse (`dense`, `na`) setup with a sparse operator attached.
+
+    A `jax` setup with `xp=np` is not a mismatch (the operator runs on NumPy, e.g. for
+    visualization after a JAX fit).
+    """
+    setup = getattr(dataset, "setup", None)
+
+    if setup is None:
+        return
+
+    sparse_operator = getattr(dataset, "sparse_operator", None)
+
+    if setup.backend == "numba" and xp is not np:
+        raise _setup_mismatch_exception(
+            f"dataset.setup is {setup.setup_id!r} (backend 'numba') but the interferometer "
+            f"inversion runs on {_xp_name(xp)!r}",
+            setup=setup,
+        )
+
+    if setup.operator == "sparse" and sparse_operator is None:
+        raise _setup_mismatch_exception(
+            f"dataset.setup is {setup.setup_id!r} (operator 'sparse') but the "
+            f"interferometer dataset has no sparse operator attached",
+            setup=setup,
+        )
+
+    if setup.operator != "sparse" and sparse_operator is not None:
+        raise _setup_mismatch_exception(
+            f"dataset.setup is {setup.setup_id!r} (operator {setup.operator!r}) but the "
+            f"interferometer dataset carries a sparse operator "
+            f"({type(sparse_operator).__name__})",
+            setup=setup,
+        )
+
+
 def inversion_imaging_from(
     dataset,
     linear_obj_list: List[LinearObj],
@@ -119,6 +257,9 @@ def inversion_imaging_from(
 
     This factory inspects the type of dataset input and settings of the inversion in order to create the appropriate
     inversion object.
+
+    Before routing, the dataset's sparse operator is checked against its `setup` and the array backend `xp`, and an
+    `InversionException` is raised on a mismatch (see `_check_imaging_setup_consistency`).
 
     Parameters
     ----------
@@ -146,6 +287,10 @@ def inversion_imaging_from(
         for linear_obj in linear_obj_list
     ):
         use_sparse_operator = False
+
+    _check_imaging_setup_consistency(
+        dataset=dataset, xp=xp, use_sparse_operator=use_sparse_operator
+    )
 
     if dataset.sparse_operator is not None and use_sparse_operator:
 
@@ -209,6 +354,9 @@ def inversion_interferometer_from(
     This factory inspects the type of dataset input and settings of the inversion in order to create the appropriate
     inversion object.
 
+    Before routing, the dataset's sparse operator is checked against its `setup` and the array backend `xp`, and an
+    `InversionException` is raised on a mismatch (see `_check_interferometer_setup_consistency`).
+
     Parameters
     ----------
     dataset
@@ -231,6 +379,8 @@ def inversion_interferometer_from(
     route_is_matrix_free = (
         settings is not None and settings.interferometer_route == "matrix_free"
     )
+
+    _check_interferometer_setup_consistency(dataset=dataset, xp=xp)
 
     if dataset.sparse_operator is not None:
 
