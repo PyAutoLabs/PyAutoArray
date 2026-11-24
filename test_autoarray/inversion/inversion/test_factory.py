@@ -1010,6 +1010,8 @@ def test__setup_consistency__imaging_numba_operator_under_jax_raises(
 def test__setup_consistency__imaging_jax_operator_under_numba_setup_raises(
     masked_imaging_7x7_no_blur, rectangular_mapper_7x7_3x3
 ):
+    pytest.importorskip("jax")  # the JAX ImagingSparseOperator needs jax
+
     dataset = masked_imaging_7x7_no_blur.apply_setup(
         setup="numba_cpu_sparse_fp64"
     ).apply_sparse_operator()
@@ -1021,6 +1023,8 @@ def test__setup_consistency__imaging_jax_operator_under_numba_setup_raises(
 def test__setup_consistency__imaging_numba_operator_under_jax_setup_raises(
     masked_imaging_7x7_no_blur, rectangular_mapper_7x7_3x3
 ):
+    pytest.importorskip("jax")  # the JAX ImagingSparseOperator needs jax
+
     dataset = masked_imaging_7x7_no_blur.apply_setup(
         setup="jax_cpu_sparse_fp64"
     ).apply_sparse_operator_cpu()
@@ -1071,6 +1075,8 @@ def test__setup_consistency__imaging_matched_setups_route_as_before(
     )
 
     assert isinstance(inversion, aa.InversionImagingMapping)
+
+    pytest.importorskip("jax")  # the JAX ImagingSparseOperator needs jax
 
     # A JAX operator applied with NumPy (e.g. visualization after a JAX fit) is legitimate.
     inversion = aa.Inversion(

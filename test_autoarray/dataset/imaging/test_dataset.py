@@ -612,6 +612,8 @@ def test__apply_setup__sparse_numba_and_jax_attach_their_operator(masked_imaging
     assert isinstance(dataset.sparse_operator, SparseLinAlgImagingNumba)
     assert dataset.setup == aa.Setup.from_setup_id("numba_cpu_sparse_fp64")
 
+    pytest.importorskip("jax")  # the JAX ImagingSparseOperator needs jax
+
     dataset = masked_imaging_7x7.apply_setup(
         setup=aa.Setup.from_setup_id("jax_cpu_sparse_fp64")
     )
@@ -706,6 +708,8 @@ def test__apply_setup__survives_apply_mask_noise_scaling_and_over_sampling(
 
 
 def test__apply_setup__sparse_operator_builders_carry_setup(masked_imaging_7x7):
+    pytest.importorskip("jax")  # the JAX ImagingSparseOperator needs jax
+
     dataset = masked_imaging_7x7.apply_setup(setup="jax_gpu_dense_fp64")
 
     assert dataset.apply_sparse_operator_cpu().setup == dataset.setup
