@@ -29,6 +29,7 @@ class Settings:
         certified_fallback: Optional[str] = None,
         certified_tau_rel: Optional[float] = None,
         nnls_preconditioning_no_mapper: Optional[str] = None,
+        lazy_sparse_operator: Optional[str] = None,
     ):
         """
         The settings of an Inversion, customizing how a linear set of equations are solved for.
@@ -274,6 +275,17 @@ class Settings:
             Inversions containing a `Mapper` always use ``"jacobi"``
             (`AbstractInversion.positive_only_preconditioning_used` records the decision). The NumPy path always
             runs fnnls and ignores this.
+        lazy_sparse_operator
+            Whether a dataset builds its sparse operator lazily, on the first NumPy pixelized fit that
+            needs one, when none is attached (`Imaging.sparse_operator_for` /
+            `Interferometer.sparse_operator_for`). `None` (default) reads the packaged value ``"off"``.
+
+            - ``"off"`` (default) -- nothing is built; a dataset without an attached operator takes the
+              dense mapping-matrix route, as before.
+            - ``"auto"`` -- the dataset builds the numba sparse operator (imaging) or the NUFFT w-tilde
+              operator (interferometer) once, caches it privately and reuses it. `PYAUTO_SETUP=auto` also
+              turns this on, unless this argument is given explicitly (see
+              `autoarray.dataset.lazy_operator.lazy_sparse_operator_enabled`).
         """
         self.use_mixed_precision = use_mixed_precision
         self.nnls_solver_tol = nnls_solver_tol
@@ -300,6 +312,7 @@ class Settings:
         self._certified_fallback = certified_fallback
         self._certified_tau_rel = certified_tau_rel
         self._nnls_preconditioning_no_mapper = nnls_preconditioning_no_mapper
+        self._lazy_sparse_operator = lazy_sparse_operator
 
         # Validate explicit values eagerly, so a typo fails at construction rather than deep inside a fit.
         if positive_only_solver is not None:
@@ -312,6 +325,8 @@ class Settings:
             self.interferometer_route
         if interferometer_direct_conv_symmetric_max_work_fraction is not None:
             self.interferometer_direct_conv_symmetric_max_work_fraction
+        if lazy_sparse_operator is not None:
+            self.lazy_sparse_operator
 
     @property
     def use_positive_only_solver(self):
@@ -518,6 +533,30 @@ class Settings:
                 "interferometer_direct_conv_symmetric_max_work_fraction="
                 f"{value!r} is invalid; expected a non-negative number (0 disables the "
                 "symmetric kernel)."
+            )
+
+        return value
+
+    @property
+    def lazy_sparse_operator(self) -> str:
+        """
+        The lazy sparse operator policy: ``"off"`` (default) or ``"auto"``.
+
+        See the constructor docstring. YAML 1.1 reads an unquoted ``off`` / ``on`` as a boolean, so
+        `False` is accepted as ``"off"`` and `True` as ``"auto"``; `None` means the default.
+        """
+        value = self._lazy_sparse_operator
+        if value is None:
+            value = self._inversion_config_value("lazy_sparse_operator", "off")
+
+        if value is None or value is False:
+            value = "off"
+        elif value is True:
+            value = "auto"
+
+        if value not in ("off", "auto"):
+            raise ValueError(
+                f"lazy_sparse_operator={value!r} is invalid; expected 'off' or 'auto'."
             )
 
         return value
