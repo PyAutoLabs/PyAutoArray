@@ -264,6 +264,10 @@ class AbstractDataset:
         """
         dataset = copy.copy(self)
 
+        # A lazily built sparse operator (see `Imaging.sparse_operator_for`) describes the
+        # untrimmed mask, so it is not carried.
+        dataset._lazy_sparse_operator = None
+
         dataset.data = dataset.data.trimmed_after_convolution_from(
             kernel_shape=kernel_shape
         )

@@ -1,5 +1,6 @@
 import copy
 import logging
+import time
 import numpy as np
 from pathlib import Path
 from typing import Optional, Union
@@ -296,6 +297,10 @@ class Imaging(AbstractDataset):
 
         self.sparse_operator = sparse_operator
         self.setup = setup_from(setup)
+
+        # The operator `sparse_operator_for` built lazily, if any; private, so it never changes
+        # what an attached `sparse_operator` means.
+        self._lazy_sparse_operator = None
 
     @classmethod
     def from_fits(
@@ -619,8 +624,8 @@ class Imaging(AbstractDataset):
         This function resets the cached properties so that the new over sampling is used in the grid and grid
         pixelization.
 
-        The `noise_covariance_matrix`, any attached `sparse_operator` and the `setup` are carried over, as none
-        depends on the over sampling (the sparse operator depends only on the noise-map, PSF kernel and mask). This
+        The `noise_covariance_matrix`, any attached `sparse_operator`, the `setup` and any lazily built sparse
+        operator (see `sparse_operator_for()`) are carried over, as none depends on the over sampling (the sparse operator depends only on the noise-map, PSF kernel and mask). This
         means `apply_sparse_operator()` / `apply_sparse_operator_cpu()` / `apply_setup()` may be called before or
         after this method.
 
@@ -649,6 +654,8 @@ class Imaging(AbstractDataset):
             sparse_operator=self.sparse_operator,
             setup=self.setup,
         )
+
+        dataset._lazy_sparse_operator = getattr(self, "_lazy_sparse_operator", None)
 
         return dataset
 
@@ -800,6 +807,99 @@ class Imaging(AbstractDataset):
             setup=self.setup,
         )
 
+    def sparse_operator_for(self, xp=np, needs_operator: bool = True, settings=None):
+        """
+        The sparse operator a fit of this dataset should use: the attached `sparse_operator` if
+        there is one, otherwise (with the lazy policy on) the numba `SparseLinAlgImagingNumba`
+        operator, built once on first use and cached privately on this dataset.
+
+        This lets calculations outside a model-fit -- a plain `FitImaging(dataset, ...)`, an
+        aggregator reload, `analysis.fit_from(...)` before a search -- use the sparse operator
+        modeling attaches eagerly (via `apply_setup()`), instead of the slow, memory-heavy dense
+        mapping-matrix route. The policy is off by default (see
+        `autoarray.dataset.lazy_operator.lazy_sparse_operator_enabled`), in which case this
+        returns the attached operator or `None`, exactly as before.
+
+        Nothing is built, and `None` is returned, when `needs_operator` is False, the policy is
+        off, `xp` is not NumPy or the noise-map is a JAX tracer, or the dataset has an explicit
+        non-sparse (e.g. dense) setup. Inside a multiprocessing worker a cached operator is
+        returned but none is built (workers inherit the parent's cache, as PyAutoFit evaluates one
+        likelihood before forking). The build is also skipped when the dataset has no PSF, the PSF
+        is oversampled (`convolve_over_sample_size > 1`, which `apply_sparse_operator_cpu()`
+        rejects) or numba is not installed.
+
+        The cache is carried by `apply_over_sampling()` and dropped by `apply_mask()`,
+        `apply_noise_scaling()` and `apply_setup()`, which change the mask or noise-map or attach
+        their own operator.
+
+        Parameters
+        ----------
+        xp
+            The array module of the fit (`numpy` or `jax.numpy`).
+        needs_operator
+            Whether the fit has a pixelization, i.e. would use a sparse operator at all (False
+            for, e.g., an MGE-only fit).
+        settings
+            The `Settings` of the fit, whose `lazy_sparse_operator` decides the policy; `None`
+            reads the config.
+
+        Returns
+        -------
+        The attached or lazily built sparse operator, or `None`.
+        """
+        if self.sparse_operator is not None:
+            return self.sparse_operator
+
+        from autoarray.dataset import lazy_operator
+
+        reason = lazy_operator.lazy_build_blocked_reason(
+            dataset=self, xp=xp, needs_operator=needs_operator, settings=settings
+        )
+
+        if reason is not None:
+            return None
+
+        # `getattr`: a dataset unpickled from before this attribute existed has none.
+        cached = getattr(self, "_lazy_sparse_operator", None)
+
+        if cached is not None:
+            return cached
+
+        if lazy_operator.in_worker_process():
+            return None
+
+        if self.psf is None:
+            logger.debug(
+                "INVERSION - lazy sparse operator skipped: the dataset has no PSF."
+            )
+            return None
+
+        if self.psf.convolve_over_sample_size > 1:
+            logger.debug(
+                "INVERSION - lazy sparse operator skipped: the PSF is oversampled "
+                "(convolve_over_sample_size > 1)."
+            )
+            return None
+
+        try:
+            import numba  # noqa: F401
+        except ModuleNotFoundError:
+            logger.debug(
+                "INVERSION - lazy sparse operator skipped: numba is not installed."
+            )
+            return None
+
+        start = time.perf_counter()
+
+        self._lazy_sparse_operator = self.apply_sparse_operator_cpu().sparse_operator
+
+        logger.info(
+            f"INVERSION - built numba sparse operator ({self.mask.pixels_in_mask} pixels) "
+            f"in {time.perf_counter() - start:.2f} s"
+        )
+
+        return self._lazy_sparse_operator
+
     def _sparse_operator_matches(self, setup: Setup) -> bool:
         """
         Whether the attached `sparse_operator` is the one `setup` names: a JAX
@@ -871,6 +971,7 @@ class Imaging(AbstractDataset):
                 return self
             dataset = copy.copy(self)
             dataset.setup = setup
+            dataset._lazy_sparse_operator = None
             return dataset
 
         if setup.operator == "sparse":

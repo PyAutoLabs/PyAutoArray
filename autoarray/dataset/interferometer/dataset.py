@@ -1,6 +1,7 @@
 import copy
 import dataclasses
 import logging
+import time
 import warnings
 import numpy as np
 from typing import Optional, Tuple, Union
@@ -207,6 +208,12 @@ class Interferometer(AbstractDataset):
 
         self.sparse_operator = sparse_operator
         self.sparse_terms = sparse_terms
+
+        # The operator `sparse_operator_for` built lazily, if any, and whether it has warned that
+        # the real and imaginary noise differ; private, so they never change what an attached
+        # `sparse_operator` means.
+        self._lazy_sparse_operator = None
+        self._lazy_sparse_operator_noise_warned = False
 
         if sparse_operator is not None and self.primary_beam_slim is not None:
             if getattr(sparse_operator, "primary_beam_slim", None) is None:
@@ -1050,6 +1057,7 @@ class Interferometer(AbstractDataset):
                 return self
             dataset = copy.copy(self)
             dataset.setup = setup
+            dataset._lazy_sparse_operator = None
             return dataset
 
         self._require(
@@ -1082,6 +1090,135 @@ class Interferometer(AbstractDataset):
             return dataset.apply_sparse_operator(**sparse_operator_kwargs)
 
         return dataset
+
+    def _lazy_chunks(self, chunk_visibilities: int):
+        """
+        This dataset's own visibilities as `(uv_wavelengths, data, noise_map)` chunks of at most
+        `chunk_visibilities` visibilities, in the form `apply_sparse_operator_from_chunks`
+        expects (complex `(K,)` data and noise-map). Together they are exactly this dataset's
+        visibilities, so the accumulated operator is self-consistent with the retained arrays.
+        """
+        uv_wavelengths = np.asarray(self.uv_wavelengths)
+        data = np.asarray(self.data.array, dtype=np.complex128)
+        noise_map = np.asarray(self.noise_map.array, dtype=np.complex128)
+
+        for start in range(0, uv_wavelengths.shape[0], chunk_visibilities):
+            stop = start + chunk_visibilities
+            yield uv_wavelengths[start:stop], data[start:stop], noise_map[start:stop]
+
+    def sparse_operator_for(self, xp=np, needs_operator: bool = True, settings=None):
+        """
+        The sparse operator a fit of this dataset should use: the attached `sparse_operator` if
+        there is one, otherwise (with the lazy policy on) the `InterferometerSparseOperator`
+        (w-tilde) built by the NUFFT builder, once on first use and cached privately on this
+        dataset.
+
+        This lets calculations outside a model-fit -- a plain `FitInterferometer(dataset, ...)`,
+        an aggregator reload, `analysis.fit_from(...)` before a search -- use the sparse operator
+        modeling attaches eagerly (via `apply_setup()`), instead of the slow, memory-heavy dense
+        mapping-matrix route. The policy is off by default (see
+        `autoarray.dataset.lazy_operator.lazy_sparse_operator_enabled`), in which case this
+        returns the attached operator or `None`, exactly as before.
+
+        The build uses this dataset's own data and noise-map, as `apply_sparse_operator()` does
+        (`method="nufft"`, `use_jax=False`, so it never imports JAX). Above the visibility budget
+        (`lazy_operator.visibility_budget()`, 1e6 by default) it accumulates the same operator
+        chunk by chunk via `apply_sparse_operator_from_chunks`, bounding the NUFFT spreader's
+        gather buffer (~K x nspread^2 complex128: ~3 GB at 1e6 visibilities, ~15 GB at 5e6).
+
+        Nothing is built, and `None` is returned, when `needs_operator` is False, the policy is
+        off, `xp` is not NumPy or the noise-map is a JAX tracer, or the dataset has an explicit
+        non-sparse (e.g. dense) setup. Inside a multiprocessing worker a cached operator is
+        returned but none is built (workers inherit the parent's cache, as PyAutoFit evaluates one
+        likelihood before forking). If the real and imaginary noise of any visibility differ the
+        build is skipped with a one-time warning: the sparse operator assumes they are equal, and
+        the noise-map is never pooled silently (use `apply_sparse_operator(pool_noise_map=True)`
+        explicitly to pool it). An array-free dataset (no visibilities or transformer) is skipped.
+
+        Parameters
+        ----------
+        xp
+            The array module of the fit (`numpy` or `jax.numpy`).
+        needs_operator
+            Whether the fit has a pixelization, i.e. would use a sparse operator at all (False
+            for, e.g., an MGE-only fit).
+        settings
+            The `Settings` of the fit, whose `lazy_sparse_operator` decides the policy; `None`
+            reads the config.
+
+        Returns
+        -------
+        The attached or lazily built sparse operator, or `None`.
+        """
+        if self.sparse_operator is not None:
+            return self.sparse_operator
+
+        from autoarray.dataset import lazy_operator
+
+        reason = lazy_operator.lazy_build_blocked_reason(
+            dataset=self, xp=xp, needs_operator=needs_operator, settings=settings
+        )
+
+        if reason is not None:
+            return None
+
+        # `getattr`: a dataset unpickled from before this attribute existed has none.
+        cached = getattr(self, "_lazy_sparse_operator", None)
+
+        if cached is not None:
+            return cached
+
+        if lazy_operator.in_worker_process():
+            return None
+
+        if (
+            self.data is None
+            or self.noise_map is None
+            or self.uv_wavelengths is None
+            or self.transformer is None
+        ):
+            logger.debug(
+                "INVERSION - lazy sparse operator skipped: the dataset is array-free."
+            )
+            return None
+
+        try:
+            inversion_interferometer_util.check_noise_map_real_imag_equal(
+                self.noise_map
+            )
+        except exc.DatasetException:
+            if not getattr(self, "_lazy_sparse_operator_noise_warned", False):
+                self._lazy_sparse_operator_noise_warned = True
+                warnings.warn(
+                    "The real and imaginary noise of this Interferometer's visibilities differ, "
+                    "so no sparse operator is built lazily (it assumes they are equal) and fits "
+                    "take the dense mapping route. The noise-map is never pooled silently: to use "
+                    "the sparse operator, attach it explicitly with "
+                    "`dataset.apply_sparse_operator(pool_noise_map=True)`."
+                )
+            return None
+
+        n_vis = self.uv_wavelengths.shape[0]
+        chunked = n_vis > lazy_operator.visibility_budget()
+
+        start = time.perf_counter()
+
+        if chunked:
+            dataset = self.apply_sparse_operator_from_chunks(
+                self._lazy_chunks(chunk_visibilities=lazy_operator.CHUNK_VISIBILITIES)
+            )
+        else:
+            dataset = self.apply_sparse_operator()
+
+        self._lazy_sparse_operator = dataset.sparse_operator
+
+        logger.info(
+            f"INVERSION - built NUFFT w-tilde sparse operator ({n_vis} visibilities, "
+            f"{self.real_space_mask.pixels_in_mask} pixels"
+            f"{', chunked' if chunked else ''}) in {time.perf_counter() - start:.2f} s"
+        )
+
+        return self._lazy_sparse_operator
 
     def psf_precision_operator_from(
         self,
