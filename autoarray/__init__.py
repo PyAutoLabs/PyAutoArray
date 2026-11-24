@@ -28,6 +28,7 @@ from .inversion.mesh import mesh
 from .inversion.mesh import image_mesh
 from .inversion import regularization as reg
 from .settings import Settings
+from .setup import Setup
 from .inversion.inversion.abstract import AbstractInversion
 from .preloads import AbstractPreloads
 from .preloads import PreloadsImaging
