@@ -1213,9 +1213,10 @@ class Interferometer(AbstractDataset):
         self._lazy_sparse_operator = dataset.sparse_operator
 
         logger.info(
-            f"INVERSION - built NUFFT w-tilde sparse operator ({n_vis} visibilities, "
-            f"{self.real_space_mask.pixels_in_mask} pixels"
-            f"{', chunked' if chunked else ''}) in {time.perf_counter() - start:.2f} s"
+            f"Automatic compute setup: built the w-tilde sparse operator for this dataset "
+            f"({n_vis} visibilities{', chunked' if chunked else ''}, "
+            f"{time.perf_counter() - start:.2f} s; cached; "
+            f"{lazy_operator.lazy_sparse_operator_trigger(settings)})"
         )
 
         return self._lazy_sparse_operator

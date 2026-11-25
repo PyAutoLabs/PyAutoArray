@@ -894,8 +894,9 @@ class Imaging(AbstractDataset):
         self._lazy_sparse_operator = self.apply_sparse_operator_cpu().sparse_operator
 
         logger.info(
-            f"INVERSION - built numba sparse operator ({self.mask.pixels_in_mask} pixels) "
-            f"in {time.perf_counter() - start:.2f} s"
+            f"Automatic compute setup: built the numba sparse operator for this dataset "
+            f"({self.mask.pixels_in_mask} image pixels, {time.perf_counter() - start:.2f} s; "
+            f"cached; {lazy_operator.lazy_sparse_operator_trigger(settings)})"
         )
 
         return self._lazy_sparse_operator
