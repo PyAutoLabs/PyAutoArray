@@ -1,4 +1,5 @@
 import logging
+import re
 
 import numpy as np
 import pytest
@@ -163,10 +164,16 @@ def test__imaging__policy_on__built_once_cached_reused_and_logged(
         )
 
     build_lines = [
-        r.message for r in caplog.records if "built numba sparse operator" in r.message
+        r.message
+        for r in caplog.records
+        if r.message.startswith("Automatic compute setup: built")
     ]
     assert len(build_lines) == 1
-    assert "(9 pixels)" in build_lines[0]
+    assert re.fullmatch(
+        r"Automatic compute setup: built the numba sparse operator for this dataset "
+        r"\(9 image pixels, \d+\.\d\d s; cached; lazy_sparse_operator: auto\)",
+        build_lines[0],
+    ), build_lines[0]
 
     from autoarray.inversion.inversion.imaging_numba.inversion_imaging_numba_util import (
         SparseLinAlgImagingNumba,
@@ -187,7 +194,7 @@ def test__imaging__policy_on__built_once_cached_reused_and_logged(
             is operator
         )
 
-    assert not any("built numba" in r.message for r in caplog.records)
+    assert not any("Automatic compute setup" in r.message for r in caplog.records)
 
     _assert_imaging_operator_equal(
         operator, masked_imaging_7x7.apply_sparse_operator_cpu().sparse_operator
@@ -195,7 +202,7 @@ def test__imaging__policy_on__built_once_cached_reused_and_logged(
 
 
 def test__imaging__policy_on_via_config_and_pyauto_setup(
-    masked_imaging_7x7, monkeypatch
+    masked_imaging_7x7, monkeypatch, caplog
 ):
     pytest.importorskip("numba")
 
@@ -216,7 +223,15 @@ def test__imaging__policy_on_via_config_and_pyauto_setup(
     assert dataset.sparse_operator_for(xp=np, needs_operator=True) is None
 
     monkeypatch.setenv("PYAUTO_SETUP", "auto")
-    assert dataset.sparse_operator_for(xp=np, needs_operator=True) is not None
+    with caplog.at_level(logging.INFO, logger=IMAGING_LOGGER):
+        assert dataset.sparse_operator_for(xp=np, needs_operator=True) is not None
+
+    # The notice names what turned the lazy build on.
+    assert any(
+        r.message.startswith("Automatic compute setup: built the numba sparse operator")
+        and r.message.endswith("; cached; PYAUTO_SETUP=auto)")
+        for r in caplog.records
+    )
 
 
 def test__imaging__gates__return_none(masked_imaging_7x7, monkeypatch):
@@ -349,10 +364,14 @@ def test__interferometer__policy_on__built_once_cached_matches_apply_sparse_oper
     build_lines = [
         r.message
         for r in caplog.records
-        if "built NUFFT w-tilde sparse operator" in r.message
+        if r.message.startswith("Automatic compute setup: built")
     ]
     assert len(build_lines) == 1
-    assert "(7 visibilities, 9 pixels)" in build_lines[0]
+    assert re.fullmatch(
+        r"Automatic compute setup: built the w-tilde sparse operator for this dataset "
+        r"\(7 visibilities, \d+\.\d\d s; cached; lazy_sparse_operator: auto\)",
+        build_lines[0],
+    ), build_lines[0]
 
     assert isinstance(operator, aa.InterferometerSparseOperator)
     assert dataset.sparse_operator is None
@@ -389,7 +408,11 @@ def test__interferometer__above_budget__chunked_builder(
         operator = dataset.sparse_operator_for(xp=np, needs_operator=True, settings=ON)
 
     assert chunk_lengths == [3, 3, 1]
-    assert any(", chunked)" in r.message for r in caplog.records)
+    assert any(
+        "(7 visibilities, chunked, " in r.message
+        and r.message.startswith("Automatic compute setup: built the w-tilde")
+        for r in caplog.records
+    )
 
     _assert_interferometer_operator_close(
         operator, dataset.apply_sparse_operator().sparse_operator

@@ -68,6 +68,22 @@ def lazy_sparse_operator_enabled(settings=None) -> bool:
     return _pyauto_setup_is_auto()
 
 
+def lazy_sparse_operator_trigger(settings=None) -> str:
+    """
+    What turned the lazy sparse operator policy on, as the build notice says it:
+    ``"lazy_sparse_operator: auto"`` (an explicit `Settings` or `general.yaml`), or
+    ``"PYAUTO_SETUP=auto"`` when only the environment variable did.
+    """
+    from autoarray.settings import Settings
+
+    settings = settings if settings is not None else Settings()
+
+    if settings._lazy_sparse_operator is not None or settings.lazy_sparse_operator == "auto":
+        return "lazy_sparse_operator: auto"
+
+    return "PYAUTO_SETUP=auto" if _pyauto_setup_is_auto() else "lazy_sparse_operator: auto"
+
+
 def _pyauto_setup_is_auto() -> bool:
     """
     Whether `PYAUTO_SETUP` is explicitly set to ``auto``. An invalid value is left for
