@@ -232,8 +232,8 @@ class SimulatorImaging:
 
         # The simulator convolves the whole input image with no blurring image on
         # purpose: there is no data outside the array to supply one. Callers that
-        # need correct edges (e.g. the PyAutoGalaxy / PyAutoLens `via_tracer_from`
-        # simulators) pad the image by the PSF shape and trim it afterwards, so the
+        # need correct edges (e.g. PyAutoGalaxy `via_galaxies_from`, PyAutoLens
+        # `via_tracer_from`) pad the image by the PSF shape and trim it afterwards, so the
         # padding plays the role of the blurring region. The convolver's
         # "No blurring_image provided" warning is therefore not actionable here and
         # is silenced, while it still fires for every other convolver caller.
