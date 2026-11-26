@@ -13,6 +13,7 @@ IMAGING_LOGGER = "autoarray.dataset.imaging.dataset"
 INTERFEROMETER_LOGGER = "autoarray.dataset.interferometer.dataset"
 
 ON = aa.Settings(lazy_sparse_operator="auto")
+OFF = aa.Settings(lazy_sparse_operator="off")
 
 
 @pytest.fixture(autouse=True)
@@ -68,8 +69,9 @@ def _assert_interferometer_operator_close(operator, reference, rtol=1.0e-12):
 # Policy
 
 
-def test__settings__lazy_sparse_operator__default_off_and_validated():
-    assert aa.Settings().lazy_sparse_operator == "off"
+def test__settings__lazy_sparse_operator__default_auto_and_validated():
+    assert aa.Settings().lazy_sparse_operator == "auto"
+    assert aa.Settings(lazy_sparse_operator="off").lazy_sparse_operator == "off"
     assert aa.Settings(lazy_sparse_operator="auto").lazy_sparse_operator == "auto"
     assert aa.Settings(lazy_sparse_operator=False).lazy_sparse_operator == "off"
 
@@ -78,7 +80,8 @@ def test__settings__lazy_sparse_operator__default_off_and_validated():
 
 
 def test__policy__config_and_pyauto_setup(monkeypatch):
-    assert lazy_operator.lazy_sparse_operator_enabled() is False
+    # The packaged default is "auto".
+    assert lazy_operator.lazy_sparse_operator_enabled() is True
 
     monkeypatch.setattr(
         aa.Settings,
@@ -96,6 +99,14 @@ def test__policy__config_and_pyauto_setup(monkeypatch):
 
     monkeypatch.undo()
     monkeypatch.delenv("PYAUTO_SETUP", raising=False)
+
+    # With the config "off", `PYAUTO_SETUP=auto` turns the policy on.
+    monkeypatch.setattr(
+        aa.Settings,
+        "_inversion_config_value",
+        lambda self, key, default: "off" if key == "lazy_sparse_operator" else default,
+    )
+    assert lazy_operator.lazy_sparse_operator_enabled() is False
 
     for value, enabled in (
         ("auto", True),
@@ -148,7 +159,10 @@ def test__imaging__policy_off__none_and_nothing_built(masked_imaging_7x7, monkey
         lambda self: called.append(1),
     )
 
-    assert masked_imaging_7x7.sparse_operator_for(xp=np, needs_operator=True) is None
+    assert (
+        masked_imaging_7x7.sparse_operator_for(xp=np, needs_operator=True, settings=OFF)
+        is None
+    )
     assert masked_imaging_7x7._lazy_sparse_operator is None
     assert called == []
 
@@ -217,6 +231,13 @@ def test__imaging__policy_on_via_config_and_pyauto_setup(
 
     monkeypatch.undo()
     monkeypatch.delenv("PYAUTO_SETUP", raising=False)
+
+    # With the config "off", `PYAUTO_SETUP=auto` turns the lazy build on.
+    monkeypatch.setattr(
+        aa.Settings,
+        "_inversion_config_value",
+        lambda self, key, default: "off" if key == "lazy_sparse_operator" else default,
+    )
 
     dataset = masked_imaging_7x7.apply_over_sampling(over_sample_size_lp=2)
     dataset._lazy_sparse_operator = None
@@ -346,7 +367,7 @@ def test__interferometer__policy_off__none_and_nothing_built(mask_2d_7x7, monkey
         lambda self, **kwargs: called.append(1),
     )
 
-    assert dataset.sparse_operator_for(xp=np, needs_operator=True) is None
+    assert dataset.sparse_operator_for(xp=np, needs_operator=True, settings=OFF) is None
     assert dataset._lazy_sparse_operator is None
     assert called == []
 

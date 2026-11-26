@@ -816,9 +816,9 @@ class Imaging(AbstractDataset):
         This lets calculations outside a model-fit -- a plain `FitImaging(dataset, ...)`, an
         aggregator reload, `analysis.fit_from(...)` before a search -- use the sparse operator
         modeling attaches eagerly (via `apply_setup()`), instead of the slow, memory-heavy dense
-        mapping-matrix route. The policy is off by default (see
-        `autoarray.dataset.lazy_operator.lazy_sparse_operator_enabled`), in which case this
-        returns the attached operator or `None`, exactly as before.
+        mapping-matrix route. The policy is on by default (see
+        `autoarray.dataset.lazy_operator.lazy_sparse_operator_enabled`); switched off
+        (`lazy_sparse_operator: "off"`), this returns the attached operator or `None`.
 
         Nothing is built, and `None` is returned, when `needs_operator` is False, the policy is
         off, `xp` is not NumPy or the noise-map is a JAX tracer, or the dataset has an explicit
