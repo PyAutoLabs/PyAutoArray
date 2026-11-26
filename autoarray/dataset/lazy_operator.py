@@ -46,9 +46,9 @@ def lazy_sparse_operator_enabled(settings=None) -> bool:
     - An explicit `Settings(lazy_sparse_operator=...)` decides on its own (``"auto"`` on, ``"off"``
       off), so a script can switch the lazy build off whatever the environment says.
     - Otherwise the policy is on if `general.yaml` `inversion: lazy_sparse_operator` is ``"auto"``,
-      or the environment variable `PYAUTO_SETUP` is set to ``auto`` (parsed by
+      (the packaged default), or the environment variable `PYAUTO_SETUP` is set to ``auto`` (parsed by
       `autonerves.environment.parse_setup_intent`). An unset or empty `PYAUTO_SETUP` does not turn
-      it on: the default is off this release.
+      on a config of ``"off"``.
 
     Parameters
     ----------

@@ -1116,9 +1116,9 @@ class Interferometer(AbstractDataset):
         This lets calculations outside a model-fit -- a plain `FitInterferometer(dataset, ...)`,
         an aggregator reload, `analysis.fit_from(...)` before a search -- use the sparse operator
         modeling attaches eagerly (via `apply_setup()`), instead of the slow, memory-heavy dense
-        mapping-matrix route. The policy is off by default (see
-        `autoarray.dataset.lazy_operator.lazy_sparse_operator_enabled`), in which case this
-        returns the attached operator or `None`, exactly as before.
+        mapping-matrix route. The policy is on by default (see
+        `autoarray.dataset.lazy_operator.lazy_sparse_operator_enabled`); switched off
+        (`lazy_sparse_operator: "off"`), this returns the attached operator or `None`.
 
         The build uses this dataset's own data and noise-map, as `apply_sparse_operator()` does
         (`method="nufft"`, `use_jax=False`, so it never imports JAX). Above the visibility budget

@@ -278,13 +278,14 @@ class Settings:
         lazy_sparse_operator
             Whether a dataset builds its sparse operator lazily, on the first NumPy pixelized fit that
             needs one, when none is attached (`Imaging.sparse_operator_for` /
-            `Interferometer.sparse_operator_for`). `None` (default) reads the packaged value ``"off"``.
+            `Interferometer.sparse_operator_for`). `None` (default) reads the packaged value ``"auto"``.
 
-            - ``"off"`` (default) -- nothing is built; a dataset without an attached operator takes the
-              dense mapping-matrix route, as before.
-            - ``"auto"`` -- the dataset builds the numba sparse operator (imaging) or the NUFFT w-tilde
-              operator (interferometer) once, caches it privately and reuses it. `PYAUTO_SETUP=auto` also
-              turns this on, unless this argument is given explicitly (see
+            - ``"off"`` -- nothing is built; a dataset without an attached operator takes the dense
+              mapping-matrix route.
+            - ``"auto"`` (default) -- the dataset builds the numba sparse operator (imaging) or the NUFFT
+              w-tilde operator (interferometer) once, caches it privately and reuses it; never under JAX or
+              inside a multiprocessing worker. When the config is ``"off"``, `PYAUTO_SETUP=auto` turns it
+              on, unless this argument is given explicitly (see
               `autoarray.dataset.lazy_operator.lazy_sparse_operator_enabled`).
         """
         self.use_mixed_precision = use_mixed_precision
@@ -540,19 +541,19 @@ class Settings:
     @property
     def lazy_sparse_operator(self) -> str:
         """
-        The lazy sparse operator policy: ``"off"`` (default) or ``"auto"``.
+        The lazy sparse operator policy: ``"auto"`` (default) or ``"off"``.
 
         See the constructor docstring. YAML 1.1 reads an unquoted ``off`` / ``on`` as a boolean, so
         `False` is accepted as ``"off"`` and `True` as ``"auto"``; `None` means the default.
         """
         value = self._lazy_sparse_operator
         if value is None:
-            value = self._inversion_config_value("lazy_sparse_operator", "off")
+            value = self._inversion_config_value("lazy_sparse_operator", "auto")
 
-        if value is None or value is False:
-            value = "off"
-        elif value is True:
+        if value is None or value is True:
             value = "auto"
+        elif value is False:
+            value = "off"
 
         if value not in ("off", "auto"):
             raise ValueError(

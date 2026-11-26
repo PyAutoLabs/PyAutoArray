@@ -262,15 +262,15 @@ class InversionImagingSparseNumba(AbstractInversionImaging):
 
         for mapper in self.cls_list_from(cls=Mapper):
 
-            rows, cols, vals = mapper.sparse_triplets_data
-
             data_vector_mapper = (
                 inversion_imaging_numba_util.data_vector_via_psf_weighted_data_from(
                     psf_weighted_data=self.psf_weighted_data,
-                    rows=rows,
-                    cols=cols,
-                    vals=vals,
-                    S=mapper.params,
+                    data_to_pix_unique=np.array(
+                        mapper.unique_mappings.data_to_pix_unique
+                    ),
+                    data_weights=np.array(mapper.unique_mappings.data_weights),
+                    pix_lengths=np.array(mapper.unique_mappings.pix_lengths),
+                    pix_pixels=mapper.params,
                 )
             )
 
