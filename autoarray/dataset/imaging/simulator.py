@@ -231,31 +231,27 @@ class SimulatorImaging:
         )
 
         # The simulator convolves the whole input image with no blurring image on
-        # purpose: callers (e.g. the PyAutoGalaxy / PyAutoLens simulators) pass an
-        # image padded by the PSF shape and trim it afterwards, so the padding plays
-        # the role of the blurring region. The convolver's "No blurring_image
-        # provided" warning is therefore spurious here and is silenced, while it
-        # still fires for every other caller.
-        if image_is_convolved:
-            pass
-        elif self.use_real_space_convolution:
+        # purpose: there is no data outside the array to supply one. Callers that
+        # need correct edges (e.g. the PyAutoGalaxy / PyAutoLens `via_tracer_from`
+        # simulators) pad the image by the PSF shape and trim it afterwards, so the
+        # padding plays the role of the blurring region. The convolver's
+        # "No blurring_image provided" warning is therefore not actionable here and
+        # is silenced, while it still fires for every other convolver caller.
+        if not image_is_convolved:
             with warnings.catch_warnings():
                 warnings.filterwarnings(
                     "ignore", message="No blurring_image provided"
                 )
-                image = self.psf.convolved_image_via_real_space_from(
-                    image=image,
-                    blurring_image=None,
-                    xp=xp,
-                )
-        else:
-            with warnings.catch_warnings():
-                warnings.filterwarnings(
-                    "ignore", message="No blurring_image provided"
-                )
-                image = self.psf.convolved_image_from(
-                    image=image, blurring_image=None, xp=xp
-                )
+                if self.use_real_space_convolution:
+                    image = self.psf.convolved_image_via_real_space_from(
+                        image=image,
+                        blurring_image=None,
+                        xp=xp,
+                    )
+                else:
+                    image = self.psf.convolved_image_from(
+                        image=image, blurring_image=None, xp=xp
+                    )
 
         image = image + background_sky_map
 

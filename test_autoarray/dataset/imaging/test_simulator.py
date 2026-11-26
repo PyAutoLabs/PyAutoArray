@@ -387,8 +387,9 @@ def test__via_image_from__no_blurring_image_warning(
     assert not [w for w in caught if "No blurring_image" in str(w.message)]
 
 
+@pytest.mark.parametrize("use_real_space_convolution", [True, False])
 def test__convolver__no_blurring_image__still_warns_outside_simulator(
-    image_central_delta_3x3,
+    image_central_delta_3x3, use_real_space_convolution
 ):
     kernel = aa.Array2D.no_mask(
         values=np.array([[0.0, 1.0, 0.0], [1.0, 2.0, 1.0], [0.0, 1.0, 0.0]]),
@@ -396,7 +397,11 @@ def test__convolver__no_blurring_image__still_warns_outside_simulator(
     )
     psf = aa.Convolver(kernel=kernel)
 
+    convolve = (
+        psf.convolved_image_via_real_space_from
+        if use_real_space_convolution
+        else psf.convolved_image_from
+    )
+
     with pytest.warns(UserWarning, match="No blurring_image provided"):
-        psf.convolved_image_via_real_space_from(
-            image=image_central_delta_3x3, blurring_image=None
-        )
+        convolve(image=image_central_delta_3x3, blurring_image=None)
