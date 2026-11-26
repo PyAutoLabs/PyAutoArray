@@ -27,15 +27,15 @@ def test__soft_snr_from__values():
     )
 
 
-def test__adapt_image_soft_from__floor_and_blank():
+def test__soft_snr_map_from__floor_and_blank():
     snr = np.array([0.0, 1.0, 3.0, 40.0])
 
-    adapt = aa.image_mesh.adapt_image_soft_from(snr=snr)
+    adapt = aa.image_mesh.soft_snr_map_from(snr=snr)
     peak = (38.0 / 41.0) ** 2
 
     assert adapt == pytest.approx([0.01 * peak, 0.01 * peak, 1.0 / 16.0, peak], 1.0e-8)
 
-    assert aa.image_mesh.adapt_image_soft_from(snr=np.array([0.0, 1.0, 2.0])) == pytest.approx(
+    assert aa.image_mesh.soft_snr_map_from(snr=np.array([0.0, 1.0, 2.0])) == pytest.approx(
         [1.0, 1.0, 1.0]
     )
 
@@ -85,7 +85,7 @@ def test__weight_map_from__blank_adapt_data_is_uniform():
 
 def test__shares_validated():
     with pytest.raises(ValueError):
-        aa.image_mesh.HilbertSNR(pixels=10, background_share=0.9, peak_share=0.2)
+        aa.image_mesh.HilbertSNR(pixels=10, background=0.9, peak=0.2)
 
 
 def _arc_plus_compact(peak):
@@ -148,3 +148,146 @@ def test__image_plane_mesh_grid_from__negative_values_treated_as_zero():
     )
 
     assert np.asarray(mesh_raw) == pytest.approx(np.asarray(mesh_clipped), 1.0e-12)
+
+
+@pytest.mark.parametrize(
+    "image_mesh",
+    [
+        aa.image_mesh.HilbertSNR(pixels=50, edge_pixels=12),
+        aa.image_mesh.Hilbert(pixels=50, weight_power=3.5, weight_floor=0.01, edge_pixels=12),
+        aa.image_mesh.Overlay(shape=(10, 10), edge_pixels=12),
+    ],
+)
+def test__edge_pixels__appended_on_circle_outside_mask(image_mesh):
+    mask, adapt_data, arc, snr = _arc_plus_compact(25.0)
+
+    grid = np.asarray(image_mesh.image_plane_mesh_grid_from(mask=mask, adapt_data=adapt_data))
+
+    edge = grid[-12:]
+    radius = np.sqrt(edge[:, 0] ** 2 + edge[:, 1] ** 2)
+    assert radius == pytest.approx(np.full(12, mask.circular_radius + 0.05), 1.0e-8)
+    # Even-sized frame: the radius the mask was made with (2.8) plus half a pixel, as the workspace scripts place them.
+    assert radius == pytest.approx(np.full(12, 2.8 + 0.05), 1.0e-8)
+
+    without = type(image_mesh)(
+        **{k: v for k, v in vars(image_mesh).items() if k in ("pixels", "shape")}
+    )
+    if isinstance(image_mesh, aa.image_mesh.Hilbert) and not isinstance(
+        image_mesh, aa.image_mesh.HilbertSNR
+    ):
+        without = aa.image_mesh.Hilbert(pixels=50, weight_power=3.5, weight_floor=0.01)
+    grid_without = np.asarray(without.image_plane_mesh_grid_from(mask=mask, adapt_data=adapt_data))
+
+    assert grid.shape[0] == grid_without.shape[0] + 12
+    assert grid[:-12] == pytest.approx(grid_without, 1.0e-12)
+
+
+def _padded(mask, adapt_data, pad):
+    mask_native = np.pad(np.asarray(mask), pad, constant_values=True)
+    values = np.pad(np.asarray(adapt_data.native), pad)
+    padded_mask = aa.Mask2D(mask=mask_native, pixel_scales=mask.pixel_scales)
+    return padded_mask, aa.Array2D(values=values[~mask_native], mask=padded_mask)
+
+
+@pytest.mark.parametrize(
+    "image_mesh",
+    [
+        aa.image_mesh.HilbertSNR(pixels=300),
+        aa.image_mesh.Hilbert(pixels=300, weight_power=3.5, weight_floor=0.01, frame_independent=True),
+    ],
+)
+def test__frame_independent__same_mesh_in_larger_and_non_square_frames(image_mesh):
+    mask, adapt_data, arc, snr = _arc_plus_compact(25.0)
+
+    mesh = np.asarray(image_mesh.image_plane_mesh_grid_from(mask=mask, adapt_data=adapt_data))
+
+    for pad in (((10, 10), (10, 10)), ((0, 0), (8, 8)), ((6, 6), (0, 0))):
+        padded_mask, padded_data = _padded(mask, adapt_data, pad)
+        padded_mesh = np.asarray(
+            image_mesh.image_plane_mesh_grid_from(mask=padded_mask, adapt_data=padded_data)
+        )
+        assert padded_mesh == pytest.approx(mesh, abs=1.0e-9)
+
+
+def test__hilbert_default__unchanged_interpolation():
+    mask, adapt_data, arc, snr = _arc_plus_compact(25.0)
+
+    default = aa.image_mesh.Hilbert(pixels=300, weight_power=3.5, weight_floor=0.01)
+    assert default.frame_independent is False
+
+    from autoarray.inversion.mesh.image_mesh.hilbert import image_and_grid_from
+
+    values_default, grid_default = image_and_grid_from(
+        image=adapt_data, mask=mask, mask_radius=mask.circular_radius,
+        pixel_scales=mask.pixel_scales, hilbert_length=193, mask_centre=mask.mask_centre,
+    )
+    values_bilinear, grid_bilinear = image_and_grid_from(
+        image=adapt_data, mask=mask, mask_radius=mask.circular_radius,
+        pixel_scales=mask.pixel_scales, hilbert_length=193, mask_centre=mask.mask_centre,
+        frame_independent=True,
+    )
+    assert grid_bilinear == pytest.approx(grid_default, 1.0e-12)
+    # The two interpolations agree closely, but are not identical between pixel centres.
+    assert np.abs(values_bilinear - values_default).max() < 0.2 * np.abs(values_default).max()
+
+
+def test__frame_independent__bilinear_is_exact_on_a_linear_image():
+    from autoarray.inversion.mesh.image_mesh.hilbert import image_and_grid_from
+
+    mask = aa.Mask2D.circular(shape_native=(40, 30), radius=1.0, pixel_scales=0.1)
+    y, x = np.indices(mask.shape_native)
+    y = (20 - 0.5 - y) * 0.1
+    x = (x - 15 + 0.5) * 0.1
+    plane = 3.0 + 2.0 * y - 1.5 * x
+    image = aa.Array2D(values=plane[~np.asarray(mask)], mask=mask)
+
+    values, grid = image_and_grid_from(
+        image=image, mask=mask, mask_radius=mask.circular_radius,
+        pixel_scales=mask.pixel_scales, hilbert_length=193, mask_centre=mask.mask_centre,
+        frame_independent=True,
+    )
+
+    inner = np.sqrt(grid[:, 0] ** 2 + grid[:, 1] ** 2) < 0.8
+    assert values[inner] == pytest.approx(3.0 + 2.0 * grid[inner, 0] - 1.5 * grid[inner, 1], 1.0e-10)
+
+
+def test__capped_probabilities_from():
+    from autoarray.inversion.mesh.image_mesh.hilbert_snr import capped_probabilities_from
+
+    p = np.array([0.5, 0.2, 0.2, 0.1, 0.0])
+    capped = capped_probabilities_from(probabilities=p, cap=0.3)
+
+    assert capped.sum() == pytest.approx(1.0, 1.0e-12)
+    assert capped.max() <= 0.3 + 1.0e-12
+    assert capped[0] == pytest.approx(0.3, 1.0e-10)
+    # The rest keep their proportions.
+    assert capped[1] / capped[3] == pytest.approx(2.0, 1.0e-8)
+
+    assert capped_probabilities_from(probabilities=p, cap=0.9) == pytest.approx(p)
+    assert capped_probabilities_from(probabilities=p, cap=0.1) == pytest.approx(np.full(5, 0.2))
+
+
+@pytest.mark.parametrize("max_per_pixel", [8.0, 3.0])
+def test__max_per_pixel__caps_points_per_image_pixel(max_per_pixel):
+    # A faint, compact source: without the cap most points pile onto a few pixels.
+    mask = aa.Mask2D.circular(shape_native=(60, 60), radius=2.8, pixel_scales=0.1)
+    y, x = np.indices(mask.shape_native)
+    y = (29.5 - y) * 0.1
+    x = (x - 29.5) * 0.1
+    snr = 6.0 * np.exp(-0.5 * ((y - 1.0) ** 2 + x**2) / 0.08**2)
+    adapt_data = aa.Array2D(values=snr[~np.asarray(mask)], mask=mask)
+
+    def most_per_pixel(image_mesh):
+        mesh = np.asarray(image_mesh.image_plane_mesh_grid_from(mask=mask, adapt_data=adapt_data))
+        rows = np.clip(np.round(29.5 - mesh[:, 0] / 0.1).astype(int), 0, 59)
+        cols = np.clip(np.round(mesh[:, 1] / 0.1 + 29.5).astype(int), 0, 59)
+        counts = np.zeros((60, 60), dtype=int)
+        np.add.at(counts, (rows, cols), 1)
+        return counts.max()
+
+    uncapped = most_per_pixel(aa.image_mesh.HilbertSNR(pixels=1000, max_per_pixel=None))
+    capped = most_per_pixel(aa.image_mesh.HilbertSNR(pixels=1000, max_per_pixel=max_per_pixel))
+
+    assert uncapped > 3 * max_per_pixel
+    # On average over a pixel's Hilbert cells; allow one for where cell and pixel boundaries fall.
+    assert capped <= max_per_pixel + 1

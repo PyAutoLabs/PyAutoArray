@@ -54,7 +54,7 @@ def soft_snr_from(
     return (x / (x + snr_soft)) ** soft_power
 
 
-def adapt_image_soft_from(
+def soft_snr_map_from(
     snr: np.ndarray,
     snr_noise: float = 2.0,
     snr_soft: float = 3.0,

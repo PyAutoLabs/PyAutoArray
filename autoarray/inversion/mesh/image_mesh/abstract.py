@@ -56,6 +56,30 @@ class AbstractImageMesh:
     def uses_adapt_images(self) -> bool:
         raise NotImplementedError
 
+    def with_edge_points_from(self, image_plane_mesh_grid, mask: Mask2D):
+        """
+        Returns the mesh grid with ``self.edge_pixels`` points appended, evenly spaced on a circle outside the
+        circular mask (`append_with_circle_edge_points`). Delaunay pixelizations zero these points
+        (``zeroed_pixels``) so the source reconstruction has a fixed boundary.
+
+        The circle lies half a pixel beyond the mask's outer edge: radius ``mask.circular_radius +
+        mask.pixel_scale / 2``, where ``circular_radius`` is the outer edge of the outermost unmasked pixel. For a
+        `Mask2D.circular` mask on an even-sized frame that is the radius the mask was made with plus half a pixel,
+        as the workspace scripts placed them (``radius=mask_radius + pixel_scale / 2``); on an odd-sized frame it is
+        half a pixel closer.
+
+        Returns the grid unchanged when the image mesh has no ``edge_pixels`` (or zero).
+        """
+        edge_pixels = getattr(self, "edge_pixels", 0)
+        if not edge_pixels:
+            return image_plane_mesh_grid
+        return append_with_circle_edge_points(
+            image_plane_mesh_grid=image_plane_mesh_grid,
+            centre=mask.mask_centre,
+            radius=mask.circular_radius + mask.pixel_scale / 2.0,
+            n_points=edge_pixels,
+        )
+
     def image_plane_mesh_grid_from(
         self,
         mask: Mask2D,
