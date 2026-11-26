@@ -358,3 +358,45 @@ def test__simulate_and_fit__oversampled_psf__consistent_with_fit_side_convolutio
     )
 
     assert fit.chi_squared == pytest.approx(0.0, abs=1.0e-10)
+
+
+@pytest.mark.parametrize("use_real_space_convolution", [True, False])
+def test__via_image_from__no_blurring_image_warning(
+    image_central_delta_3x3, use_real_space_convolution
+):
+    import warnings
+
+    kernel = aa.Array2D.no_mask(
+        values=np.array([[0.0, 1.0, 0.0], [1.0, 2.0, 1.0], [0.0, 1.0, 0.0]]),
+        pixel_scales=1.0,
+    )
+
+    simulator = aa.SimulatorImaging(
+        exposure_time=1.0,
+        psf=aa.Convolver(kernel=kernel),
+        normalize_psf=False,
+        add_poisson_noise_to_data=False,
+        include_poisson_noise_in_noise_map=False,
+        use_real_space_convolution=use_real_space_convolution,
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        simulator.via_image_from(image=image_central_delta_3x3)
+
+    assert not [w for w in caught if "No blurring_image" in str(w.message)]
+
+
+def test__convolver__no_blurring_image__still_warns_outside_simulator(
+    image_central_delta_3x3,
+):
+    kernel = aa.Array2D.no_mask(
+        values=np.array([[0.0, 1.0, 0.0], [1.0, 2.0, 1.0], [0.0, 1.0, 0.0]]),
+        pixel_scales=1.0,
+    )
+    psf = aa.Convolver(kernel=kernel)
+
+    with pytest.warns(UserWarning, match="No blurring_image provided"):
+        psf.convolved_image_via_real_space_from(
+            image=image_central_delta_3x3, blurring_image=None
+        )
