@@ -119,7 +119,13 @@ def grid_hilbert_order_from(length, mask_radius):
 
 
 def image_and_grid_from(
-    image, mask, mask_radius, pixel_scales, hilbert_length, mask_centre=(0.0, 0.0)
+    image,
+    mask,
+    mask_radius,
+    pixel_scales,
+    hilbert_length,
+    mask_centre=(0.0, 0.0),
+    frame_independent: bool = False,
 ):
     """
     This code will create a grid in Hilbert space-filling curve order and an interpolated hyper
@@ -128,7 +134,28 @@ def image_and_grid_from(
     The Hilbert curve is generated around the origin and filtered to a disc of radius ``mask_radius``, then translated
     by ``mask_centre`` so the sampling lands inside the mask's circle for offset-centre masks. For masks centred on
     the origin the translation is a no-op and behaviour is unchanged.
+
+    With ``frame_independent=False`` (the original behaviour, kept so existing results do not change) the image is
+    interpolated with ``scipy.interpolate.griddata(method="linear")`` over a square ``(n, n)`` grid built from the
+    first dimension of the native image. A Delaunay triangulation of a regular lattice is degenerate (each square can
+    be split along either diagonal), so values between pixel centres, and through the Hilbert draw every later
+    mesh point, depend on the size of the frame around the mask (padding a lens's frame by 10-20 pixels moved
+    points by up to ~9 pixels); a non-square native image raises.
+
+    With ``frame_independent=True`` the image is interpolated bilinearly on its own pixel grid
+    (``scipy.ndimage.map_coordinates(order=1)``, using the image's shape, pixel scales and origin, zero outside),
+    so the result depends only on the mask and the image values and is identical for any frame that contains the
+    mask, square or not. Values at pixel centres are the pixel values in both modes.
     """
+
+    if frame_independent:
+        return _image_and_grid_bilinear_from(
+            image=image,
+            mask_radius=mask_radius,
+            pixel_scales=pixel_scales,
+            hilbert_length=hilbert_length,
+            mask_centre=mask_centre,
+        )
 
     from scipy.interpolate import griddata
 
@@ -164,6 +191,54 @@ def image_and_grid_from(
     return new_img, new_grid
 
 
+def _hilbert_curve_grid_from(hilbert_length, mask_radius, mask_centre):
+    """The (y, x) centres of the Hilbert curve's cells inside the mask's circle, in curve order."""
+    x1d_hb, y1d_hb = grid_hilbert_order_from(
+        length=hilbert_length, mask_radius=mask_radius
+    )
+
+    grid_hb = np.stack((y1d_hb, x1d_hb), axis=-1)
+    grid_hb_radius = np.sqrt(grid_hb[:, 0] ** 2.0 + grid_hb[:, 1] ** 2.0)
+    return grid_hb[grid_hb_radius <= mask_radius] + np.asarray(mask_centre)
+
+
+def _image_and_grid_bilinear_from(
+    image, mask_radius, pixel_scales, hilbert_length, mask_centre
+):
+    """
+    The ``frame_independent=True`` branch of `image_and_grid_from`: bilinear interpolation of the native image on
+    its own pixel grid. Pixel (i, j) of an (ny, nx) image with pixel scales (sy, sx) and origin (oy, ox) is centred
+    at y = (ny / 2 - 0.5 - i) * sy + oy, x = (j - nx / 2 + 0.5) * sx + ox, the convention of `Grid2D.uniform`.
+    """
+    from scipy.ndimage import map_coordinates
+
+    native = np.asarray(image.native, dtype=float)
+    ny, nx = native.shape
+
+    image_pixel_scales = getattr(image, "pixel_scales", None) or pixel_scales
+    if np.isscalar(image_pixel_scales):
+        image_pixel_scales = (image_pixel_scales, image_pixel_scales)
+    sy, sx = image_pixel_scales
+
+    try:
+        oy, ox = image.origin
+    except AttributeError:
+        oy, ox = 0.0, 0.0
+
+    new_grid = _hilbert_curve_grid_from(
+        hilbert_length=hilbert_length, mask_radius=mask_radius, mask_centre=mask_centre
+    )
+
+    rows = (ny / 2.0 - 0.5) - (new_grid[:, 0] - oy) / sy
+    cols = (new_grid[:, 1] - ox) / sx + (nx / 2.0 - 0.5)
+
+    new_img = map_coordinates(
+        native, [rows, cols], order=1, mode="constant", cval=0.0
+    )
+
+    return new_img, new_grid
+
+
 def inverse_transform_sampling_interpolated(probabilities, n_samples, gridx, gridy):
     """
     Given a 1d cumulative probability function, this code will generate points following the
@@ -189,6 +264,10 @@ def inverse_transform_sampling_interpolated(probabilities, n_samples, gridx, gri
     return output_ids, output_x, output_y
 
 
+# Side length, in cells, of the square Hilbert curve laid over the mask's bounding square.
+HILBERT_LENGTH = 193
+
+
 class Hilbert(AbstractImageMeshWeighted):
     def __init__(
         self,
@@ -196,6 +275,7 @@ class Hilbert(AbstractImageMeshWeighted):
         weight_floor=0.0,
         weight_power=0.0,
         edge_pixels: int = 0,
+        frame_independent: bool = False,
     ):
         """
         Computes an image-mesh by computing the Hilbert curve of the adapt data and drawing points from it.
@@ -225,6 +305,11 @@ class Hilbert(AbstractImageMeshWeighted):
             The number of points appended on a circle half a pixel beyond the circular mask's outer edge (0, the default,
             appends none). A Delaunay pixelization zeroes them: pass ``pixels=image_mesh.pixels`` and
             ``zeroed_pixels=image_mesh.edge_pixels`` to its mesh.
+        frame_independent
+            If True, the adapt data is interpolated onto the Hilbert curve bilinearly on its own pixel grid, so the
+            mesh depends only on the mask and the adapt values, not on the size or shape of the frame around the
+            mask (see `image_and_grid_from`). False (the default) keeps the original `griddata` interpolation, so
+            existing results are unchanged. `HilbertSNR` turns it on.
 
         image_mesh_min_mesh_pixels_per_pixel
             If not None, the image-mesh must place this many mesh pixels per image pixels in the N highest weighted
@@ -248,6 +333,7 @@ class Hilbert(AbstractImageMeshWeighted):
         )
 
         self.edge_pixels = int(edge_pixels)
+        self.frame_independent = bool(frame_independent)
 
     def image_plane_mesh_grid_from(
         self,
@@ -284,13 +370,12 @@ class Hilbert(AbstractImageMeshWeighted):
             mask=mask,
             mask_radius=mask.circular_radius,
             pixel_scales=mask.pixel_scales,
-            hilbert_length=193,
+            hilbert_length=HILBERT_LENGTH,
             mask_centre=mask.mask_centre,
+            frame_independent=self.frame_independent,
         )
 
-        weight_map = self.weight_map_from(adapt_data=adapt_data_hb)
-
-        weight_map /= np.sum(weight_map)
+        weight_map = self.probabilities_from(adapt_data_hb=adapt_data_hb, mask=mask)
 
         (
             drawn_id,
@@ -309,6 +394,21 @@ class Hilbert(AbstractImageMeshWeighted):
             ),
             mask=mask,
         )
+
+    def probabilities_from(self, adapt_data_hb: np.ndarray, mask: Mask2D) -> np.ndarray:
+        """
+        Returns the probability of drawing a mesh point in each cell of the Hilbert curve (summing to 1): the
+        weight map of the adapt values along the curve, normalised.
+
+        Parameters
+        ----------
+        adapt_data_hb
+            The adapt data interpolated onto the cells of the Hilbert curve.
+        mask
+            The circular mask the curve fills (used by subclasses that need its geometry).
+        """
+        weight_map = self.weight_map_from(adapt_data=adapt_data_hb)
+        return weight_map / np.sum(weight_map)
 
     def check_mesh_pixels_per_image_pixels(
         self,

@@ -5,7 +5,7 @@ from typing import Optional
 from autoarray.mask.mask_2d import Mask2D
 from autoarray.structures.arrays.uniform_2d import Array2D
 from autoarray.structures.grids.irregular_2d import Grid2DIrregular
-from autoarray.inversion.mesh.image_mesh.hilbert import Hilbert
+from autoarray.inversion.mesh.image_mesh.hilbert import HILBERT_LENGTH, Hilbert
 from autoarray.inversion.mesh.image_mesh.snr_transform import soft_snr_from
 
 
@@ -19,7 +19,9 @@ class HilbertSNR(Hilbert):
         snr_noise: float = 2.0,
         snr_soft: float = 3.0,
         soft_power: float = 2.0,
+        max_per_pixel: Optional[float] = 8.0,
         edge_pixels: int = 0,
+        frame_independent: bool = True,
     ):
         """
         Computes an image-mesh by drawing points along a Hilbert curve, with the points shared out by the adapt
@@ -48,6 +50,11 @@ class HilbertSNR(Hilbert):
           Faint but detected source emission always gets points; bright regions do not take them all.
         - ``peak`` (5%) of the points go to the cells within roughly 25% of the peak S/N
           (``peak_power=8``), giving a bright compact feature (a bulge, a compact clump) extra resolution.
+        - no image pixel gets more than ``max_per_pixel`` (8) points: a cell's probability is capped and what it
+          cannot take is shared among the other cells in proportion to their weight. Without the cap a faint
+          source, with only a few pixels above ``snr_noise``, gets tens of points per image pixel (up to 61 on
+          the study's 20 datasets, many within 0.01 of a pixel of each other); with it the closest pair was 0.1
+          of a pixel, and the median share of points on the source moved from 0.71 to 0.70.
 
         With no arguments other than ``pixels`` this gives the weighting chosen in the adapt-mesh-weighting study
         (PyAutoArray#714): fitted on 10 HST and 10 JWST (COWLS) lens datasets and checked offline on 19 lenses
@@ -82,6 +89,13 @@ class HilbertSNR(Hilbert):
             S/N above ``snr_noise`` at which the soft term reaches ``0.5 ** soft_power``.
         soft_power
             Power of the soft term.
+        max_per_pixel
+            The most mesh points any image pixel may receive (on average over the Hilbert cells inside it). None
+            turns the cap off.
+        frame_independent
+            Interpolate the adapt data onto the Hilbert curve bilinearly on its own pixel grid, so the mesh does not
+            depend on the size or shape of the frame around the mask (`image_and_grid_from`). On by default here;
+            `Hilbert` keeps the original interpolation unless asked.
         edge_pixels
             The number of points appended on a circle half a pixel beyond the circular mask's outer edge (0, the default,
             appends none). A Delaunay pixelization zeroes them: pass ``pixels=image_mesh.pixels`` and
@@ -94,7 +108,11 @@ class HilbertSNR(Hilbert):
             )
 
         super().__init__(
-            pixels=pixels, weight_floor=0.0, weight_power=0.0, edge_pixels=edge_pixels
+            pixels=pixels,
+            weight_floor=0.0,
+            weight_power=0.0,
+            edge_pixels=edge_pixels,
+            frame_independent=frame_independent,
         )
 
         self.background = background
@@ -103,6 +121,7 @@ class HilbertSNR(Hilbert):
         self.snr_noise = snr_noise
         self.snr_soft = snr_soft
         self.soft_power = soft_power
+        self.max_per_pixel = max_per_pixel
 
     def weight_map_from(self, adapt_data: np.ndarray) -> np.ndarray:
         """
@@ -144,6 +163,27 @@ class HilbertSNR(Hilbert):
 
         return weight_map
 
+    def probabilities_from(self, adapt_data_hb: np.ndarray, mask: Mask2D) -> np.ndarray:
+        """
+        Returns the probability of drawing a mesh point in each cell of the Hilbert curve: the `weight_map_from`
+        probabilities, with no cell allowed more than ``max_per_pixel`` points per image pixel (water-filled, see
+        `capped_probabilities_from`).
+
+        A cell's expected number of points is ``pixels * p``; one image pixel spans
+        ``(pixel_scale / cell_size) ** 2`` cells, with ``cell_size = 2 * mask.circular_radius / HILBERT_LENGTH``.
+        """
+        probabilities = self.weight_map_from(adapt_data=adapt_data_hb)
+        probabilities = probabilities / np.sum(probabilities)
+
+        if self.max_per_pixel is None:
+            return probabilities
+
+        cell_size = 2.0 * mask.circular_radius / HILBERT_LENGTH
+        cells_per_pixel = (mask.pixel_scale / cell_size) ** 2
+        cap = self.max_per_pixel / (self.pixels * cells_per_pixel)
+
+        return capped_probabilities_from(probabilities=probabilities, cap=cap)
+
     def image_plane_mesh_grid_from(
         self,
         mask: Mask2D,
@@ -169,3 +209,47 @@ class HilbertSNR(Hilbert):
             )
 
         return super().image_plane_mesh_grid_from(mask=mask, adapt_data=adapt_data)
+
+
+def capped_probabilities_from(probabilities: np.ndarray, cap: float) -> np.ndarray:
+    """
+    Returns ``probabilities`` with no entry above ``cap``, still summing to 1: capped entries are set to ``cap``
+    and what they could not take is shared among the others in proportion to their probability, repeatedly
+    (water-filling: the result is ``min(cap, scale * probabilities)`` for the ``scale`` that makes it sum to 1,
+    found by bisection).
+
+    If ``cap`` is so small that even ``cap`` everywhere sums to less than 1, the probabilities are uniform.
+
+    Parameters
+    ----------
+    probabilities
+        Non-negative values summing to 1.
+    cap
+        The largest probability any entry may have.
+    """
+    probabilities = np.asarray(probabilities, dtype=float)
+    n = probabilities.size
+
+    if cap * n <= 1.0:
+        return np.full(n, 1.0 / n)
+    if probabilities.max() <= cap:
+        return probabilities
+
+    positive = probabilities > 0.0
+    if cap * positive.sum() <= 1.0:
+        capped = np.where(positive, cap, 0.0)
+        capped[~positive] = (1.0 - capped.sum()) / max((~positive).sum(), 1)
+        return capped
+
+    low, high = 0.0, 1.0
+    while np.minimum(cap, high * probabilities).sum() < 1.0:
+        high *= 2.0
+    for _ in range(100):
+        mid = 0.5 * (low + high)
+        if np.minimum(cap, mid * probabilities).sum() < 1.0:
+            low = mid
+        else:
+            high = mid
+
+    capped = np.minimum(cap, high * probabilities)
+    return capped / capped.sum()
