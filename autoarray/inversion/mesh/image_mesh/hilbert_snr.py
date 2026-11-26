@@ -13,12 +13,13 @@ class HilbertSNR(Hilbert):
     def __init__(
         self,
         pixels=10.0,
-        background_share: float = 0.25,
-        peak_share: float = 0.05,
+        background: float = 0.25,
+        peak: float = 0.05,
         peak_power: float = 8.0,
         snr_noise: float = 2.0,
         snr_soft: float = 3.0,
         soft_power: float = 2.0,
+        edge_pixels: int = 0,
     ):
         """
         Computes an image-mesh by drawing points along a Hilbert curve, with the points shared out by the adapt
@@ -34,18 +35,18 @@ class HilbertSNR(Hilbert):
 
         The weighting here gives each cell of the Hilbert curve, with S/N ``s``, the probability
 
-            background_share / n
-            + peak_share * (s / max(s)) ** peak_power / sum((s / max(s)) ** peak_power)
-            + (1 - background_share - peak_share) * soft / sum(soft)
+            background / n
+            + peak * (s / max(s)) ** peak_power / sum((s / max(s)) ** peak_power)
+            + (1 - background - peak) * soft / sum(soft)
 
         where ``soft = (x / (x + snr_soft)) ** soft_power`` and ``x = max(s - snr_noise, 0)`` (`soft_snr_from`):
 
-        - ``background_share`` (25%) of the points are spread evenly over the mask, so the background is always
+        - ``background`` (25%) of the points are spread evenly over the mask, so the background is always
           covered whatever the source looks like.
         - most of the points (70%) follow the soft S/N transform, which is in absolute S/N: zero at or below
           S/N ``snr_noise`` (noise), rising through S/N ``snr_noise + snr_soft`` and saturating for bright pixels.
           Faint but detected source emission always gets points; bright regions do not take them all.
-        - ``peak_share`` (5%) of the points go to the cells within roughly 25% of the peak S/N
+        - ``peak`` (5%) of the points go to the cells within roughly 25% of the peak S/N
           (``peak_power=8``), giving a bright compact feature (a bulge, a compact clump) extra resolution.
 
         With no arguments other than ``pixels`` this gives the weighting chosen in the adapt-mesh-weighting study
@@ -55,7 +56,7 @@ class HilbertSNR(Hilbert):
         The ``adapt_data`` should be the source's S/N map *before* the minimum-percent floor PyAutoGalaxy applies to
         adapt images: above a peak S/N of 200 that floor lifts empty sky over ``snr_noise`` and the sky is then
         weighted as source. Negative values are treated as 0 before the map is interpolated onto the curve. To have
-        an adaptive regularization (e.g. `AdaptSplit`) adapt to the same signal, give it `adapt_image_soft_from` of
+        an adaptive regularization (e.g. `AdaptSplit`) adapt to the same signal, give it `soft_snr_map_from` of
         the same S/N map.
 
         Known limits, measured in that study:
@@ -69,9 +70,9 @@ class HilbertSNR(Hilbert):
         ----------
         pixels
             The total number of pixels in the image mesh and drawn from the Hilbert curve.
-        background_share
+        background
             Fraction of the points spread evenly over every cell of the curve inside the mask.
-        peak_share
+        peak
             Fraction of the points given in proportion to ``(s / max(s)) ** peak_power``.
         peak_power
             Power of the peak term; 8 restricts it to cells within roughly 25% of the peak S/N.
@@ -81,17 +82,23 @@ class HilbertSNR(Hilbert):
             S/N above ``snr_noise`` at which the soft term reaches ``0.5 ** soft_power``.
         soft_power
             Power of the soft term.
+        edge_pixels
+            The number of points appended on a circle half a pixel beyond the circular mask's outer edge (0, the default,
+            appends none). A Delaunay pixelization zeroes them: pass ``pixels=image_mesh.pixels`` and
+            ``zeroed_pixels=image_mesh.edge_pixels`` to its mesh.
         """
-        if background_share < 0.0 or peak_share < 0.0 or background_share + peak_share > 1.0:
+        if background < 0.0 or peak < 0.0 or background + peak > 1.0:
             raise ValueError(
-                "HilbertSNR requires background_share >= 0, peak_share >= 0 and "
-                f"background_share + peak_share <= 1 (got {background_share}, {peak_share})."
+                "HilbertSNR requires background >= 0, peak >= 0 and "
+                f"background + peak <= 1 (got {background}, {peak})."
             )
 
-        super().__init__(pixels=pixels, weight_floor=0.0, weight_power=0.0)
+        super().__init__(
+            pixels=pixels, weight_floor=0.0, weight_power=0.0, edge_pixels=edge_pixels
+        )
 
-        self.background_share = background_share
-        self.peak_share = peak_share
+        self.background = background
+        self.peak = peak
         self.peak_power = peak_power
         self.snr_noise = snr_noise
         self.snr_soft = snr_soft
@@ -114,14 +121,14 @@ class HilbertSNR(Hilbert):
         n = snr.size
 
         background = np.full(n, 1.0 / n)
-        weight_map = self.background_share * background
+        weight_map = self.background * background
 
         peak_value = np.max(snr) if n else 0.0
         if peak_value > 0.0:
             peak_term = (snr / peak_value) ** self.peak_power
-            weight_map = weight_map + self.peak_share * peak_term / np.sum(peak_term)
+            weight_map = weight_map + self.peak * peak_term / np.sum(peak_term)
         else:
-            weight_map = weight_map + self.peak_share * background
+            weight_map = weight_map + self.peak * background
 
         soft = soft_snr_from(
             snr=snr,
@@ -129,7 +136,7 @@ class HilbertSNR(Hilbert):
             snr_soft=self.snr_soft,
             soft_power=self.soft_power,
         )
-        source_share = 1.0 - self.background_share - self.peak_share
+        source_share = 1.0 - self.background - self.peak
         if np.sum(soft) > 0.0:
             weight_map = weight_map + source_share * soft / np.sum(soft)
         else:

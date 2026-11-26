@@ -159,7 +159,12 @@ def overlay_via_unmasked_overlaid_from(
 
 
 class Overlay(AbstractImageMesh):
-    def __init__(self, shape=(3, 3), respect_small_datasets: bool = True):
+    def __init__(
+        self,
+        shape=(3, 3),
+        respect_small_datasets: bool = True,
+        edge_pixels: int = 0,
+    ):
         """
         Computes an image-mesh by overlaying a uniform grid of (y,x) coordinates over the masked image that the
         pixelization is fitting.
@@ -181,6 +186,9 @@ class Overlay(AbstractImageMesh):
             When `PYAUTO_SMALL_DATASETS=1` is set, `shape` is capped per axis to the small-datasets
             cap, matching the cap `Grid2D.uniform` and `Mask2D.circular` apply to the data. Pass
             `False` to opt out for an image mesh whose resolution is load-bearing for the script.
+        edge_pixels
+            The number of points appended on a circle half a pixel beyond the (circular) mask's outer edge (0, the default,
+            appends none). A Delaunay pixelization zeroes them (``zeroed_pixels=image_mesh.edge_pixels``).
         """
 
         super().__init__()
@@ -190,6 +198,7 @@ class Overlay(AbstractImageMesh):
         )
 
         self.shape = (int(shape[0]), int(shape[1]))
+        self.edge_pixels = int(edge_pixels)
 
     def image_plane_mesh_grid_from(
         self,
@@ -251,7 +260,9 @@ class Overlay(AbstractImageMesh):
             overlay_for_mask=overlay_for_mask,
         )
 
-        return Grid2DIrregular(values=mesh_grid)
+        return self.with_edge_points_from(
+            image_plane_mesh_grid=Grid2DIrregular(values=mesh_grid), mask=mask
+        )
 
     @property
     def uses_adapt_images(self) -> bool:

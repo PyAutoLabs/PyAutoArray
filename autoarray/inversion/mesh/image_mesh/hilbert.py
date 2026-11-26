@@ -195,6 +195,7 @@ class Hilbert(AbstractImageMeshWeighted):
         pixels=10.0,
         weight_floor=0.0,
         weight_power=0.0,
+        edge_pixels: int = 0,
     ):
         """
         Computes an image-mesh by computing the Hilbert curve of the adapt data and drawing points from it.
@@ -220,6 +221,10 @@ class Hilbert(AbstractImageMeshWeighted):
         weight_power
             The power the weight values are raised too, which allows more pixels to be drawn from the higher weight
             regions of the adapt image.
+        edge_pixels
+            The number of points appended on a circle half a pixel beyond the circular mask's outer edge (0, the default,
+            appends none). A Delaunay pixelization zeroes them: pass ``pixels=image_mesh.pixels`` and
+            ``zeroed_pixels=image_mesh.edge_pixels`` to its mesh.
 
         image_mesh_min_mesh_pixels_per_pixel
             If not None, the image-mesh must place this many mesh pixels per image pixels in the N highest weighted
@@ -241,6 +246,8 @@ class Hilbert(AbstractImageMeshWeighted):
             weight_floor=weight_floor,
             weight_power=weight_power,
         )
+
+        self.edge_pixels = int(edge_pixels)
 
     def image_plane_mesh_grid_from(
         self,
@@ -296,7 +303,12 @@ class Hilbert(AbstractImageMeshWeighted):
             gridy=grid_hb[:, 0],
         )
 
-        return Grid2DIrregular(values=np.stack((drawn_y, drawn_x), axis=-1))
+        return self.with_edge_points_from(
+            image_plane_mesh_grid=Grid2DIrregular(
+                values=np.stack((drawn_y, drawn_x), axis=-1)
+            ),
+            mask=mask,
+        )
 
     def check_mesh_pixels_per_image_pixels(
         self,

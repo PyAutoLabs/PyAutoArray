@@ -27,15 +27,15 @@ def test__soft_snr_from__values():
     )
 
 
-def test__adapt_image_soft_from__floor_and_blank():
+def test__soft_snr_map_from__floor_and_blank():
     snr = np.array([0.0, 1.0, 3.0, 40.0])
 
-    adapt = aa.image_mesh.adapt_image_soft_from(snr=snr)
+    adapt = aa.image_mesh.soft_snr_map_from(snr=snr)
     peak = (38.0 / 41.0) ** 2
 
     assert adapt == pytest.approx([0.01 * peak, 0.01 * peak, 1.0 / 16.0, peak], 1.0e-8)
 
-    assert aa.image_mesh.adapt_image_soft_from(snr=np.array([0.0, 1.0, 2.0])) == pytest.approx(
+    assert aa.image_mesh.soft_snr_map_from(snr=np.array([0.0, 1.0, 2.0])) == pytest.approx(
         [1.0, 1.0, 1.0]
     )
 
@@ -85,7 +85,7 @@ def test__weight_map_from__blank_adapt_data_is_uniform():
 
 def test__shares_validated():
     with pytest.raises(ValueError):
-        aa.image_mesh.HilbertSNR(pixels=10, background_share=0.9, peak_share=0.2)
+        aa.image_mesh.HilbertSNR(pixels=10, background=0.9, peak=0.2)
 
 
 def _arc_plus_compact(peak):
@@ -148,3 +148,35 @@ def test__image_plane_mesh_grid_from__negative_values_treated_as_zero():
     )
 
     assert np.asarray(mesh_raw) == pytest.approx(np.asarray(mesh_clipped), 1.0e-12)
+
+
+@pytest.mark.parametrize(
+    "image_mesh",
+    [
+        aa.image_mesh.HilbertSNR(pixels=50, edge_pixels=12),
+        aa.image_mesh.Hilbert(pixels=50, weight_power=3.5, weight_floor=0.01, edge_pixels=12),
+        aa.image_mesh.Overlay(shape=(10, 10), edge_pixels=12),
+    ],
+)
+def test__edge_pixels__appended_on_circle_outside_mask(image_mesh):
+    mask, adapt_data, arc, snr = _arc_plus_compact(25.0)
+
+    grid = np.asarray(image_mesh.image_plane_mesh_grid_from(mask=mask, adapt_data=adapt_data))
+
+    edge = grid[-12:]
+    radius = np.sqrt(edge[:, 0] ** 2 + edge[:, 1] ** 2)
+    assert radius == pytest.approx(np.full(12, mask.circular_radius + 0.05), 1.0e-8)
+    # Even-sized frame: the radius the mask was made with (2.8) plus half a pixel, as the workspace scripts place them.
+    assert radius == pytest.approx(np.full(12, 2.8 + 0.05), 1.0e-8)
+
+    without = type(image_mesh)(
+        **{k: v for k, v in vars(image_mesh).items() if k in ("pixels", "shape")}
+    )
+    if isinstance(image_mesh, aa.image_mesh.Hilbert) and not isinstance(
+        image_mesh, aa.image_mesh.HilbertSNR
+    ):
+        without = aa.image_mesh.Hilbert(pixels=50, weight_power=3.5, weight_floor=0.01)
+    grid_without = np.asarray(without.image_plane_mesh_grid_from(mask=mask, adapt_data=adapt_data))
+
+    assert grid.shape[0] == grid_without.shape[0] + 12
+    assert grid[:-12] == pytest.approx(grid_without, 1.0e-12)
