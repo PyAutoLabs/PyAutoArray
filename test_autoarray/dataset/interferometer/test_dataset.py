@@ -741,6 +741,9 @@ def test__from_stream__array_free_dataset_carries_terms_and_operator(mask_2d_7x7
     assert terms.origin == mask_2d_7x7.origin
     assert terms.eps == 1.0e-12
     assert terms.transformer_class_name == "TransformerNUFFT"
+    assert terms.mask_fingerprint == (
+        aa.util.inversion_interferometer.mask_fingerprint_from(mask_2d_7x7)
+    )
 
     one_shot = dataset.apply_sparse_operator().sparse_operator
 
@@ -799,6 +802,36 @@ def test__from_sparse_terms__mask_pixel_scales_and_origin_mismatch__raises(mask_
     aa.Interferometer.from_sparse_terms(
         terms_unrecorded,
         aa.Mask2D(mask=np.asarray(mask_2d_7x7), pixel_scales=5.0, origin=(1.0, 1.0)),
+    )
+
+
+def test__from_sparse_terms__mask_with_different_masked_pixels__raises(mask_2d_7x7):
+    """
+    A mask with the same `shape_native`, `pixel_scales` and `origin` as the one the terms were
+    accumulated on, but one pixel flipped, is refused through the mask fingerprint
+    (PyAutoArray#707).
+    """
+    pytest.importorskip("nufftax")
+
+    dataset = _random_interferometer(mask_2d_7x7, transformer.TransformerNUFFT)
+    terms = aa.util.inversion_interferometer.sparse_terms_from_chunks(
+        _chunks_of(dataset, [0, 40]), real_space_mask=mask_2d_7x7
+    )
+
+    mask_values = np.asarray(mask_2d_7x7).copy()
+    mask_values[3, 3] = not mask_values[3, 3]
+    other_mask = aa.Mask2D(
+        mask=mask_values,
+        pixel_scales=mask_2d_7x7.pixel_scales,
+        origin=mask_2d_7x7.origin,
+    )
+
+    with pytest.raises(aa.exc.DatasetException, match="fingerprint"):
+        aa.Interferometer.from_sparse_terms(terms, other_mask)
+
+    # An unrecorded fingerprint skips the check.
+    aa.Interferometer.from_sparse_terms(
+        dataclasses.replace(terms, mask_fingerprint=None), other_mask
     )
 
 

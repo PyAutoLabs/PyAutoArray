@@ -582,3 +582,70 @@ def test__primary_beam__jax_jit_matches_numpy():
             rtol=1.0e-10,
             atol=1.0e-10,
         )
+
+
+def _offset_origin_point_source_inputs():
+    """
+    The all-false (11, 11) mask of pixel scale 0.5" and origin (0.5, -0.5) and the
+    visibilities of a unit point source at (y, x) = (1.0, -1.5) arcsec, which sits on native
+    pixel (4, 3) of that mask.
+    """
+    mask = aa.Mask2D.all_false(
+        shape_native=(11, 11), pixel_scales=0.5, origin=(0.5, -0.5)
+    )
+
+    rng = np.random.default_rng(seed=1)
+    uv_wavelengths = rng.uniform(-3.0e4, 3.0e4, size=(400, 2))
+
+    arcsec_to_rad = np.pi / 180.0 / 3600.0
+    y_rad, x_rad = 1.0 * arcsec_to_rad, -1.5 * arcsec_to_rad
+    visibilities = np.exp(
+        -2.0j * np.pi * (uv_wavelengths[:, 0] * x_rad + uv_wavelengths[:, 1] * y_rad)
+    )
+
+    return mask, uv_wavelengths, visibilities
+
+
+def test__nufft__offset_origin_mask__matches_dft():
+    """
+    The NUFFT places its grid at the mask `origin`, as the DFT does: on an offset-origin mask
+    the forward transform, the mapping-matrix transform and the dirty image agree with the
+    DFT, and the dirty image of a point source peaks at the source's pixel (PyAutoArray#707).
+    """
+    mask, uv_wavelengths, visibilities = _offset_origin_point_source_inputs()
+
+    transformer_dft = aa.TransformerDFT(
+        uv_wavelengths=uv_wavelengths, real_space_mask=mask
+    )
+    transformer_nufft = aa.TransformerNUFFT(
+        uv_wavelengths=uv_wavelengths, real_space_mask=mask
+    )
+
+    rng = np.random.default_rng(seed=2)
+    image = aa.Array2D(values=rng.normal(size=(11, 11)), mask=mask)
+
+    np.testing.assert_allclose(
+        transformer_nufft.visibilities_from(image=image).array,
+        transformer_dft.visibilities_from(image=image).array,
+        rtol=0.0,
+        atol=1.0e-10,
+    )
+
+    mapping_matrix = rng.normal(size=(mask.pixels_in_mask, 3))
+
+    np.testing.assert_allclose(
+        transformer_nufft.transform_mapping_matrix(mapping_matrix),
+        transformer_dft.transform_mapping_matrix(mapping_matrix),
+        rtol=0.0,
+        atol=1.0e-9,
+    )
+
+    vis = aa.Visibilities(visibilities=visibilities)
+
+    dirty_dft = transformer_dft.image_from(visibilities=vis).native.array
+    dirty_nufft = transformer_nufft.image_from(visibilities=vis).native.array
+
+    np.testing.assert_allclose(dirty_nufft, dirty_dft, rtol=0.0, atol=1.0e-9)
+
+    assert np.unravel_index(np.argmax(dirty_dft), dirty_dft.shape) == (4, 3)
+    assert np.unravel_index(np.argmax(dirty_nufft), dirty_nufft.shape) == (4, 3)

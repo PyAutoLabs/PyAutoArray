@@ -407,6 +407,23 @@ class Interferometer(AbstractDataset):
                     f"{value_mask}."
                 )
 
+        # Same geometry is not enough: the terms of a mask with different masked pixels hold a
+        # dirty image and kernel over different pixels.
+        mask_fingerprint = getattr(terms, "mask_fingerprint", None)
+
+        if mask_fingerprint is not None:
+            fingerprint_mask = inversion_interferometer_util.mask_fingerprint_from(
+                real_space_mask
+            )
+
+            if str(mask_fingerprint) != fingerprint_mask:
+                raise exc.DatasetException(
+                    f"The SparseTerms were accumulated on a real-space mask with fingerprint "
+                    f"{mask_fingerprint} but `from_sparse_terms` was given a mask with "
+                    f"fingerprint {fingerprint_mask}: the masks have the same shape_native, "
+                    f"pixel_scales and origin but mask different pixels."
+                )
+
         sparse_operator = InterferometerSparseOperator.from_sparse_terms(
             terms,
             real_space_mask=real_space_mask,

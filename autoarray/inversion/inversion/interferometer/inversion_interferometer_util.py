@@ -1,5 +1,6 @@
 from dataclasses import dataclass, replace
 from functools import cached_property
+import hashlib
 import logging
 import math
 import numbers
@@ -2307,6 +2308,12 @@ class SparseTerms:
         records `(0.0, 0.0)` when no shift is applied). `None` means not recorded. Terms with
         different phase centres have dirty images referred to different sky origins and
         cannot be summed.
+    mask_fingerprint
+        A short hash of the real-space mask's native shape and masked pixels
+        (`mask_fingerprint_from`). It tells apart two masks with the same `shape_native`,
+        `pixel_scales` and `origin` but different masked pixels, whose terms do not describe
+        the same operator (a pixel masked in one channel would hold only the other channel's
+        dirty image while the kernel and scalars hold both).
 
     Fine grids (`sparse_terms_from_chunks(oversample=q)`)
     ------------------------------------------------------
@@ -2332,7 +2339,10 @@ class SparseTerms:
         at index `[Ny q, Nx q]`), native orientation (`x` along the columns, `y` decreasing down
         the rows). Native pixel `(r, c)` sits at fine index
         `(Ny q - (Ny - 1) q / 2 + r q, Nx q - (Nx - 1) q / 2 + c q)`, a grid point because `q` is
-        even, where it equals `dirty_image_native[r, c]`.
+        even, where it equals `dirty_image_native[r, c]`. The fine grid is centred on the sky
+        position `(0, 0)`, not on the mask `origin`: on a mask with origin `(y0, x0)` native pixel
+        `(r, c)` sits a further `(-y0 q / pixel_scale, +x0 q / pixel_scale)` fine pixels along,
+        a grid point when the origin is a multiple of `pixel_scale / q`.
     oversample
         The even oversampling factor `q`.
     oversample_pad
@@ -2360,6 +2370,7 @@ class SparseTerms:
     dirty_image_fine: Optional[np.ndarray] = None
     oversample: Optional[int] = None
     oversample_pad: Optional[float] = None
+    mask_fingerprint: Optional[str] = None
 
     @property
     def has_fine_grids(self) -> bool:
@@ -2377,17 +2388,13 @@ class SparseTerms:
         The field-wise sum of two `SparseTerms`.
 
         Raises `exc.InversionException` if a provenance field (`shape_native`,
-        `pixel_scales`, `origin`, `eps`, `phase_centre`, `transformer_class_name`, `oversample`,
-        `oversample_pad`) is recorded on both sides with different values, or if exactly one
+        `pixel_scales`, `origin`, `mask_fingerprint`, `eps`, `phase_centre`,
+        `transformer_class_name`, `oversample`, `oversample_pad`) is recorded on both sides with different values, or if exactly one
         side carries the `oversample` fine grids (summing would silently drop or half-fill them;
         accumulate every part with the same `oversample`, or with none).
         The result carries, for each provenance field, the recorded value from either side
         (the left one when both are recorded), so an unrecorded operand never erases the
         provenance of a recorded one.
-
-        Known limit: the mask itself is not carried, so terms accumulated on two masks with
-        the same `shape_native`, `pixel_scales` and `origin` but different masked pixels
-        cannot be distinguished by provenance and are summed without error.
         """
         if not isinstance(other, SparseTerms):
             return NotImplemented
@@ -2411,6 +2418,7 @@ class SparseTerms:
             "shape_native",
             "pixel_scales",
             "origin",
+            "mask_fingerprint",
             "eps",
             "phase_centre",
             "transformer_class_name",
@@ -2481,6 +2489,7 @@ class SparseTerms:
             phase_centre=_recorded(self.phase_centre, other.phase_centre),
             oversample=_recorded(self.oversample, other.oversample),
             oversample_pad=_recorded(self.oversample_pad, other.oversample_pad),
+            mask_fingerprint=_recorded(self.mask_fingerprint, other.mask_fingerprint),
             **fine_grids,
         )
 
@@ -2497,6 +2506,24 @@ class SparseTerms:
             return self
 
         return NotImplemented
+
+
+def mask_fingerprint_from(mask) -> str:
+    """
+    A short (16 hexadecimal characters) SHA-256 fingerprint of a real-space mask's native shape
+    and which pixels are masked, recorded in `SparseTerms.mask_fingerprint`.
+
+    Two masks get the same fingerprint only if they have the same `shape_native` and mask the
+    same pixels; `pixel_scales` and `origin` are recorded (and checked) separately. Sixteen
+    characters fit a FITS header card.
+    """
+    mask_native = np.ascontiguousarray(np.asarray(mask, dtype=bool))
+
+    digest = hashlib.sha256()
+    digest.update(np.asarray(mask_native.shape, dtype=np.int64).tobytes())
+    digest.update(np.packbits(mask_native, axis=None).tobytes())
+
+    return digest.hexdigest()[:16]
 
 
 def _recorded(value_left, value_right):
@@ -2976,6 +3003,7 @@ def sparse_terms_from_chunks(
             eps=float(eps),
             transformer_class_name=type(transformer).__name__,
             phase_centre=phase_centre,
+            mask_fingerprint=mask_fingerprint_from(real_space_mask),
         )
 
         terms = chunk_terms if terms is None else terms + chunk_terms
