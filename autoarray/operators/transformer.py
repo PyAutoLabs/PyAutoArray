@@ -361,14 +361,16 @@ class TransformerNUFFT(_PrimaryBeamMixin):
             image_flipped = image[::-1, :]
             x = 2 * pi * u_lambda * pixel_scale_rad
             y = 2 * pi * v_lambda * pixel_scale_rad
-            offset_x = 0.5 if N_x is even else 0.0
-            offset_y = 0.5 if N_y is even else 0.0
+            offset_x = (0.5 if N_x is even else 0.0) + origin_x / pixel_scale
+            offset_y = (0.5 if N_y is even else 0.0) + origin_y / pixel_scale
             shift = exp(-i * (offset_x * x + offset_y * y))
             visibilities = nufftax.nufft2d2(x, y, image_flipped, eps, -1) * shift
 
         The `shift` factor is the half-pixel correction between autoarray's
         grid centre at index `(N - 1) / 2` and the NUFFT's mode-0 at index
-        `N // 2`; neither backend applies it internally.
+        `N // 2`, plus the mask `origin` (`(origin_y, origin_x)`, arcsec), by
+        which every grid coordinate the DFT uses is displaced; neither backend
+        applies it internally.
 
         Parameters
         ----------
@@ -443,6 +445,17 @@ class TransformerNUFFT(_PrimaryBeamMixin):
         n_y, n_x = self.real_space_mask.shape_native
         offset_x = 0.5 if n_x % 2 == 0 else 0.0
         offset_y = 0.5 if n_y % 2 == 0 else 0.0
+
+        # The mask origin moves every grid coordinate by `origin` (arcsec, (y, x)); the DFT phase
+        # `-2 pi (x u + y v)` then gains `exp(-2 pi i (u x_0 + v y_0))`, which in units of
+        # `pixel_scale_rad` is a further `x_0 / pixel_scale` (`y_0 / pixel_scale`) pixel offset.
+        origin_rad_y, origin_rad_x = (
+            float(value) * units.arcsec.to(units.rad)
+            for value in self.real_space_mask.origin
+        )
+        offset_x += origin_rad_x / pixel_scale_rad
+        offset_y += origin_rad_y / pixel_scale_rad
+
         self._shift = np.exp(-1j * (offset_x * self._x + offset_y * self._y))
 
         self.total_visibilities = uv_wavelengths.shape[0]

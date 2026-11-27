@@ -2617,3 +2617,162 @@ def test__sparse_triplets_from__slim_weights_scale_vals_by_their_slim_row():
 
             for array, array_reference in zip(ones, reference):
                 assert np.array_equal(array, array_reference)
+
+
+def _offset_origin_point_source_chunks():
+    """
+    A unit point source at (y, x) = (1.0, -1.5) arcsec observed with unit noise, chunked, and
+    the all-false (11, 11) mask of pixel scale 0.5" and origin (0.5, -0.5) it is imaged on.
+    """
+    mask = aa.Mask2D.all_false(
+        shape_native=(11, 11), pixel_scales=0.5, origin=(0.5, -0.5)
+    )
+
+    rng = np.random.default_rng(seed=1)
+    uv_wavelengths = rng.uniform(-3.0e4, 3.0e4, size=(400, 2))
+
+    arcsec_to_rad = np.pi / 180.0 / 3600.0
+    data = np.exp(
+        -2.0j
+        * np.pi
+        * (
+            uv_wavelengths[:, 0] * -1.5 * arcsec_to_rad
+            + uv_wavelengths[:, 1] * 1.0 * arcsec_to_rad
+        )
+    )
+    noise_map = np.ones(400) + 1j * np.ones(400)
+
+    return mask, _chunks_from(uv_wavelengths, data, noise_map, [0, 150, 400])
+
+
+def test__sparse_terms_from_chunks__offset_origin_mask__nufft_dirty_image_matches_dft():
+    """
+    PyAutoArray#707: re-centring on the source (`phase_centre=(1.0, -1.5)`) puts it at the sky
+    position (0, 0), native pixel (6, 6) of the offset-origin mask, for the NUFFT as for the
+    DFT; without the re-centring both peak at the source's own pixel (4, 3).
+    """
+    pytest.importorskip("nufftax")
+
+    mask, chunks = _offset_origin_point_source_chunks()
+
+    for phase_centre, peak in ((None, (4, 3)), ((1.0, -1.5), (6, 6))):
+        dirty_images = {}
+
+        for transformer_class in (aa.TransformerDFT, aa.TransformerNUFFT):
+            terms = aa.util.inversion_interferometer.sparse_terms_from_chunks(
+                chunks,
+                real_space_mask=mask,
+                transformer_class=transformer_class,
+                phase_centre=phase_centre,
+            )
+            dirty_images[transformer_class.__name__] = terms.dirty_image_native
+
+            assert (
+                np.unravel_index(
+                    np.argmax(terms.dirty_image_native), terms.dirty_image_native.shape
+                )
+                == peak
+            )
+
+        np.testing.assert_allclose(
+            dirty_images["TransformerNUFFT"],
+            dirty_images["TransformerDFT"],
+            rtol=0.0,
+            atol=1.0e-8,
+        )
+
+
+def test__sparse_terms_from_chunks__offset_origin_mask__fine_dirty_image_on_sky_grid():
+    """
+    `dirty_image_fine` is centred on the sky position (0, 0), so on a mask with origin
+    `(y0, x0)` native pixel `(r, c)` sits `(-y0 q / pixel_scale, +x0 q / pixel_scale)` fine
+    pixels further along than on a zero-origin mask, where it equals `dirty_image_native`.
+    """
+    pytest.importorskip("nufftax")
+
+    mask, chunks = _offset_origin_point_source_chunks()
+    q = 2
+
+    terms = aa.util.inversion_interferometer.sparse_terms_from_chunks(
+        chunks, real_space_mask=mask, oversample=q
+    )
+
+    n_y, n_x = mask.shape_native
+    shift_y = int(round(-mask.origin[0] * q / mask.pixel_scales[0]))
+    shift_x = int(round(mask.origin[1] * q / mask.pixel_scales[1]))
+
+    rows = n_y * q - (n_y - 1) * q // 2 + np.arange(n_y) * q + shift_y
+    cols = n_x * q - (n_x - 1) * q // 2 + np.arange(n_x) * q + shift_x
+
+    np.testing.assert_allclose(
+        terms.dirty_image_fine[np.ix_(rows, cols)],
+        terms.dirty_image_native,
+        rtol=0.0,
+        atol=1.0e-8 * np.abs(terms.dirty_image_native).max(),
+    )
+
+
+def test__mask_fingerprint_from__tells_apart_masked_pixels_not_geometry():
+    fingerprint_from = aa.util.inversion_interferometer.mask_fingerprint_from
+
+    mask = aa.Mask2D.all_false(shape_native=(5, 5), pixel_scales=0.5)
+    mask_moved = aa.Mask2D.all_false(
+        shape_native=(5, 5), pixel_scales=1.0, origin=(0.5, 0.5)
+    )
+
+    centre_masked = np.zeros((5, 5), dtype=bool)
+    centre_masked[2, 2] = True
+    mask_centre = aa.Mask2D(mask=centre_masked, pixel_scales=0.5)
+
+    assert len(fingerprint_from(mask)) == 16
+    assert fingerprint_from(mask) == fingerprint_from(mask_moved)
+    assert fingerprint_from(mask) != fingerprint_from(mask_centre)
+    assert fingerprint_from(mask) != fingerprint_from(
+        aa.Mask2D.all_false(shape_native=(25, 1), pixel_scales=0.5)
+    )
+
+
+def test__sparse_terms__add__mask_fingerprint_mismatch_raises():
+    with pytest.raises(aa.exc.InversionException, match="mask_fingerprint"):
+        _terms_with_provenance(mask_fingerprint="0" * 16) + _terms_with_provenance(
+            mask_fingerprint="1" * 16
+        )
+
+    total = _terms_with_provenance() + _terms_with_provenance(mask_fingerprint="a" * 16)
+
+    assert total.mask_fingerprint == "a" * 16
+
+
+def test__sparse_terms_from_chunks__masks_differing_in_masked_pixels__cannot_be_summed():
+    """
+    Two channels imaged on masks of the same `shape_native`, `pixel_scales` and `origin` but
+    with the centre pixel masked in one record different mask fingerprints, so their terms
+    cannot be summed (PyAutoArray#707).
+    """
+    pytest.importorskip("nufftax")
+
+    mask, uv_wavelengths, data, noise_map, _ = _streaming_inputs(n_visibilities=20)
+
+    mask_values = np.asarray(mask).copy()
+    mask_values[5, 5] = True
+    mask_centre = aa.Mask2D(
+        mask=mask_values, pixel_scales=mask.pixel_scales, origin=mask.origin
+    )
+
+    terms = aa.util.inversion_interferometer.sparse_terms_from_chunks(
+        _chunks_from(uv_wavelengths, data, noise_map, [0, 20]),
+        real_space_mask=mask,
+    )
+    terms_centre = aa.util.inversion_interferometer.sparse_terms_from_chunks(
+        _chunks_from(uv_wavelengths, data, noise_map, [0, 20]),
+        real_space_mask=mask_centre,
+    )
+
+    assert terms.mask_fingerprint == (
+        aa.util.inversion_interferometer.mask_fingerprint_from(mask)
+    )
+    assert terms.shape_native == terms_centre.shape_native
+    assert terms.origin == terms_centre.origin
+
+    with pytest.raises(aa.exc.InversionException, match="mask_fingerprint"):
+        terms + terms_centre
