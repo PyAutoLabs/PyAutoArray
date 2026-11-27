@@ -1,4 +1,6 @@
 import logging
+import warnings
+
 import numpy as np
 from typing import Optional, Union
 
@@ -228,18 +230,28 @@ class SimulatorImaging:
             pixel_scales=image.pixel_scales,
         )
 
-        if image_is_convolved:
-            pass
-        elif self.use_real_space_convolution:
-            image = self.psf.convolved_image_via_real_space_from(
-                image=image,
-                blurring_image=None,
-                xp=xp,
-            )
-        else:
-            image = self.psf.convolved_image_from(
-                image=image, blurring_image=None, xp=xp
-            )
+        # The simulator convolves the whole input image with no blurring image on
+        # purpose: there is no data outside the array to supply one. Callers that
+        # need correct edges (e.g. PyAutoGalaxy `via_galaxies_from`, PyAutoLens
+        # `via_tracer_from`) pad the image by the PSF shape and trim it afterwards, so the
+        # padding plays the role of the blurring region. The convolver's
+        # "No blurring_image provided" warning is therefore not actionable here and
+        # is silenced, while it still fires for every other convolver caller.
+        if not image_is_convolved:
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore", message="No blurring_image provided"
+                )
+                if self.use_real_space_convolution:
+                    image = self.psf.convolved_image_via_real_space_from(
+                        image=image,
+                        blurring_image=None,
+                        xp=xp,
+                    )
+                else:
+                    image = self.psf.convolved_image_from(
+                        image=image, blurring_image=None, xp=xp
+                    )
 
         image = image + background_sky_map
 
